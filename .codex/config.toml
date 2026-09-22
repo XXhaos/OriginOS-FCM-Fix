@@ -1,0 +1,23 @@
+# OriginOS FCM Guardian — project-level Codex configuration
+# Main-thread / parent model is intentionally NOT fixed here.
+# Whatever model + reasoning effort the user currently selects in Codex is the Orchestrator.
+# The user may switch the parent between turns/sessions (for example GPT-5.6 Sol high/ultra
+# for routine work, or GPT-6 Astra medium/high for harder architecture/risk decisions).
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+
+# Safe fallback when the parent does not explicitly choose a child model.
+# Important tasks should still specify model + reasoning at spawn time.
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "medium"
+interrupt_message = true
+
+[agents.utility]
+description = "Deterministic mechanical repository work such as file operations, grep, formatting, fixture organization, and simple low-risk edits."
+config_file = "./agents/utility.toml"
+
+[agents.reviewer]
+description = "Read-oriented independent reviewer for correctness, Android lifecycle issues, rollback, security, tests, regressions, and project-rule violations."
+config_file = "./agents/reviewer.toml"

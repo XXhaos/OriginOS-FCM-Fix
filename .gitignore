@@ -1,0 +1,35 @@
+# Android / Gradle
+.gradle/
+build/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Signing / secrets
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+google-services.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Logs / temporary traces
+*.log
+*.tmp
+*.trace
+trace-output/
+diagnostics-private/
+
+# Firebase / local service credentials
+service-account*.json
+firebase-admin*.json
