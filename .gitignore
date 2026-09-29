@@ -6,6 +6,9 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+.kotlin/
+__pycache__/
+*.pyc
 
 # Android Studio / IntelliJ
 .idea/
@@ -33,3 +36,5 @@ diagnostics-private/
 # Firebase / local service credentials
 service-account*.json
 firebase-admin*.json
+.private-transfer/
+*.private-handoff.tar.gz

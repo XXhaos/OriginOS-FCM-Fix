@@ -377,6 +377,30 @@ Reviewer and explorer should normally remain read-only while a worker is writing
 
 # 8. Token and context efficiency
 
+## 8.0 Persistent priority: finish promptly with bounded scope
+
+The user explicitly requires fast completion. Apply this rule to every subsequent turn:
+
+- Start from the recorded next action and define a concrete, finite acceptance target.
+  Complete implementation, applicable verification, cleanup and documentation as one work
+  package; do not turn routine steps into separate user turns or repeated approvals.
+- Prioritize the shortest path to the user's core outcome: FCM reliability and recipient
+  execution. Do not expand frameworks, optional features, fault combinations or research
+  merely because additional work is possible.
+- Reuse passed tests and valid device evidence. Repeat checks only after relevant changes,
+  failures, evidence drift or a specific unresolved acceptance risk. Batch independent work
+  with clear ownership; run device mutations and their dependent checks sequentially.
+- Bound each investigation and name its stopping condition. Once a path is unsupported,
+  record the limitation and use the authorized fallback instead of retrying equivalent work.
+- When a phase runs long, immediately maintain a short exit checklist: passed items,
+  unsupported/degraded items and the exact remaining blockers. Finish that list without
+  adding optional work. A physical-access blocker is not a reason to invent more groundwork.
+- Proceed autonomously within existing authorization. Do not pause for routine engineering
+  choices or ask the user to repeat a settled preference. Report progress briefly and candidly.
+- Speed never permits skipping first-write review, fresh identity/baseline checks, exact
+  rollback, evidence persistence or the user's no-lock/no-reboot rule. Do not relabel an
+  unverified result as passed or promise a completion time without evidence.
+
 Multi-agent work can consume **more total tokens** than a single agent. Use it to reduce expensive-parent context and improve specialization, not merely to increase agent count.
 
 ## 8.1 Do not over-delegate tiny work
@@ -785,6 +809,15 @@ If a feature requires breaking these rules, stop and document the limitation.
 
 ---
 
+## 13.4 UI text entry and input-method checks
+
+Before entering English, package names, URLs, identifiers or commands in a phone/computer UI,
+first ensure the active input method is in English/direct Latin input mode. Prefer native
+paste when supported. Verify the resulting field text exactly before submitting, navigating
+or changing a setting. If an IME converts letters/punctuation or chooses a suggestion, stop,
+correct the field and recheck; never continue on an assumed value. Do not change the default
+keyboard or disable IME protections merely to automate entry.
+
 # 14. Evidence levels
 
 Never represent inference as fact.
@@ -1062,6 +1095,29 @@ When work must stop due to context, quota, device access, or a hard blocker:
 2. then report the precise blocker and next action.
 
 Do not ask the user to repeat information already stored in project files.
+
+## 22.1 Mandatory concise milestone report
+
+按用户最新澄清（2026-09-28），每有关键节点进展或完成时，用三条短句报告以下内容。
+用户要的是方便跟踪项目的粗略工程判断，不是统计概率论文；普通澄清不必反复套完整简报。
+
+- **可行性概率**：给出当前核心目标（FCM 长连接可靠性改善及目标应用被推送拉起处理）的
+  工程估计概率或区间，标注“工程估计，非实测成功率”；不得用检测界面的可实现性代替
+  修复效果的可行性。证据不足时说明不确定性，不承诺必成，不制造精确数字；没有新证据
+  不上调概率，评估变化须说明关键依据并更新 `docs/FEASIBILITY_ASSESSMENT.md`。
+  可以给有依据的主观粗略区间，不要求先有统计模型；变化理由对外最多一句，详细依据留文档。
+  必须明确估计对象和支撑依据，不得机械复制历史区间。已验证的限定能力直接报告事实；
+  确实无法形成负责任的粗估时才简短说明证据不足；不能为了填写概率而制造数字，
+  也不能把阶段推进当作修复成功率上升。
+- **当前进度**：当前 Phase、本轮完成项；没有明确验收分母时不虚构完成百分比。
+- **当前状态**：验证结果或主要未验证项，以及下一步；本轮仅改文档时说明工程状态未变。
+
+Keep the entire closing report short and direct. Distinguish implemented, tested and
+device-verified outcomes; never substitute test counts for actual FCM efficacy.
+
+用户再次明确（2026-09-28）：对外只围绕一个最终结果汇报——OriginOS 锁屏、目标 App
+已退出时，FCM 能使其启动并处理消息，用户最终收到通知。默认不展开多维概率或长篇
+机制分析；详细证据留在 docs，除非用户追问。内部仍保留证据等级、实际条件和修复因果边界。
 
 ---
 
