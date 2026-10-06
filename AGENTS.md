@@ -1,5 +1,31 @@
 # AGENTS.md — OriginOS FCM Guardian
 
+## Latest device-UI override — autonomous unlock and screen care (2026-10-06)
+
+When the user confirms phone connection, the agent may wake/unlock/lock it and handle Guardian/
+necessary test-APK installation without repeated permission requests. This supersedes older
+user-only lock/unlock rules, not reboot authorization, fresh UI checks or system-write review.
+Keep the display off whenever visual interaction is unnecessary; after UI work return Home and
+use `KEYCODE_SLEEP`, then verify the display/lock state. Never disable screen timeout for convenience.
+Unlock through the normal system PIN keypad only: wake, allow the wake animation, swipe up, verify
+the actual keypad/resource IDs and bounds, enter the user-provided credential promptly and confirm,
+allow the confirmation/unlock animation (verified with a 700 ms wait), then check `showing=false`.
+Do not classify the first transition-time read as an incorrect credential or skip needed recovery:
+re-read lock state once after animation before concluding unlock failed. The accepted keypad uses
+`VivoPinkey0`–`VivoPinkey9` and
+`vivo_pin_confirm`; recapture if the UI differs. If it sleeps before input, restart the wake/panel
+steps, not blind credential input. Stop on an incorrect-credential/lockout response; do not guess.
+Do not write the PIN into repository files, commands saved as scripts, screenshots or diagnostic
+logs. Use only the credential supplied in the conversation; if unavailable in a future context,
+ask for it privately instead of inventing or committing a secret. No credential is stored here.
+
+For explicitly screen-off experiments, validate the complete script and exact output formats before
+fault injection, and obtain readiness before a user-assisted send. The observation/recovery
+controller must not contain wake/unlock/UI fallback actions. Keep bounded supervised deadlines;
+announce TEST_ENDED before any necessary authorized UI recovery, and exclude it from quiet-recovery
+evidence. Do not use a short human-response cutoff to silently wake the display. The correctly
+completed 2026-10-06 controlled comparison is closed; do not repeat it without a new concrete reason.
+
 ## Latest workflow override — no speculative failure gate (2026-10-05)
 
 The user confirms there is currently no reported missed-message incident with automatic protection

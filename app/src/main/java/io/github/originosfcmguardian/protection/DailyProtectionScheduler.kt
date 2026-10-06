@@ -12,7 +12,6 @@ import androidx.work.Operation
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import io.github.originosfcmguardian.BuildConfig
-import io.github.originosfcmguardian.device.NormalDeviceProbe
 import java.util.concurrent.TimeUnit
 
 object DailyProtectionScheduler {
@@ -104,11 +103,10 @@ class DailyProtectionEvents(private val context: Context) {
 
     @Suppress("DEPRECATION")
     private fun currentStamps(shizukuAvailable: Boolean?): ProtectionEventStamps {
-        val gmsVersion = NormalDeviceProbe(context).readGmsPackage().versionCode ?: -1L
         return ProtectionEventStamps(
             fingerprint = Build.FINGERPRINT,
             guardianVersion = BuildConfig.VERSION_CODE.toLong(),
-            gmsVersion = gmsVersion,
+            gmsVersion = -1L, // Historical field retained; GMS version is no longer probed.
             shizukuAvailable = shizukuAvailable,
         )
     }
@@ -124,9 +122,7 @@ internal fun decideEvents(
     if (old.fingerprint.isNotEmpty() && old.guardianVersion != current.guardianVersion) {
         add(ProtectionCheckReason.GUARDIAN_VERSION_CHANGED)
     }
-    if (old.fingerprint.isNotEmpty() && old.gmsVersion != current.gmsVersion) {
-        add(ProtectionCheckReason.GMS_VERSION_CHANGED)
-    }
+
 }
 
 internal fun isShizukuAvailableTransition(old: Boolean?, current: Boolean): Boolean =

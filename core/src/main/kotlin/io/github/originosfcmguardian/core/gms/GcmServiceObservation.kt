@@ -25,6 +25,12 @@ object GcmServiceParser {
             Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
         } catch (_: Exception) { return unknown(SourceCompleteness.MALFORMED) }
+        // Only the complete, exact dumpsys response is negative evidence. Extra lines,
+        // failed child exit and stderr are rejected by the parser/reader boundaries.
+        val absence = "No services match: $COMPONENT"
+        if (text == "$absence\n" || text == "$absence\r\n" ||
+            text == "$absence\nUse -h for help.\n" || text == "$absence\r\nUse -h for help.\r\n")
+            return GcmServiceSource(GcmConnectionState.SERVICE_ABSENT, SourceCompleteness.COMPLETE)
         var headers = 0
         var fields = 0
         var state = GcmConnectionState.UNKNOWN

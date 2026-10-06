@@ -49,7 +49,7 @@ class AppsSharedGuidanceTest {
                 AutomaticProtectionTargetState(second.identity, savedAuthorization = true,
                     detail = "Second fixture paused reason", lastCheckedAtMillis = secondTime, lastOutcome = "STILL_STOPPED"))))
         compose.setContent { MaterialTheme {
-            HomeScreen(state = state, onDetect = {}, onShizukuAction = {},
+            HomeScreen(state = state, onShizukuAction = {},
                 onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
                 onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
                 onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},

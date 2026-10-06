@@ -437,6 +437,7 @@ object AutomaticProtectionRuntime {
     }
 
     fun stop(context: Context) {
+        io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.masterOff()
         val app = context.applicationContext
         val cancel = synchronized(this) {
             restoreBlocked = true

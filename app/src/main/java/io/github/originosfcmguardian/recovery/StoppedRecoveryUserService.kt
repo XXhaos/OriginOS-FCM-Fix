@@ -9,7 +9,7 @@ import io.github.originosfcmguardian.autostart.TargetSelectionCodec
 import io.github.originosfcmguardian.autostart.TargetSelectionDecodeResult
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
-import io.github.originosfcmguardian.doze.DozeServiceExpiry
+import io.github.originosfcmguardian.privileged.ShellServiceExpiry
 import io.github.originosfcmguardian.privileged.StoppedIdentityProbeRunner
 import io.github.originosfcmguardian.privileged.StoppedObservationCodec
 import io.github.originosfcmguardian.privileged.StoppedTargetObservation
@@ -33,7 +33,7 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
     private val executor = recoveryWorker("guardian-recovery-server")
     private val callbacks = recoveryWorker("guardian-recovery-callback")
     private val reader = StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort, 4_000)
-    private val expiry = DozeServiceExpiry(Os.getuid(), {
+    private val expiry = ShellServiceExpiry(Os.getuid(), {
         cancel(); executor.shutdownNow(); callbacks.shutdownNow(); reader.close(); System.exit(0)
     }, lifetimeMillis = 45_000)
 

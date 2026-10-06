@@ -1,6 +1,5 @@
 package io.github.originosfcmguardian.diagnostics
 
-import io.github.originosfcmguardian.core.AppOp
 import io.github.originosfcmguardian.core.trace.ProcessTraceKind
 import io.github.originosfcmguardian.monitoring.MonitorSessionStatus
 import io.github.originosfcmguardian.notification.NotificationFactKind
@@ -11,6 +10,7 @@ import io.github.originosfcmguardian.ui.HomeSourceLoadState
 import io.github.originosfcmguardian.ui.HomeUiState
 import io.github.originosfcmguardian.ui.StoppedRecoveryPhase
 import io.github.originosfcmguardian.ui.StoppedRecoveryUiState
+import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryUiState
 
 data class DiagnosticEnvironment(
     val sdkInt: Int,
@@ -115,16 +115,7 @@ data class DiagnosticAutomaticProtection(
 data class CombinedDiagnosticReport(
     val capturedAtEpochMillis: Long,
     val environment: DiagnosticEnvironment,
-    val gmsInstalled: Boolean?,
-    val gmsEnabled: Boolean?,
-    val gmsVersionName: String?,
-    val gmsVersionCode: Long?,
     val shizukuStatus: String,
-    val privilegedDetectionStatus: String?,
-    val appOps: Map<String, String>,
-    val dozeStatus: String?,
-    val dozeSources: List<String>,
-    val pemStatus: String?,
     val targets: List<DiagnosticTarget>?,
     val fcmConfiguration: String,
     val fcmRegistration: String,
@@ -137,6 +128,8 @@ data class CombinedDiagnosticReport(
     val sourceAvailability: Map<String, DiagnosticSourceAvailability>,
     val stoppedRecovery: DiagnosticStoppedRecovery = DiagnosticStoppedRecovery(),
     val automaticProtection: DiagnosticAutomaticProtection = DiagnosticAutomaticProtection(),
+    val fcmRecoveryTrial: FcmRecoveryUiState = FcmRecoveryUiState(),
+    val fcmProtection: io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(),
 )
 
 /**
@@ -153,10 +146,6 @@ fun buildCombinedDiagnosticReport(
     val notifications = state.notificationFacts.events.take(MAX_NOTIFICATION_FACTS)
     val monitorSession = state.deepMonitoring.session
     val monitorEvents = monitorSession?.events?.take(MAX_MONITOR_EVENTS).orEmpty()
-    val detection = state.report
-    val knownGms = state.gms?.takeIf {
-        state.normalGmsLoadState == HomeSourceLoadState.LOADED && it.installed != null
-    }
     val recovery = state.stoppedRecovery
     val recoveryRecord = if (recovery.loaded && !recovery.storageBlocked) {
         val identity = recovery.recordIdentity
@@ -178,20 +167,6 @@ fun buildCombinedDiagnosticReport(
     val automatic = state.automaticProtection
 
     val sources = linkedMapOf(
-        "normalGms" to when (state.normalGmsLoadState) {
-            HomeSourceLoadState.LOADING -> DiagnosticSourceAvailability.LOADING
-            HomeSourceLoadState.FAILED -> DiagnosticSourceAvailability.UNAVAILABLE
-            HomeSourceLoadState.LOADED -> if (state.gms?.installed == null) {
-                DiagnosticSourceAvailability.UNAVAILABLE
-            } else {
-                DiagnosticSourceAvailability.AVAILABLE
-            }
-        },
-        "privilegedDetection" to if (detection == null) {
-            DiagnosticSourceAvailability.MISSING
-        } else {
-            DiagnosticSourceAvailability.AVAILABLE
-        },
         "targetSelection" to when {
             state.targetSelectionStoreCorrupt -> DiagnosticSourceAvailability.CORRUPT
             state.targetSelectionLoadState == HomeSourceLoadState.LOADING ->
@@ -254,18 +229,7 @@ fun buildCombinedDiagnosticReport(
             model = environment.model.take(MAX_TEXT_LENGTH),
             guardianVersionName = environment.guardianVersionName.take(MAX_TEXT_LENGTH),
         ),
-        gmsInstalled = knownGms?.installed,
-        gmsEnabled = knownGms?.enabled,
-        gmsVersionName = knownGms?.versionName?.take(MAX_TEXT_LENGTH),
-        gmsVersionCode = knownGms?.versionCode,
         shizukuStatus = state.shizuku.status.name,
-        privilegedDetectionStatus = detection?.privilegedAccess?.name,
-        appOps = AppOp.entries.associate { operation ->
-            operation.name to (detection?.appOps?.get(operation)?.status?.name ?: UNKNOWN)
-        },
-        dozeStatus = detection?.doze?.status?.name,
-        dozeSources = detection?.doze?.sources?.map { it.name }?.sorted().orEmpty(),
-        pemStatus = detection?.pem?.status?.name,
         targets = if (
             state.targetSelectionStoreCorrupt ||
             state.targetSelectionLoadState != HomeSourceLoadState.LOADED
@@ -337,6 +301,8 @@ fun buildCombinedDiagnosticReport(
             state.dailyProtectionLoadState == HomeSourceLoadState.LOADED
         ) state.dailyProtectionReport?.checkedAtEpochMillis else null,
         sourceAvailability = sources,
+        fcmRecoveryTrial = state.fcmRecovery.copy(events = state.fcmRecovery.events.takeLast(64)),
+        fcmProtection = state.fcmProtection.copy(latestObservation = null),
         stoppedRecovery = DiagnosticStoppedRecovery(
             loaded = recovery.loaded,
             storageBlocked = recovery.storageBlocked,
@@ -390,25 +356,7 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
         field("guardianVersionName", report.environment.guardianVersionName)
         field("guardianVersionCode", report.environment.guardianVersionCode, comma = false)
         append('}')
-        append(",\"gms\":{")
-        field("installed", report.gmsInstalled)
-        field("enabled", report.gmsEnabled)
-        field("versionName", report.gmsVersionName)
-        field("versionCode", report.gmsVersionCode, comma = false)
-        append('}')
         append(",\"shizukuStatus\":").string(report.shizukuStatus)
-        append(",\"privilegedDetection\":{")
-        field("status", report.privilegedDetectionStatus)
-        append("\"appOps\":{")
-        report.appOps.entries.forEachIndexed { index, entry ->
-            if (index > 0) append(',')
-            string(entry.key).append(':').string(entry.value)
-        }
-        append("},\"dozeStatus\":").nullableString(report.dozeStatus)
-        append(",\"dozeSources\":")
-        stringArray(report.dozeSources)
-        append(",\"pemStatus\":").nullableString(report.pemStatus)
-        append('}')
         append(",\"targets\":")
         report.targets?.let { targets ->
             append('[')
@@ -470,6 +418,7 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             append('}')
         } ?: append("null")
         append(",\"dailyProtection\":{")
+        field("scope", "SELECTED_APP_INSTALLATION_IDENTITY_ONLY")
         field("status", report.dailyProtectionStatus)
         field("checkedAtEpochMillis", report.dailyProtectionCheckedAtEpochMillis, comma = false)
         append('}')
@@ -511,6 +460,52 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             string(entry.key).append(':').string(entry.value.name)
         }
         append('}')
+        append(",\"fcmProtection\":{")
+        field("configured", report.fcmProtection.configured)
+        field("storageBlocked", report.fcmProtection.storageBlocked)
+        field("requiresConfirmation", report.fcmProtection.requiresConfirmation)
+        field("maintenance", report.fcmProtection.maintenance.name)
+        field("confirmationFailure", report.fcmProtection.confirmationFailure?.name)
+        field("recoveryReady", report.fcmProtection.recoveryReady, comma = false)
+        append('}')
+        append(",\"fcmRecoveryTrial\":{")
+        field("configured", report.fcmRecoveryTrial.configured)
+        field("storageBlocked", report.fcmRecoveryTrial.storageBlocked)
+        field("requiresConfirmation", report.fcmRecoveryTrial.requiresConfirmation)
+        field("powerReferenceScope", "WHOLE_PHONE_BATTERY_AND_GUARDIAN_MAIN_PROCESS_CPU_REFERENCE_ONLY")
+        field("powerReferenceLimitations", "Battery is whole-phone correlation, not Guardian-attributed mAh or energy. CPU excludes Shizuku/shell/GMS/radio; compare only identical processInstanceId with continuous nondecreasing process age and CPU.")
+        append("\"events\":[")
+        report.fcmRecoveryTrial.events.takeLast(64).forEachIndexed { index, event ->
+            if (index > 0) append(',')
+            append('{')
+            field("atEpochMillis", event.atMillis)
+            field("elapsedMillis", event.elapsedMillis)
+            field("source", "GUARDIAN_FCM_TRIAL")
+            field("action", event.action.name)
+            field("service", event.service.name)
+            field("completeness", event.completeness.name)
+            field("socket", event.socket.name)
+            field("eligible", event.eligible)
+            field("eligibility", event.eligibility.name)
+            field("requestStatus", event.status?.name)
+            field("requestReason", event.reason?.name)
+            field("observationUnknownReason", event.observationUnknownReason?.name)
+            append("\"powerReference\":")
+            event.power?.let { p ->
+                append('{')
+                field("wholePhoneBatteryPercent", p.batteryPercent?.toLong())
+                field("chargingStatus", p.chargingStatus?.name)
+                field("pluggedSource", p.pluggedSource?.name)
+                field("deviceInteractive", p.interactive)
+                field("deviceIdle", p.deviceIdle)
+                field("guardianMainProcessCpuMillis", p.mainProcessCpuMillis)
+                field("processAgeMillis", p.processAgeMillis)
+                field("processInstanceId", p.processInstanceId, comma = false)
+                append('}')
+            } ?: append("null")
+            append('}')
+        }
+        append("]}")
         append(",\"unknowns\":{")
         field("fcmToNotificationCausality", UNKNOWN)
         field("appWakeCause", UNKNOWN)
@@ -614,7 +609,7 @@ private const val MAX_MONITOR_EVENTS = 500
 private const val MAX_LABEL_LENGTH = 80
 private const val MAX_TEXT_LENGTH = 128
 internal const val MAX_REPORT_BYTES = 64 * 1024
-internal const val DIAGNOSTIC_REPORT_SCHEMA = "guardian.combined-diagnostic.v3"
+internal const val DIAGNOSTIC_REPORT_SCHEMA = "guardian.combined-diagnostic.v7"
 private const val LIMITATION_SUMMARY_ONLY =
     "This report contains bounded summaries of already known app state and no raw notification or process events."
 private const val LIMITATION_CAUSALITY =
@@ -632,6 +627,7 @@ internal val DIAGNOSTIC_REPORT_LIMITATIONS = listOf(
     LIMITATION_CORRUPT,
     LIMITATION_SAMPLE_TIMES,
     LIMITATION_LIVE_STATE,
+    "Daily protection checks selected app installation identity only, not stopped flags, FCM connectivity, or notification delivery; retired checks are UNKNOWN.",
     "Recovery record time is journal creation time, not command completion or readback time.",
     "RECONCILED describes a later read-only observation, not success of the original command.",
     "A historical package recovery record does not prove the current installation state or notification delivery.",

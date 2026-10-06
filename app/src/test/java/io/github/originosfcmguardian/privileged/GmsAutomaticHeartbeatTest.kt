@@ -38,6 +38,7 @@ class GmsAutomaticHeartbeatTest {
     }
     private class Child(text: String, private var alive: Boolean = false) : Process() {
         var destroyed = false
+        val destruction = CountDownLatch(1)
         private val out = ByteArrayInputStream(text.toByteArray())
         override fun getInputStream() = out
         override fun getErrorStream() = ByteArrayInputStream(byteArrayOf())
@@ -46,7 +47,7 @@ class GmsAutomaticHeartbeatTest {
         override fun exitValue(): Int { check(!alive); return 0 }
         override fun waitFor() = exitValue()
         override fun waitFor(timeout: Long, unit: TimeUnit): Boolean { if (alive) Thread.sleep(unit.toMillis(timeout)); return !alive }
-        override fun destroy() { destroyed = true }
+        override fun destroy() { destroyed = true; destruction.countDown() }
         override fun destroyForcibly(): Process { alive = false; return this }
     }
     @Test fun armRequiresExclusiveGuardianCallerAndExactFreshBinding() {
@@ -160,7 +161,9 @@ class GmsAutomaticHeartbeatTest {
             sender.start(); assertTrue(entered.await(1, TimeUnit.SECONDS))
             assertTrue(runner.revokeAutomatic(caller, 1, session.id))
             sender.join(1000)
-            assertFalse(sender.isAlive); assertEquals(GmsHeartbeatStatus.UNKNOWN, result.get().status); assertTrue(child.destroyed)
+            assertFalse(sender.isAlive); assertEquals(GmsHeartbeatStatus.UNKNOWN, result.get().status)
+            // The bounded caller can return before the worker's asynchronous cleanup finishes.
+            assertTrue(child.destruction.await(1, TimeUnit.SECONDS)); assertTrue(child.destroyed)
         } finally { runner.close() }
     }
     @Test fun manualAndAutoShareBusyWorkerAndUnknownOwnerCannotRearmUntilItExits() {

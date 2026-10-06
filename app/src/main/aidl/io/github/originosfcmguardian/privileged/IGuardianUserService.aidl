@@ -2,6 +2,7 @@ package io.github.originosfcmguardian.privileged;
 
 import android.os.Bundle;
 import android.os.IBinder;
+import io.github.originosfcmguardian.privileged.IFcmRecoveryAuthority;
 
 interface IGuardianUserService {
     void destroy() = 16777114;
@@ -19,4 +20,6 @@ interface IGuardianUserService {
     boolean revokeAutomaticGmsHeartbeat(long generation, String sessionId) = 9;
     // Fixed read-only caller identity proof. Current UID/PID are captured from Binder, never supplied.
     Bundle qualifyHeartbeatCaller(long requestId, String previousIdentity) = 10;
+    // Separate trial consent; exact fixed empty SenderProxy SEND only.
+    Bundle requestFcmRecovery(long requestId, String expectedBinding, IFcmRecoveryAuthority authority) = 11;
 }

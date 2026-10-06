@@ -30,6 +30,8 @@ data class GmsAutoHeartbeatUiState(
 )
 
 internal interface AutomaticHeartbeatBackend {
+    val bundledEpochRequired: Boolean get() = false
+    fun bundleAuthorized(epoch: String?): Boolean = !bundledEpochRequired
     /** Bounded enum diagnosis only; never exposes the observation's raw identity/dump. */
     val lastBindingRejection: GmsHeartbeatReason? get() = null
     val callerQualificationRequired: Boolean get() = false
@@ -45,6 +47,8 @@ internal interface AutomaticHeartbeatBackend {
 
 internal data class HeartbeatHost(val id: String, val eligible: suspend () -> Boolean,
     val backend: AutomaticHeartbeatBackend)
+
+internal enum class BundledHeartbeatProvision { DEFERRED, ASSOCIATED, BLOCKED }
 
 /** Monotonic, completion-based deadlines. A long sleep never creates historical catch-up attempts. */
 internal class HeartbeatDeadline {
@@ -202,6 +206,24 @@ internal class GmsAutoHeartbeatController(
 
     suspend fun confirm(): Boolean = confirmInternal(durable = false)
     suspend fun confirmDurable(): Boolean = confirmInternal(durable = true)
+    /** Only the bundled coordinator calls this. Exact child epoch reconciles parent/child crash windows.
+     * Once ANY child consent was saved, never re-confirm this epoch on later polls. */
+    suspend fun provisionBundled(epoch: String): BundledHeartbeatProvision {
+        require(canonicalUuid(epoch)); initialize()
+        val existing = io.withLock { store.read() }
+        if (existing?.durableConsent?.epoch == epoch) {
+            synchronized(this) { host?.id }?.let(::hostEligible)
+            return if (existing.resumeBlock != null || existing.pendingArm != null || existing.pendingAttempt != null ||
+                existing.currentEpochUnknown() || existing.pause in setOf(HeartbeatPause.OFF_PENDING, HeartbeatPause.RECONFIRM))
+                BundledHeartbeatProvision.BLOCKED else BundledHeartbeatProvision.ASSOCIATED
+        }
+        val created = confirmInternal(durable = true, bundledEpoch = epoch)
+        if (created) return BundledHeartbeatProvision.ASSOCIATED
+        val after = io.withLock { store.read() }
+        return if (after?.durableConsent?.epoch == epoch || mutable.value.stopPending || mutable.value.resumeBlocked ||
+            runCatching { store.unsettledOperation() }.getOrDefault(true)) BundledHeartbeatProvision.BLOCKED
+            else BundledHeartbeatProvision.DEFERRED
+    }
     suspend fun manualHeartbeatAllowed(): Boolean {
         initialize()
         if (runCatching { store.unsettledOperation() }.getOrDefault(true)) return false
@@ -210,7 +232,7 @@ internal class GmsAutoHeartbeatController(
     fun manualHeartbeatAllowedNow(): Boolean = initialized && !mutable.value.manualBlocked && !mutable.value.busy
 
     private suspend fun confirmInternal(durable: Boolean, automatic: Boolean = false,
-        onQualificationStarted: (() -> Unit)? = null): Boolean {
+        onQualificationStarted: (() -> Unit)? = null, bundledEpoch: String? = null): Boolean {
         initialize()
         return io.withLock {
             val entry = synchronized(this) {
@@ -242,6 +264,11 @@ internal class GmsAutoHeartbeatController(
             var armOperation: String? = null
             try {
                 val previous = store.read()
+                val childEpoch = if (automatic) previous?.durableConsent?.epoch else bundledEpoch
+                if (owner.backend.bundledEpochRequired && !owner.backend.bundleAuthorized(childEpoch)) {
+                    publish(previous, "未取得当前统一授权的维护子授权；旧分开授权不升级")
+                    return@withLock false
+                }
                 val cold = automatic && synchronized(this) { coldEpoch != null }
                 val resumeEpoch = synchronized(this) { if (cold) coldEpoch else closedEpoch }
                 if (automatic && (previous == null || previous.durableConsent?.epoch != resumeEpoch ||
@@ -309,12 +336,13 @@ internal class GmsAutoHeartbeatController(
                     blockResume(requireNotNull(previous), HeartbeatResumeBlock.IDENTITY_CHANGED)
                     return@withLock false
                 }
-                if (!owner.eligible() || !current(owner, observedRevision)) {
+                if (!owner.eligible() || !current(owner, observedRevision) ||
+                    owner.backend.bundledEpochRequired && !owner.backend.bundleAuthorized(childEpoch)) {
                     publish(previous, "核对 GMS 后目标保护会话或运行资格已变化，未取得自动写权")
                     return@withLock false
                 }
                 prepared = if (automatic) store.prepareResume(requireNotNull(previous), requireNotNull(requireNotNull(previous).durableConsent).epoch, caller)
-                    else store.prepareConfirmation(previous, digest, durable, caller)
+                    else store.prepareConfirmation(previous, digest, durable, caller, bundledEpoch)
                 if (prepared == null) {
                     publish(previous, "心跳配置代际已变化或旧停止尚未确认，未取得自动写权")
                     return@withLock false
@@ -324,14 +352,16 @@ internal class GmsAutoHeartbeatController(
                     if (!automatic) { consentEpoch = prepared.durableConsent?.epoch; blockedLocally = false; localBlock = null; resumeNotBefore = 0 }
                     if (!automatic) { closedEpoch = null; coldEpoch = null }
                 } }
-                if (!owner.eligible() || !current(owner, observedRevision)) {
+                if (!owner.eligible() || !current(owner, observedRevision) ||
+                    owner.backend.bundledEpochRequired && !owner.backend.bundleAuthorized(prepared.durableConsent?.epoch)) {
                     if (automatic) prepared = store.abortUnarmedResume(prepared.generation) ?: prepared
                     publish(prepared, if (automatic) "宿主尚未合格，接续延后至少15分钟；未建立新会话" else "宿主已变化，需重新确认")
                     return@withLock false
                 }
                 armOperation = UUID.randomUUID().toString()
                 prepared = store.beginArm(prepared.generation, armOperation) ?: error("Arm intent root changed")
-                if (!owner.eligible() || !current(owner, observedRevision)) {
+                if (!owner.eligible() || !current(owner, observedRevision) ||
+                    owner.backend.bundledEpochRequired && !owner.backend.bundleAuthorized(prepared.durableConsent?.epoch)) {
                     // No IPC was invoked, but interrupted admission stays fail closed.
                     blockResume(prepared, HeartbeatResumeBlock.LEFTOVER_PENDING)
                     return@withLock false
@@ -453,7 +483,8 @@ internal class GmsAutoHeartbeatController(
                     if (!live(value)) break
                     if (wasManual) { deadline.reset(clock()); continue }
                     if (deadline.remaining(clock()) > 0) continue
-                    if (!value.host.eligible()) {
+                    if (!value.host.eligible() || value.host.backend.bundledEpochRequired &&
+                        !value.host.backend.bundleAuthorized(io.withLock { store.read()?.durableConsent?.epoch })) {
                         mutable.value = mutable.value.copy(detail = "宿主暂未满足运行条件，至少15分钟后再核对；未发送")
                         deadline.reset(clock())
                         continue

@@ -9,6 +9,47 @@ import org.junit.Test
 import java.util.UUID
 
 class GmsAutoHeartbeatControllerTest {
+    @Test fun bundledAbsentFirstProvisionDefersWithoutChildThenAssociatesExactlyOnce() = runBlocking {
+        Fixture().use { f ->
+            val epoch = UUID.randomUUID().toString()
+            f.backend.bindingDigest = null
+            assertEquals(BundledHeartbeatProvision.DEFERRED, f.controller.provisionBundled(epoch))
+            assertNull(f.storage.bytes); assertEquals(0, f.backend.arms)
+            f.backend.bindingDigest = f.backend.digest
+            assertEquals(BundledHeartbeatProvision.ASSOCIATED, f.controller.provisionBundled(epoch))
+            assertEquals(epoch, GmsAutoHeartbeatStore(f.storage).read()!!.durableConsent!!.epoch)
+            assertEquals(BundledHeartbeatProvision.ASSOCIATED, f.controller.provisionBundled(epoch))
+            assertEquals(1, f.backend.arms); assertEquals(0, f.backend.requests)
+            assertEquals(900_000L, f.waits.last())
+        }
+    }
+    @Test fun bundledSavedChildCrashAndUnknownCannotBeReconfirmedByNextPoll() = runBlocking {
+        Fixture().use { f ->
+            val epoch = UUID.randomUUID().toString(); val store = GmsAutoHeartbeatStore(f.storage)
+            val prepared = store.prepareConfirmation(null, f.backend.digest, true, bundledEpoch = epoch)!!
+            // Parent already recorded this epoch; process died after child consent, before ARM.
+            assertEquals(BundledHeartbeatProvision.BLOCKED, f.controller.provisionBundled(epoch))
+            assertEquals(0, f.backend.arms)
+            assertEquals(prepared.durableConsent!!.epoch, store.read()!!.durableConsent!!.epoch)
+        }
+        Fixture().use { f ->
+            val epoch = UUID.randomUUID().toString()
+            assertEquals(BundledHeartbeatProvision.ASSOCIATED, f.controller.provisionBundled(epoch))
+            f.backend.result = GmsHeartbeatResult(1, GmsHeartbeatStatus.UNKNOWN, GmsHeartbeatReason.TIMED_OUT)
+            f.due()
+            assertEquals(BundledHeartbeatProvision.BLOCKED, f.controller.provisionBundled(epoch))
+            assertEquals(1, f.backend.arms)
+        }
+    }
+    @Test fun bundledOFFWhileFreshBindingIsPendingPreventsArm() = runBlocking {
+        Fixture().use { f ->
+            f.backend.bindingWait = CompletableDeferred()
+            val request = async { f.controller.provisionBundled(UUID.randomUUID().toString()) }
+            yield(); f.controller.disable(); f.backend.bindingWait!!.complete(Unit)
+            request.await(); yield()
+            assertEquals(0, f.backend.arms); assertFalse(f.controller.state.value.active)
+        }
+    }
     private class Backend : AutomaticHeartbeatBackend {
         val digest = "a".repeat(64)
         var arms = 0; var requests = 0; var revokes = 0

@@ -189,7 +189,7 @@ class DiagnosticRecoveryReportTest {
     }
 
     @Test
-    fun jsonRetainsOldSectionsAndPreparedBytesCaptureTheNewSnapshotOnce() {
+    fun jsonRetainsSupportedSectionsAndPreparedBytesCaptureTheNewSnapshotOnce() {
         val before = report(historical())
         val encoded = encodeCombinedDiagnosticReport(before)
         val prepared = PreparedCombinedDiagnosticExport()
@@ -201,11 +201,13 @@ class DiagnosticRecoveryReportTest {
         assertArrayEquals(encodeCombinedDiagnosticReport(before), ready.bytes)
         assertEquals(CombinedDiagnosticExportResult.Missing, prepared.consume(true))
         val json = ready.bytes.toString(Charsets.UTF_8)
-        listOf("environment", "gms", "shizukuStatus", "privilegedDetection", "targets", "fcm",
+        listOf("environment", "shizukuStatus", "targets", "fcm",
             "notificationFacts", "recentMonitor", "dailyProtection", "sourceAvailability", "unknowns", "limitations",
             "stoppedRecovery", "automaticProtection")
             .forEach { key -> assertTrue(key, json.contains("\"$key\":")) }
-        assertTrue(json.startsWith("{\"schema\":\"guardian.combined-diagnostic.v3\""))
+        assertFalse(json.contains("\"gms\":"))
+        assertFalse(json.contains("\"privilegedDetection\":"))
+        assertTrue(json.startsWith("{\"schema\":\"guardian.combined-diagnostic.v7\""))
         assertTrue(ready.bytes.size <= MAX_REPORT_BYTES)
     }
 

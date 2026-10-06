@@ -76,10 +76,8 @@ foreach ($variant in @('debug', 'release')) {
         if (@($archive.Entries | Where-Object { $_.FullName -match 'libprivkitstarter|priv-kit-attribution' }).Count -ne 0) {
             throw "$variant must not package cancelled PrivKit runtime/assets."
         }
-        $ofdLibraries = @($archive.Entries | Where-Object { $_.FullName -match '(^|/)libguardian_ofd\.so$' })
-        if ($ofdLibraries.Count -ne 1 -or $ofdLibraries[0].FullName -ne 'lib/arm64-v8a/libguardian_ofd.so' -or
-            $ofdLibraries[0].Length -le 0) {
-            throw "$variant must package exactly the fixed arm64 OFD primitive."
+        if (@($archive.Entries | Where-Object { $_.FullName -match 'libguardian_ofd\.so$' }).Count -ne 0) {
+            throw "$variant must not package the removed GMS Doze native primitive."
         }
     } finally { $archive.Dispose() }
     $packages = & $apkAnalyzer dex packages --defined-only $apkPath 2>&1
@@ -91,24 +89,8 @@ foreach ($variant in @('debug', 'release')) {
     if ($variant -eq 'release' -and $defined -match 'DebugHeartbeatContinuityReceiver') {
         throw 'Release DEX must not contain the heartbeat acceptance driver.'
     }
-    if ($variant -eq 'release' -and $defined -match 'GuardianOfdScratch|DozeOfdReadOnly|DozeOfdFixture|DozeOfdFailure|DozeOfdResourceHandoff|DozeOfdIdentity|DozeOfdAppHeldProbe|IDozeOfdReadOnly') {
-        throw 'Release DEX must not contain OFD scratch qualification entry points.'
-    }
-    if ($variant -eq 'release' -and $defined -match 'GuardianBrokerQualification|BrokerQualificationIdentity') {
-        throw 'Release DEX must not contain single-broker qualification entry points.'
-    }
-    # Only reflection entry names/constructors must stay stable. Generated AIDL Java types may be
-    # renamed/inlined by R8; their names are not the descriptor/transaction wire contract.
-    foreach ($fixedBrokerName in @(
-        'io.github.originosfcmguardian.doze.gmsbroker.GmsManualAddBrokerUserService',
-        'io.github.originosfcmguardian.doze.gmsbroker.GmsManualRemoveBrokerUserService',
-        'io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleAddUserService',
-        'io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleRemoveUserService'
-    )) {
-        if ($defined -notmatch [regex]::Escape("$fixedBrokerName <init>()") -or
-            $defined -notmatch [regex]::Escape("$fixedBrokerName <init>(android.content.Context)")) {
-            throw "$variant must retain both fixed GMS broker entry constructors: $fixedBrokerName."
-        }
+    if ($defined -match 'io\.github\.originosfcmguardian\.(doze|gmsconfig|data\.journal)|io\.github\.originosfcmguardian\.core\.(doze|journal)|ReadOnlyDetector|RepairPlanner') {
+        throw "$variant must not contain removed standalone GMS protection/configuration classes."
     }
     $results += [pscustomobject]@{
         variant = $variant
@@ -117,10 +99,7 @@ foreach ($variant in @('debug', 'release')) {
         preservedPrivateProtectionAndTile = 'PASS'
         tileLongPressMainActivity = 'PASS'
         heartbeatDriverDebugOnlyDumpBoundary = 'PASS'
-        fixedArm64OfdNative = 'PASS'
-        ofdFixtureReleaseExclusion = if ($variant -eq 'release') { 'PASS' } else { 'DEBUG_ONLY' }
-        brokerFixtureReleaseExclusion = if ($variant -eq 'release') { 'PASS' } else { 'DEBUG_ONLY' }
-        cycleBrokerReflectionEntries = 'PASS'
+        noStandaloneGmsProtectionOrNative = 'PASS'
         apkSha256 = (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
@@ -128,11 +107,8 @@ $mapping = Get-Content -LiteralPath (Join-Path $Repository 'app/build/outputs/ma
 if ($mapping -match '(?m)^(priv\.kit\.|io\.github\.originosfcmguardian\.(activation|privilegebridge)\.|io\.github\.originosfcmguardian\.recovery\.(AppOwnedRecovery|PrivKitRecovery))') {
     throw 'Release mapping still originates from cancelled internal code.'
 }
-if ($mapping -match '(?m)^io\.github\.originosfcmguardian\.doze\.ofd\.(GuardianOfdScratch|DozeOfdReadOnly|DozeOfdFixture|DozeOfdFailure|DozeOfdResourceHandoff|DozeOfdIdentity|DozeOfdAppHeldProbe|IDozeOfdReadOnly)') {
-    throw 'Release mapping must not originate from OFD scratch qualification code.'
-}
-if ($mapping -match '(?m)^io\.github\.originosfcmguardian\.doze\.broker\.') {
-    throw 'Release mapping must not originate from single-broker qualification code.'
+if ($mapping -match '(?m)^io\.github\.originosfcmguardian\.(doze|gmsconfig|data\.journal|core\.(doze|journal))\.') {
+    throw 'Release mapping must not originate from removed standalone GMS protection code.'
 }
 $seeds = Get-Content -LiteralPath (Join-Path $Repository 'app/build/outputs/mapping/release/seeds.txt') -Raw
 $entryPoints = @(

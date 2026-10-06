@@ -65,6 +65,7 @@ internal fun gmsServiceHeadline(sample: GmsConnectionObservation.Sample, nowElap
             source.state == GcmConnectionState.UNKNOWN -> "GMS 自报连接状态未知"
         nowElapsed < sampledElapsed || nowElapsed - sampledElapsed > 30_000 -> "历史自报状态已过期；当前连接未知"
         source.state == GcmConnectionState.REPORTED_CONNECTED -> "GMS 自报：已连接"
+        source.state == GcmConnectionState.SERVICE_ABSENT -> "本次完整读取：FCM 服务不存在"
         else -> "GMS 自报：已断开"
     }
 }

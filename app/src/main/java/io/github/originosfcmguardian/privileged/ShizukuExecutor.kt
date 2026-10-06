@@ -10,7 +10,6 @@ import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.core.CommandResult
 import io.github.originosfcmguardian.core.PrivilegedExecutor
 import io.github.originosfcmguardian.core.SafeCommand
-import io.github.originosfcmguardian.core.SafeCommand.GetAppOpByUid
 import io.github.originosfcmguardian.core.SafeCommand.GetTargetProcessEvents
 import io.github.originosfcmguardian.core.trace.ProcessTraceCodec
 import kotlinx.coroutines.CancellationException
@@ -84,61 +83,49 @@ class ShizukuExecutor private constructor(
     private val gmsObservationRpc = GmsObservationRpc()
     private val gmsHeartbeatRevokeRpc = GmsObservationRpc()
     private val autoOwners = ConcurrentHashMap<Long, GmsAutoRemoteOwner>()
+    @Volatile private var fcmRecoveryCall: Pair<IGuardianUserService, Long>? = null
+
+    internal fun cancelFcmRecovery() {
+        fcmRecoveryCall?.let { (remote, id) -> gmsHeartbeatRevokeRpc.cleanupBestEffort { remote.cancel(id) } }
+    }
+
+    internal suspend fun requestFcmRecovery(expectedBinding: String, authority: IFcmRecoveryAuthority):
+        io.github.originosfcmguardian.core.gms.FcmRecoveryResult {
+        val id = nextRequestId()
+        fun unknown() = io.github.originosfcmguardian.core.gms.FcmRecoveryResult(id,
+            io.github.originosfcmguardian.core.gms.FcmRecoveryStatus.UNKNOWN,
+            io.github.originosfcmguardian.core.gms.FcmRecoveryReason.BRIDGE_UNAVAILABLE)
+        if (!operationMutex.tryLock()) return io.github.originosfcmguardian.core.gms.FcmRecoveryResult(id,
+            io.github.originosfcmguardian.core.gms.FcmRecoveryStatus.NOT_SENT,
+            io.github.originosfcmguardian.core.gms.FcmRecoveryReason.BUSY)
+        var began = false
+        return try {
+            withTimeout(CLIENT_CALL_TIMEOUT_MILLIS) {
+                if (!session.isOpen() || !gmsObservationRpc.bounded { shellAvailable() }) return@withTimeout unknown()
+                val bound = ensureBound(gmsBounded = true)
+                if (!session.beginCall(bound, id)) return@withTimeout unknown()
+                began = true; fcmRecoveryCall = bound.remote to id
+                gmsObservationRpc.bounded {
+                    if (bound.remote.serviceUid != SHELL_UID) unknown()
+                    else io.github.originosfcmguardian.core.gms.FcmRecoveryCodec.decode(bound.remote
+                        .requestFcmRecovery(id, expectedBinding, authority).getString(
+                            io.github.originosfcmguardian.core.gms.FcmRecoveryCodec.KEY), id)
+                }
+            }
+        } catch (_: Throwable) { cancelFcmRecovery(); unknown() }
+        finally { fcmRecoveryCall = null; if (began) session.finishCall(id); operationMutex.unlock() }
+    }
 
     fun openSession() = session.open()
 
-    /** Dedicated short-lived config caller; every synchronous Binder hop is cancellably bounded. */
-    internal fun gmsConfigurationExecutor(): PrivilegedExecutor = object : PrivilegedExecutor {
-        override suspend fun isAvailable(): Boolean = gmsObservationRpc.bounded { shellAvailable() }
-        override suspend fun getUid(): Int? = gmsObservationRpc.bounded {
-            if (session.isOpen() && Shizuku.pingBinder()) Shizuku.getUid() else null
-        }
-        override suspend fun exec(command: SafeCommand): CommandResult {
-            require(command == SafeCommand.GetCurrentUser || command == SafeCommand.GetBuildFingerprint ||
-                command == SafeCommand.GetGmsPackage || command == SafeCommand.GetGmsEnabledPackage ||
-                command == SafeCommand.GetDeviceIdleWhitelist || command is SafeCommand.GetGmsAppOpByPackage ||
-                command is GetAppOpByUid)
-            return operationMutex.withLock {
-                if (!gmsObservationRpc.bounded { shellAvailable() })
-                    return@withLock bridgeError(command, "GMS configuration source unavailable")
-                val bound = ensureBound(gmsBounded = true)
-                val service = bound.remote
-                if (gmsObservationRpc.bounded { service.serviceUid } != SHELL_UID)
-                    return@withLock bridgeError(command, "Unexpected UserService UID")
-                val requestId = nextRequestId()
-                if (!session.beginCall(bound, requestId))
-                    return@withLock bridgeError(command, "Configuration session closed")
-                try {
-                    val arguments = ipcArguments(command)
-                    val result = gmsObservationRpc.bounded {
-                        service.execute(requestId, command.operationId, arguments.uid, arguments.packageName)
-                    }.toCommandResult(command)
-                    if (session.currentBound() == bound) result else bridgeError(command, "Configuration binding changed")
-                } catch (cancelled: CancellationException) {
-                    retireGmsConfiguration() // Retire while request is registered, so teardown cancels the remote command.
-                    throw cancelled
-                } finally {
-                    session.finishCall(requestId)
-                }
-            }
-        }
+    /** Retire an FCM observation binding before bounded asynchronous cleanup. */
+    internal fun retireObservationSession() {
+        val teardown = session.close()
+        gmsObservationRpc.cleanupBestEffort { applyTeardown(teardown) }
     }
 
     private fun shellAvailable(): Boolean = session.isOpen() && Shizuku.pingBinder() &&
         Shizuku.getUid() == SHELL_UID && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-
-    internal fun closeGmsConfiguration() {
-        retireGmsConfiguration()
-        gmsObservationRpc.close()
-    }
-
-    internal fun retireGmsConfiguration() {
-        val teardown = session.close() // Invalidate admission synchronously before asynchronous cleanup.
-        gmsObservationRpc.cleanupBestEffort { applyTeardown(teardown) }
-    }
-
-    internal suspend fun <T> boundedGmsConfigurationMetadata(read: () -> T): T =
-        gmsObservationRpc.bounded(read)
 
     override suspend fun isAvailable(): Boolean {
         if (!session.isOpen()) return false
@@ -693,7 +680,6 @@ class ShizukuExecutor private constructor(
 internal data class IpcArguments(val uid: Int, val packageName: String?)
 
 internal fun ipcArguments(command: SafeCommand): IpcArguments = when (command) {
-    is GetAppOpByUid -> IpcArguments(command.uid, null)
     is GetTargetProcessEvents -> IpcArguments(command.uid, command.packageName)
     else -> IpcArguments(IpcContract.NO_UID_ARGUMENT, null)
 }

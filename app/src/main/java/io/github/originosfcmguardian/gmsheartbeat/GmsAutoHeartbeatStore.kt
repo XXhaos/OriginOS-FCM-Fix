@@ -129,7 +129,8 @@ internal class GmsAutoHeartbeatStore(private val storage: HeartbeatStorage) {
     }
 
     fun prepareConfirmation(expected: HeartbeatSnapshot?, digest: String, durable: Boolean = false,
-        caller: GmsHeartbeatCallerIdentity? = null): HeartbeatSnapshot? = storage.exclusive {
+        caller: GmsHeartbeatCallerIdentity? = null, bundledEpoch: String? = null): HeartbeatSnapshot? = storage.exclusive {
+        require(bundledEpoch == null || durable && canonicalUuid(bundledEpoch))
         if (durable && caller != null) storage.halt()
         val old = storage.read()
         if (old != expected || old?.pause == HeartbeatPause.OFF_PENDING) return@exclusive null
@@ -139,7 +140,7 @@ internal class GmsAutoHeartbeatStore(private val storage: HeartbeatStorage) {
             lastStatus = if (old?.pendingAttempt != null) GmsHeartbeatStatus.UNKNOWN else old?.lastStatus,
             lastReason = if (old?.pendingAttempt != null) GmsHeartbeatReason.BRIDGE_UNAVAILABLE else old?.lastReason,
             schemaVersion = if (durable && caller != null) 3 else if (durable) 2 else old?.schemaVersion ?: 1,
-            durableConsent = if (durable) HeartbeatDurableConsent(if (caller != null) 3 else 1, UUID.randomUUID().toString(), 0, digest) else null,
+            durableConsent = if (durable) HeartbeatDurableConsent(if (caller != null) 3 else 1, bundledEpoch ?: UUID.randomUUID().toString(), 0, digest) else null,
             lastResultEpoch = old?.durableConsent?.epoch ?: old?.lastResultEpoch,
             callerIdentity = if (durable) caller else null)
         storage.write(next)

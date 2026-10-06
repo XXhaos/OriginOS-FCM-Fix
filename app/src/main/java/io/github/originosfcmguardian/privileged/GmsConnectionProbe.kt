@@ -21,6 +21,7 @@ internal interface GmsConnectionReadPort {
     fun gcmService(interrupted: () -> Boolean): GcmServiceSource = GcmServiceSource.unavailable()
     fun reconnectReceivers(): GmsReceiverInspection
     fun elapsedRealtime(): Long
+    fun recoverySenderQualified(): Boolean = false
 }
 
 internal fun gmsSignerDigest(certificates: List<ByteArray>): String {

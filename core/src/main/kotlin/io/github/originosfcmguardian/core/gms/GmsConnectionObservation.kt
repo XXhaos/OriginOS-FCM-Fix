@@ -5,7 +5,7 @@ import java.io.IOException
 
 enum class SocketObservation { OBSERVED, NO_MATCH, UNKNOWN }
 enum class SourceCompleteness { COMPLETE, PARTIAL, DENIED, UNAVAILABLE, MALFORMED, TRUNCATED, TIMED_OUT, CANCELLED }
-enum class GcmConnectionState { REPORTED_CONNECTED, REPORTED_DISCONNECTED, UNKNOWN }
+enum class GcmConnectionState { REPORTED_CONNECTED, REPORTED_DISCONNECTED, UNKNOWN, SERVICE_ABSENT }
 
 /** GMS's own report, independent of socket evidence and never a delivery/health verdict. */
 data class GcmServiceSource(

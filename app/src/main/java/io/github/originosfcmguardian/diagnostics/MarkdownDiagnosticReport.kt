@@ -16,23 +16,8 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
         row("Guardian 版本名称", report.environment.guardianVersionName)
         row("Guardian 版本代码", report.environment.guardianVersionCode)
 
-        section("GMS")
-        row("已安装", report.gmsInstalled)
-        row("已启用", report.gmsEnabled)
-        row("版本名称", report.gmsVersionName)
-        row("版本代码", report.gmsVersionCode)
-
-        section("Shizuku 与特权检测")
+        section("Shizuku")
         statusRow("Shizuku 状态", report.shizukuStatus)
-        statusRow("特权检测状态", report.privilegedDetectionStatus)
-        if (report.appOps.isEmpty()) row("AppOps", "空列表（0 项）")
-        report.appOps.toSortedMap().forEach { (operation, status) ->
-            statusRow("AppOps 操作（$operation）", status)
-        }
-        statusRow("Doze 状态", report.dozeStatus)
-        if (report.dozeSources.isEmpty()) row("Doze 来源", "空列表（0 项），请结合 Doze 状态")
-        report.dozeSources.forEachIndexed { index, source -> row("Doze 来源 ${index + 1}", source) }
-        statusRow("PEM 状态", report.pemStatus)
 
         section("目标应用")
         when (val targets = report.targets) {
@@ -65,6 +50,34 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             row("回调时进程年龄（毫秒）", receipt.processAgeAtCallbackMillis)
         }
 
+        section("FCM 恢复试用事件")
+        row("统一 FCM 保护授权", report.fcmProtection.configured)
+        row("维护分支", report.fcmProtection.maintenance.name)
+        row("恢复分支当前资格", report.fcmProtection.recoveryReady)
+        row("统一授权需重新确认", report.fcmProtection.requiresConfirmation)
+        row("本次统一确认未通过原因", report.fcmProtection.confirmationFailure?.name)
+        row("试用配置", report.fcmRecoveryTrial.configured)
+        row("记录存储阻断", report.fcmRecoveryTrial.storageBlocked)
+        append("\n仅保留最近64条状态变化与请求结果；REQUESTED仅表示请求被接受，连接观察不证明通知送达。\n\n")
+        append("电量为整机参考，不能归因于 Guardian，也不是 mAh/能量测量。CPU 毫秒仅为 Guardian 主进程累计工作，排除 Shizuku/独立 shell/GMS/无线电；仅同一进程标识且进程年龄与 CPU 连续递增时才可比较。字段缺失为未知。小时样本只搭载现有轮询，不额外唤醒。\n\n")
+        report.fcmRecoveryTrial.events.takeLast(64).forEach { e ->
+            append("- ").append(e.atMillis).append(" / ").append(e.action.name)
+                .append(" / ").append(e.service.name).append(" / ").append(e.completeness.name)
+                .append(" / ").append(e.socket.name).append(" / ").append(e.eligibility.name)
+            e.status?.let { append(" / ").append(it.name).append(" / ").append(e.reason?.name) }
+            e.observationUnknownReason?.let { append(" / 读取未知原因=").append(it.name) }
+            e.power?.let { p ->
+                append(" / 整机电量=").append(p.batteryPercent?.let { "$it%" } ?: "未知")
+                    .append(" / 充电=").append(p.chargingStatus?.name ?: "未知")
+                    .append(" / 电源=").append(p.pluggedSource?.name ?: "未知")
+                    .append(" / 交互=").append(p.interactive?.toString() ?: "未知")
+                    .append(" / 空闲=").append(p.deviceIdle?.toString() ?: "未知")
+                    .append(" / 主进程CPUms=").append(p.mainProcessCpuMillis?.toString() ?: "未知")
+                    .append(" / 进程年龄ms=").append(p.processAgeMillis?.toString() ?: "未知")
+                    .append(" / 进程标识=").append(p.processInstanceId ?: "未知")
+            }
+            append('\n')
+        }
         section("通知观察摘要")
         val facts = report.notificationFacts
         if (facts == null) {
@@ -100,6 +113,7 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
         }
 
         section("日常只读检查")
+        row("检查范围", "仅已选应用安装身份；不代表停止标志、FCM 连接或通知送达；旧检查结果为未知")
         statusRow("检查状态", report.dailyProtectionStatus)
         row("检查时间（Unix 毫秒）", report.dailyProtectionCheckedAtEpochMillis)
 
@@ -177,8 +191,6 @@ private fun StringBuilder.statusRow(label: String, value: String?) {
 }
 
 private fun sourceLabel(source: String): String = when (source) {
-    "normalGms" -> "常规 GMS 信息（normalGms）"
-    "privilegedDetection" -> "特权检测（privilegedDetection）"
     "targetSelection" -> "目标应用选择（targetSelection）"
     "fcmEvidence" -> "FCM 回调证据（fcmEvidence）"
     "notificationFacts" -> "通知观察（notificationFacts）"

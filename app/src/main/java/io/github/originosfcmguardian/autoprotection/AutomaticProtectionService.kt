@@ -21,10 +21,7 @@ import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
 import io.github.originosfcmguardian.recovery.StoppedRecoveryController
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoveryRecord
-import io.github.originosfcmguardian.gmsconfig.GmsConfigCadence
-import io.github.originosfcmguardian.gmsconfig.GmsConfigurationChecker
-import io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime
-import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleAutomaticRuntime
+import io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -126,8 +123,7 @@ class AutomaticProtectionService : Service() {
         var controller: StoppedRecoveryController? = null
         val grant = id.let { value -> AutomaticProtectionRuntime.claim(value, retireIfIdle = idleRetirement) {
             // All write authority is already synchronously revoked before this callback.
-            GmsAutoHeartbeatRuntime.hostEnded(value)
-            GmsDozeCycleAutomaticRuntime.hostEnded(value)
+            FcmProtectionRuntime.hostEnded(value)
             cancelAutomaticSession(
                 cancelRecovery = { controller?.cancel() },
                 cancelPolling = { job?.cancel() },
@@ -149,8 +145,7 @@ class AutomaticProtectionService : Service() {
             retire(grant.id)
             return false
         }
-        GmsAutoHeartbeatRuntime.attachHost(applicationContext, grant)
-        GmsDozeCycleAutomaticRuntime.attachHost(applicationContext, grant.id)
+        FcmProtectionRuntime.attachHost(applicationContext, grant)
         // Coroutine construction is lazy so a revocation cannot cancel before its Job is assigned.
         job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             collect(grant) { controller = it; activeController = it }
@@ -170,40 +165,29 @@ class AutomaticProtectionService : Service() {
     private suspend fun collect(grant: AutomaticProtectionGrant, publishController: (StoppedRecoveryController) -> Unit) {
         var controller: StoppedRecoveryController? = null
         var selectionListener: AutoCloseable? = null
-        var gmsChecker: GmsConfigurationChecker? = null
-        var gmsCadence: GmsConfigCadence? = null
         val connectionEvents = Channel<Unit>(Channel.CONFLATED)
         val connectionGeneration = ProtectionConnectionGeneration()
         val explicitRefresh = AtomicLong(0)
         val reconciliationConnection = AtomicLong(0)
         val reconciliationBudget = PendingReconciliationBudget()
-        // Host loss closes only this automatic GMS lease, never the finite UI operation.
-        fun loseGmsHost(generation: Long = connectionGeneration.current()) =
-            GmsDozeCycleAutomaticRuntime.hostLost(grant.id, generation)
         fun blockHostWrites() {
-            loseGmsHost()
             AutomaticProtectionRuntime.blockWrites(grant)
         }
         fun waitForHost() {
-            loseGmsHost()
             AutomaticProtectionRuntime.waiting(grant)
         }
         fun hostReadOnly(detail: String, busy: Boolean = false) {
-            loseGmsHost()
             AutomaticProtectionRuntime.readOnly(grant, detail, busy)
         }
         fun waitForHostNextCheck(detail: String) {
-            loseGmsHost()
             AutomaticProtectionRuntime.waitForNextCheck(grant, detail)
         }
         fun matchesGmsConnection(generation: Long): Boolean =
-            connectionGeneration.matches(generation).also { if (!it) loseGmsHost(generation) }
+            connectionGeneration.matches(generation)
         fun connectedGmsHost(generation: Long): Boolean =
-            (connectionGeneration.matches(generation) && shellReady()).also { if (!it) loseGmsHost(generation) }
+            connectionGeneration.matches(generation) && shellReady()
         val binderDead = Shizuku.OnBinderDeadListener {
-            loseGmsHost()
-            GmsAutoHeartbeatRuntime.privilegeLost(grant.id)
-            gmsCadence?.cancel()
+            FcmProtectionRuntime.privilegeLost(grant.id)
             connectionGeneration.changed()
             reconciliationConnection.incrementAndGet()
             blockHostWrites()
@@ -212,9 +196,7 @@ class AutomaticProtectionService : Service() {
             connectionEvents.trySend(Unit)
         }
         val binderReceived = Shizuku.OnBinderReceivedListener {
-            loseGmsHost()
-            GmsAutoHeartbeatRuntime.privilegeLost(grant.id)
-            gmsCadence?.cancel()
+            FcmProtectionRuntime.privilegeLost(grant.id)
             connectionGeneration.changed()
             reconciliationConnection.incrementAndGet()
             blockHostWrites()
@@ -222,9 +204,7 @@ class AutomaticProtectionService : Service() {
             connectionEvents.trySend(Unit)
         }
         val permissionResult = Shizuku.OnRequestPermissionResultListener { _, result ->
-            if (result != PackageManager.PERMISSION_GRANTED) loseGmsHost()
-            if (result != PackageManager.PERMISSION_GRANTED) GmsAutoHeartbeatRuntime.securityLost(grant.id)
-            if (result != PackageManager.PERMISSION_GRANTED) gmsCadence?.cancel()
+            if (result != PackageManager.PERMISSION_GRANTED) FcmProtectionRuntime.securityLost(grant.id)
             if (result != PackageManager.PERMISSION_GRANTED) AutomaticProtectionRuntime.pause(grant.id, "保护不可用：Shizuku 授权已撤销，请重新确认")
             else connectionEvents.trySend(Unit)
         }
@@ -232,7 +212,6 @@ class AutomaticProtectionService : Service() {
         try {
             val selection = TargetSelectionStore(applicationContext)
             selectionListener = selection.registerListener {
-                loseGmsHost()
                 connectionGeneration.changed()
                 blockHostWrites()
                 controller?.cancel()
@@ -255,17 +234,11 @@ class AutomaticProtectionService : Service() {
                 connectionEvents.trySend(Unit)
             }
             val probe = TargetPackageProbe(applicationContext)
-            val configChecker = runCatching { GmsConfigurationChecker(applicationContext) }.getOrNull()
-            gmsChecker = configChecker
-            val cadence = GmsConfigCadence(CoroutineScope(kotlin.coroutines.coroutineContext),
-                android.os.SystemClock::elapsedRealtime)
-            gmsCadence = cadence
             var revalidateStartup = true
             var validatedConnection = -1L
             var targetCursor = 0
             var expectedPending: StoppedRecoveryRecord? = null
             suspend fun waitForTargetRead() {
-                cadence.cancel()
                 blockHostWrites()
                 recovery.cancel()
                 val detail = StartupEligibilityStatus.WAITING_TARGET_READ.description()
@@ -278,7 +251,6 @@ class AutomaticProtectionService : Service() {
                 val iterationConnection = connectionGeneration.current()
                 val privilege = ProtectionStartupProbe.privilegeEvidence()
                 if (privilege.binderAlive != true) {
-                    cadence.cancel()
                     waitForHost()
                     publishNotification(grant, "等待 Shizuku，尚未执行保护")
                     revalidateStartup = true
@@ -313,7 +285,6 @@ class AutomaticProtectionService : Service() {
                 }
                 val pending = journal.getOrNull()?.takeIf { it.requiresReconcile }
                 if (pending != null) {
-                    cadence.cancel()
                     if (expectedPending == null) expectedPending = pending
                     blockHostWrites()
                     recovery.cancel() // Old RPC callbacks cannot regain authority when writes later resume.
@@ -383,7 +354,6 @@ class AutomaticProtectionService : Service() {
                     continue
                 }
                 if (revalidateStartup || validatedConnection != iterationConnection) {
-                    loseGmsHost(iterationConnection)
                     val startup = withContext(Dispatchers.IO) {
                         AutomaticProtectionRuntime.startupProbe(grant, applicationContext)
                     }
@@ -412,28 +382,8 @@ class AutomaticProtectionService : Service() {
                     validatedConnection = iterationConnection
                 }
                 AutomaticProtectionRuntime.allowWrites(grant)
-                // Separate, low-frequency read child on this owner. Recipient polling never awaits it.
-                cadence.launchIfEligible(configChecker != null && AutomaticProtectionRuntime.authorized(grant)) {
-                    withContext(Dispatchers.IO) {
-                        configChecker?.check(automatic = true) {
-                            connectionGeneration.matches(iterationConnection) && AutomaticProtectionRuntime.authorized(grant) &&
-                                runCatching { recovery.loadLatest()?.requiresReconcile != true }.getOrDefault(false)
-                        }
-                    }
-                }
                 AutomaticProtectionRuntime.update(grant.id, "检测中")
-                GmsAutoHeartbeatRuntime.hostEligible(grant.id)
-                // No disk/probe work in this cached callback; actual backend qualification is
-                // repeated by the application-owned bridge outside every short lease gate.
-                val gmsHostEligible = {
-                    connectionGeneration.matches(iterationConnection) &&
-                        AutomaticProtectionRuntime.authorized(grant) && grant.writes.ticket() != null &&
-                        AutomaticProtectionRuntime.isActuallyProtecting()
-                }
-                GmsDozeCycleAutomaticRuntime.hostEligible(applicationContext, grant.id,
-                    iterationConnection, gmsHostEligible)
-                GmsDozeCycleAutomaticRuntime.hint(applicationContext, grant.id,
-                    iterationConnection, gmsHostEligible)
+                FcmProtectionRuntime.hostEligible(grant.id)
                 publishNotification(grant, "检测中")
                 var retainedWaitDetail = false
                 var targetReads = emptyList<AutomaticTargetObservation>()
@@ -754,10 +704,7 @@ class AutomaticProtectionService : Service() {
         } catch (_: Exception) {
             AutomaticProtectionRuntime.pause(grant.id, "保护不可用：读取或恢复异常，请先复检后重新确认")
         } finally {
-            GmsAutoHeartbeatRuntime.hostEnded(grant.id)
-            GmsDozeCycleAutomaticRuntime.hostEnded(grant.id)
-            gmsCadence?.cancel()
-            runCatching { gmsChecker?.close() }
+            FcmProtectionRuntime.hostEnded(grant.id)
             controller?.close()
             runCatching { selectionListener?.close() }
             if (listenersRegistered) {
@@ -815,8 +762,7 @@ class AutomaticProtectionService : Service() {
 
     private fun retire(id: String) {
         if (activeId != id) return
-        GmsAutoHeartbeatRuntime.hostEnded(id)
-        GmsDozeCycleAutomaticRuntime.hostEnded(id)
+        FcmProtectionRuntime.hostEnded(id)
         activeId = null
         activeJob = null
         activeController = null
@@ -831,8 +777,7 @@ class AutomaticProtectionService : Service() {
         destroyed = true
         targetRetirement.clear()
         AutomaticProtectionRuntime.detachServiceRetirement(idleRetirement)
-        activeId?.let(GmsAutoHeartbeatRuntime::hostEnded)
-        activeId?.let(GmsDozeCycleAutomaticRuntime::hostEnded)
+        activeId?.let(FcmProtectionRuntime::hostEnded)
         activeId?.let(AutomaticProtectionRuntime::detach)
         activeController?.cancel()
         scope.cancel()

@@ -18,14 +18,3 @@ internal fun String.hasSemanticError(): Boolean = lineSequence()
             line.startsWith("Permission denial", ignoreCase = true) ||
             line.contains("does not have permission", ignoreCase = true)
     }
-
-internal fun parseMode(raw: String): AppOpMode? = when (raw.lowercase()) {
-    "allow" -> AppOpMode.ALLOW
-    "ignore" -> AppOpMode.IGNORE
-    "deny" -> AppOpMode.DENY
-    "foreground" -> AppOpMode.FOREGROUND
-    "default" -> AppOpMode.DEFAULT
-    "errored" -> AppOpMode.ERRORED
-    "ask" -> AppOpMode.ASK
-    else -> null
-}

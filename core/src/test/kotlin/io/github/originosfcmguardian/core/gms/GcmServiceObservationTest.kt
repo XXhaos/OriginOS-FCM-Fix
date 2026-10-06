@@ -16,6 +16,23 @@ class GcmServiceObservationTest {
     private fun assertUnknown(text: String, status: SourceCompleteness = SourceCompleteness.MALFORMED) {
         assertEquals(GcmServiceParser.unknown(status), parse(text))
     }
+    @Test fun `exact complete successful absence is distinct and heartbeat still refuses it`() {
+        val absence = "No services match: ${GcmServiceParser.COMPONENT}\n"
+        assertEquals(GcmServiceSource(GcmConnectionState.SERVICE_ABSENT, SourceCompleteness.COMPLETE), parse(absence))
+        assertEquals(GcmConnectionState.SERVICE_ABSENT, parse(absence.replace("\n", "\r\n")).state)
+        assertEquals(GcmConnectionState.SERVICE_ABSENT, parse(absence + "Use -h for help.\n").state)
+        assertEquals(GcmConnectionState.SERVICE_ABSENT, parse((absence + "Use -h for help.\n").replace("\n", "\r\n")).state)
+        listOf(absence.replace("GcmService", "OtherService"), "prefix " + absence, absence + absence,
+            absence + "private extra\n", " " + absence,
+            absence + "Use -h for help\n", absence + "Use -h for help.\r\n",
+            absence.replace("\n", "\r\n") + "Use -h for help.\n",
+            absence + "Use -h for help.\nextra\n").forEach { assertUnknown(it) }
+        assertUnknown(absence + "Use -h for help.", SourceCompleteness.TRUNCATED)
+        assertUnknown(absence + "Use -h for help.\nPermission Denial\n", SourceCompleteness.DENIED)
+        assertUnknown(absence.trimEnd(), SourceCompleteness.TRUNCATED)
+        assertEquals(GcmConnectionState.UNKNOWN, GcmServiceProcessReader.read(Child(absence, exit = 1), { false }).state)
+        assertEquals(GcmConnectionState.UNKNOWN, GcmServiceProcessReader.read(Child(absence, errors = "denied"), { false }).state)
+    }
     @Test fun `single complete self report distinguishes true and false without exposing dump`() {
         assertEquals(GcmConnectionState.REPORTED_CONNECTED, parse(dump("true")).state)
         assertEquals(GcmConnectionState.REPORTED_DISCONNECTED, parse(dump("false")).state)

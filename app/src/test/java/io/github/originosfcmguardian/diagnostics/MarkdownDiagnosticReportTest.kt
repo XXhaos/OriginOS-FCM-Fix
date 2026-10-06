@@ -26,16 +26,7 @@ class MarkdownDiagnosticReportTest {
     @Test
     fun populatedReportRetainsEveryRepresentedSectionAndValue() {
         val report = base().copy(
-            gmsInstalled = true,
-            gmsEnabled = false,
-            gmsVersionName = "gmsVersionSentinel",
-            gmsVersionCode = 341L,
             shizukuStatus = "READY_SHELL",
-            privilegedDetectionStatus = "READY_SHELL",
-            appOps = mapOf("RUN_IN_BACKGROUND" to "CONFORMING", "WAKE_LOCK" to "ANOMALOUS"),
-            dozeStatus = "CONFORMING",
-            dozeSources = listOf("SYSTEM", "USER"),
-            pemStatus = "UNKNOWN",
             targets = listOf(DiagnosticTarget("org.example.recipient", "目标名称")),
             fcmConfiguration = "CONFIGURED_NOT_TESTED",
             fcmRegistration = "TOKEN_READY",
@@ -52,11 +43,11 @@ class MarkdownDiagnosticReportTest {
             sourceAvailability = mapOf("notificationFacts" to DiagnosticSourceAvailability.PARTIAL),
         )
         val markdown = render(report)
-        listOf("环境", "GMS", "Shizuku 与特权检测", "目标应用", "FCM 本应用证据",
+        assertTrue(markdown.contains("仅已选应用安装身份；不代表停止标志、FCM 连接或通知送达"))
+        listOf("环境", "Shizuku", "目标应用", "FCM 本应用证据",
             "通知观察摘要", "最近深度监测摘要", "日常只读检查", "来源可用性", "仍未知的关系", "局限")
             .forEach { assertTrue(it, markdown.contains("## $it")) }
-        listOf("版本名称：gmsVersionSentinel", "版本代码：341", "已安装：是（true）", "已启用：否（false）",
-            "Doze 来源 1：SYSTEM", "Doze 来源 2：USER", "当前显示名称：目标名称",
+        listOf("当前显示名称：目标名称",
             "最近回调时间（Unix 毫秒）：2101", "处理耗时（毫秒）：27", "回调时进程年龄（毫秒）：504",
             "保留事件数：5", "发布或更新数：3", "移除数：2", "最近观察时间（Unix 毫秒）：4101",
             "丢弃事件数：1", "停止后的持久化不确定：是（true）", "开始时间（Unix 毫秒）：2501",
@@ -65,7 +56,6 @@ class MarkdownDiagnosticReportTest {
             "检查时间（Unix 毫秒）：5101", "部分记录（PARTIAL）", "未知（UNKNOWN）")
             .forEach { assertTrue(it, markdown.contains(it)) }
         assertTrue(markdown.contains("Shell 权限就绪（READY\\_SHELL）"))
-        assertTrue(markdown.contains("AppOps 操作（RUN\\_IN\\_BACKGROUND）：符合检查条件（CONFORMING）"))
         assertTrue(markdown.contains("当次只读检查符合条件（HEALTHY\\_READ\\_ONLY）"))
         assertFalse(markdown.contains("自启动"))
     }
@@ -85,15 +75,12 @@ class MarkdownDiagnosticReportTest {
         assertTrue(markdown.contains("must not be interpreted as empty or healthy"))
         val pending = render(base())
         assertTrue(pending.contains("加载中（LOADING）"))
-        assertTrue(pending.contains("缺失（MISSING）"))
         assertTrue(pending.contains("目标应用：未知或不可用（null）"))
     }
 
     @Test
     fun nullsAreExplicitAndNeverRenderedAsHealthy() {
         val markdown = render(base())
-        assertTrue(markdown.contains("已安装：未知或不可用（null）"))
-        assertTrue(markdown.contains("特权检测状态：未知或不可用（null）"))
         assertTrue(markdown.contains("通知观察：未知或不可用（null）"))
         assertTrue(markdown.contains("最近监测：未知或不可用（null）"))
         assertTrue(markdown.contains("检查时间（Unix 毫秒）：未知或不可用（null）"))
@@ -116,8 +103,6 @@ class MarkdownDiagnosticReportTest {
         val report = base().copy(
             environment = environment().copy(manufacturer = hostile, model = "正常😀设备"),
             shizukuStatus = hostile,
-            appOps = mapOf(hostile to hostile),
-            dozeSources = listOf(hostile),
             targets = listOf(DiagnosticTarget(hostile, hostile)),
             sourceAvailability = mapOf(hostile to DiagnosticSourceAvailability.PARTIAL),
         )
@@ -150,11 +135,9 @@ class MarkdownDiagnosticReportTest {
     @Test
     fun renderingIsDeterministicAcrossMapInsertionOrders() {
         val report = base().copy(
-            appOps = linkedMapOf("Z" to "UNKNOWN", "A" to "CONFORMING"),
             sourceAvailability = linkedMapOf("Z" to DiagnosticSourceAvailability.EMPTY, "A" to DiagnosticSourceAvailability.CORRUPT),
         )
         val reordered = report.copy(
-            appOps = report.appOps.entries.reversed().associate { it.toPair() },
             sourceAvailability = report.sourceAvailability.entries.reversed().associate { it.toPair() },
         )
         assertArrayEquals(encodeCombinedDiagnosticMarkdown(report), encodeCombinedDiagnosticMarkdown(reordered))

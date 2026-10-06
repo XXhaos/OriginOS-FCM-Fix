@@ -5,12 +5,6 @@ const val GUARDIAN_PACKAGE_NAME: String = "io.github.originosfcmguardian"
 const val VIVO_AUTOSTART_URI: String =
     "content://com.vivo.permissionmanager.provider.permission/bg_start_up_apps"
 
-enum class AppOp(val shellName: String) {
-    RUN_IN_BACKGROUND("RUN_IN_BACKGROUND"),
-    RUN_ANY_IN_BACKGROUND("RUN_ANY_IN_BACKGROUND"),
-    WAKE_LOCK("WAKE_LOCK"),
-}
-
 /**
  * Closed set of read-only commands accepted by the privileged bridge.
  *
@@ -40,49 +34,9 @@ sealed interface SafeCommand {
         )
     }
 
-    data object GetGmsEnabledPackage : SafeCommand {
-        override val operationId = "get_gms_enabled_package_user_0"
-        override fun argv() = listOf(
-            "pm", "list", "packages", "--user", "0", "-e", "-U", GMS_PACKAGE_NAME,
-        )
-    }
-
     data object GetBuildFingerprint : SafeCommand {
         override val operationId = "get_build_fingerprint"
         override fun argv() = listOf("getprop", "ro.build.fingerprint")
-    }
-
-    data class GetGmsAppOpByPackage(val operation: AppOp) : SafeCommand {
-        override val operationId = "get_gms_appop_package_${operation.name.lowercase()}"
-        override fun argv() = listOf(
-            "cmd", "appops", "get", "--user", "0", GMS_PACKAGE_NAME, operation.shellName,
-        )
-    }
-
-    data class GetAppOpByUid(val uid: Int, val operation: AppOp) : SafeCommand {
-        init {
-            require(isUserZeroAppId(uid)) { "UID must be a positive user-0 appId below 100000" }
-        }
-
-        override val operationId = "get_gms_appop_uid_${operation.name.lowercase()}"
-        override fun argv() = listOf(
-            "cmd", "appops", "get", "--user", "0", uid.toString(), operation.shellName,
-        )
-    }
-
-    data object GetDeviceIdleWhitelist : SafeCommand {
-        override val operationId = "get_deviceidle_whitelist"
-        override fun argv() = listOf("cmd", "deviceidle", "whitelist")
-    }
-
-    data object GetVivoPemList : SafeCommand {
-        override val operationId = "get_vivo_pem_list"
-        override fun argv() = listOf("settings", "get", "global", "vivo_pem_ignore_list")
-    }
-
-    data object GetVivoPemPackagePath : SafeCommand {
-        override val operationId = "get_vivo_pem_package_path"
-        override fun argv() = listOf("pm", "path", "--user", "0", "com.vivo.pem")
     }
 
     /** Fixed Guardian-only package lookup used by the service as a fresh UID guard. */
@@ -183,34 +137,13 @@ object SafeCommandFactory {
         SafeCommand.GetCurrentUser.operationId -> noArguments(uid, packageName, SafeCommand.GetCurrentUser)
         SafeCommand.GetCallingUid.operationId -> noArguments(uid, packageName, SafeCommand.GetCallingUid)
         SafeCommand.GetGmsPackage.operationId -> noArguments(uid, packageName, SafeCommand.GetGmsPackage)
-        SafeCommand.GetGmsEnabledPackage.operationId ->
-            noArguments(uid, packageName, SafeCommand.GetGmsEnabledPackage)
         SafeCommand.GetBuildFingerprint.operationId ->
             noArguments(uid, packageName, SafeCommand.GetBuildFingerprint)
-        SafeCommand.GetDeviceIdleWhitelist.operationId ->
-            noArguments(uid, packageName, SafeCommand.GetDeviceIdleWhitelist)
-        SafeCommand.GetVivoPemList.operationId -> noArguments(uid, packageName, SafeCommand.GetVivoPemList)
-        SafeCommand.GetVivoPemPackagePath.operationId ->
-            noArguments(uid, packageName, SafeCommand.GetVivoPemPackagePath)
         SafeCommand.GetGuardianPackage.operationId ->
             noArguments(uid, packageName, SafeCommand.GetGuardianPackage)
         SafeCommand.GetTargetProcessEvents(10_000, "example.valid").operationId ->
             targetProcessEvents(uid, packageName)
-        else -> decodeAppOp(operationId, uid, packageName)
-    }
-
-    private fun decodeAppOp(operationId: String, uid: Int?, packageName: String?): SafeCommand? {
-        if (packageName != null) return null
-        AppOp.entries.forEach { operation ->
-            val packageCommand = SafeCommand.GetGmsAppOpByPackage(operation)
-            if (operationId == packageCommand.operationId) return noUid(uid, packageCommand)
-
-            val uidPrefix = "get_gms_appop_uid_${operation.name.lowercase()}"
-            if (operationId == uidPrefix && uid != null && isUserZeroAppId(uid)) {
-                return SafeCommand.GetAppOpByUid(uid, operation)
-            }
-        }
-        return null
+        else -> null
     }
 
     private fun targetProcessEvents(uid: Int?, packageName: String?): SafeCommand? =
@@ -228,6 +161,5 @@ object SafeCommandFactory {
         command: SafeCommand,
     ): SafeCommand? = command.takeIf { uid == null && packageName == null }
 
-    private fun noUid(uid: Int?, command: SafeCommand): SafeCommand? =
-        command.takeIf { uid == null }
+
 }

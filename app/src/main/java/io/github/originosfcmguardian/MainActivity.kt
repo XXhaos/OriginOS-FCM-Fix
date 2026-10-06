@@ -60,8 +60,6 @@ class MainActivity : ComponentActivity() {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
                 HomeScreen(
                     state = state,
-                    onDetect = viewModel::detect,
-                    onCheckGmsConfiguration = viewModel::checkGmsConfiguration,
                     onShizukuAction = viewModel::requestShizukuAccess,
                     onOpenAutostartSettings = {
                         openGuardianAutostartSettings()
@@ -98,19 +96,10 @@ class MainActivity : ComponentActivity() {
                     onOpenFcmDiagnostics = { io.github.originosfcmguardian.fcm.openGmsDiagnostics(this) },
                     onReadGmsConnection = viewModel::readGmsConnection,
                     onRequestGmsHeartbeat = viewModel::requestGmsHeartbeat,
-                    onRequestAutomaticGmsHeartbeat = viewModel::requestAutomaticGmsHeartbeat,
-                    onConfirmAutomaticGmsHeartbeat = viewModel::confirmAutomaticGmsHeartbeat,
-                    onDismissAutomaticGmsHeartbeat = viewModel::dismissAutomaticGmsHeartbeat,
-                    onDisableAutomaticGmsHeartbeat = viewModel::disableAutomaticGmsHeartbeat,
-                    onRequestGmsDozeEnable = viewModel::requestGmsDozeEnable,
-                    onConfirmGmsDozeEnable = viewModel::confirmGmsDozeEnable,
-                    onDismissGmsDozeConfirmation = viewModel::dismissGmsDozeConfirmation,
-                    onRunGmsDozeOnce = viewModel::runGmsDozeOnce,
-                    onStopGmsDoze = viewModel::stopGmsDoze,
-                    onRequestGmsDozeRestore = viewModel::requestGmsDozeRestore,
-                    onConfirmGmsDozeRestore = viewModel::confirmGmsDozeRestore,
-                    onRequestGmsDozeAutomatic = viewModel::requestGmsDozeAutomatic,
-                    onConfirmGmsDozeAutomatic = viewModel::confirmGmsDozeAutomatic,
+                    onRequestFcmProtection = viewModel::requestFcmProtection,
+                    onConfirmFcmProtection = viewModel::confirmFcmProtection,
+                    onDismissFcmProtection = viewModel::dismissFcmProtection,
+                    onDisableFcmProtection = viewModel::disableFcmProtection,
                     onDismissGmsConnection = viewModel::dismissGmsConnection,
                     onRequestStoppedRecovery = viewModel::requestStoppedRecovery,
                     onConfirmStoppedRecovery = viewModel::confirmStoppedRecovery,

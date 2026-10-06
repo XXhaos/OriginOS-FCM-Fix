@@ -48,7 +48,7 @@ class SelectedTargetDetailsExpansionTest {
                 calculatedAtMillis = snapshotMillis, zoneId = "Asia/Shanghai"),
         )
         compose.setContent { MaterialTheme {
-            HomeScreen(state = state, onDetect = {}, onShizukuAction = {},
+            HomeScreen(state = state, onShizukuAction = {},
                 onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
                 onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
                 onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},

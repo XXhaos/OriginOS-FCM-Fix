@@ -58,17 +58,6 @@ import androidx.compose.ui.semantics.semantics
 import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.monitoring.MonitorRunPhase
 import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
-import io.github.originosfcmguardian.core.AppOp
-import io.github.originosfcmguardian.core.AppOpMode
-import io.github.originosfcmguardian.core.AppOpState
-import io.github.originosfcmguardian.core.AppOpsWriteCapability
-import io.github.originosfcmguardian.core.DetectionReport
-import io.github.originosfcmguardian.core.DozeSource
-import io.github.originosfcmguardian.core.EnabledState
-import io.github.originosfcmguardian.core.EvidenceStatus
-import io.github.originosfcmguardian.core.PemListState
-import io.github.originosfcmguardian.core.Presence
-import io.github.originosfcmguardian.data.journal.OriginalRecordStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
@@ -89,8 +78,6 @@ import io.github.originosfcmguardian.notification.queryNotificationFacts
 @Composable
 fun HomeScreen(
     state: HomeUiState,
-    onDetect: () -> Unit,
-    onCheckGmsConfiguration: () -> Unit = onDetect,
     onShizukuAction: () -> Unit,
     onOpenAutostartSettings: () -> Unit,
     onShowTargetSelection: () -> Unit,
@@ -133,19 +120,10 @@ fun HomeScreen(
     onOpenFcmDiagnostics: () -> Boolean = { false },
     onReadGmsConnection: () -> Unit = {},
     onRequestGmsHeartbeat: () -> Unit = {},
-    onRequestAutomaticGmsHeartbeat: () -> Unit = {},
-    onConfirmAutomaticGmsHeartbeat: () -> Unit = {},
-    onDismissAutomaticGmsHeartbeat: () -> Unit = {},
-    onDisableAutomaticGmsHeartbeat: () -> Unit = {},
-    onRequestGmsDozeEnable: () -> Unit = {},
-    onConfirmGmsDozeEnable: () -> Unit = {},
-    onDismissGmsDozeConfirmation: () -> Unit = {},
-    onRunGmsDozeOnce: () -> Unit = {},
-    onStopGmsDoze: () -> Unit = {},
-    onRequestGmsDozeRestore: () -> Unit = {},
-    onConfirmGmsDozeRestore: () -> Unit = {},
-    onRequestGmsDozeAutomatic: () -> Unit = {},
-    onConfirmGmsDozeAutomatic: () -> Unit = {},
+    onRequestFcmProtection: () -> Unit = {},
+    onConfirmFcmProtection: () -> Unit = {},
+    onDismissFcmProtection: () -> Unit = {},
+    onDisableFcmProtection: () -> Unit = {},
     onDismissGmsConnection: () -> Unit = {},
     onRequestAddGuardianTile: ((String) -> Unit) -> Unit = { result ->
         result("下拉控制中心，进入编辑，将“推送保护”拖到常用区域。")
@@ -173,15 +151,7 @@ fun HomeScreen(
     }
     if (state.gmsConnection.visible) GmsConnectionDialog(state.gmsConnection, onReadGmsConnection,
         onDismissGmsConnection, onRequestGmsHeartbeat, !state.gmsAutoHeartbeat.manualBlocked)
-    if (state.gmsAutoHeartbeatConfirmation) GmsAutoHeartbeatConfirmation(
-        onConfirmAutomaticGmsHeartbeat, onDismissAutomaticGmsHeartbeat)
-    state.gmsDozeOnConfirmation?.let { target ->
-        GmsDozeOnConfirmation(target.ledgerId != null, onConfirmGmsDozeEnable, onDismissGmsDozeConfirmation)
-    }
-    if (state.gmsDozeRestoreConfirmation != null)
-        GmsDozeRestoreConfirmation(onConfirmGmsDozeRestore, onDismissGmsDozeConfirmation)
-    if (state.gmsDozeAutomaticConfirmation != null)
-        GmsDozeAutomaticConfirmation(onConfirmGmsDozeAutomatic, onDismissGmsDozeConfirmation)
+    if (state.fcmProtectionConfirmation) FcmProtectionConfirmation(onConfirmFcmProtection, onDismissFcmProtection)
     var showNoTouchProtection by remember { mutableStateOf(false) }
     if (showNoTouchProtection) {
         NoTouchProtectionDialog(onDismiss = { showNoTouchProtection = false },
@@ -272,16 +242,13 @@ fun HomeScreen(
                 io.github.originosfcmguardian.fcm.GMS_DIAGNOSTICS_UNAVAILABLE,
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (destination == "home") {
-                HomeOverview(state, onOpenGmsConnection, onCheckGmsConfiguration, { primaryTab = "apps" },
+                HomeOverview(state, onOpenGmsConnection, { primaryTab = "apps" },
                     { secondaryDestination = "settings" }, {
                         diagnosticToolName = null
                         secondaryDestination = "diagnostics"
                     }, onShizukuAction = onShizukuAction,
                     onEnableMaster = onRequestAutomaticProtection, onDisableMaster = onStopAutomaticProtection,
-                    onEnableHeartbeat = onRequestAutomaticGmsHeartbeat, onDisableHeartbeat = onDisableAutomaticGmsHeartbeat,
-                    onEnableDoze = onRequestGmsDozeEnable, onApplyDoze = onRunGmsDozeOnce,
-                    onStopDoze = onStopGmsDoze, onRestoreDoze = onRequestGmsDozeRestore,
-                    onEnableAutomaticDoze = onRequestGmsDozeAutomatic)
+                    onEnableFcm = onRequestFcmProtection, onDisableFcm = onDisableFcmProtection)
             }
 
             if (destination == "settings") {
@@ -355,7 +322,7 @@ fun HomeScreen(
                     }
                 }
                 if (advancedDiagnostics) {
-                    GmsProtectionDetails(state, onCheckGmsConfiguration, onOpenGmsConnection)
+                    FcmConnectionDetails(state, onOpenGmsConnection)
                     RecoveryCountsCard(state)
                     StatusCard("自动保护详情") {
                         Text(state.automaticProtection.detail, style = MaterialTheme.typography.bodySmall)
@@ -582,27 +549,6 @@ fun HomeScreen(
             if (diagnosticTool == DiagnosticTool.TIMELINE) {
             RetainedTimelineCard(state)
             }
-            if (diagnosticTool == DiagnosticTool.BASELINE) {
-            StatusCard("只读检查") {
-                Text(state.detectionMessage, style = MaterialTheme.typography.bodySmall)
-                Button(onClick = onDetect, enabled = !state.detecting) {
-                    Text(if (state.detecting) "检测中…" else "立即检查")
-                }
-                TextButton(onClick = onOpenGmsConnection) { Text("GMS 连接") }
-            }
-            StatusCard("原始状态记录") {
-                StatusRow("状态", state.originalRecord.status.label())
-                state.originalRecord.capturedAtEpochMillis?.let { capturedAt ->
-                    StatusRow("记录时间", formatRecordTime(capturedAt))
-                }
-                state.originalRecord.matchesCurrentBuild?.let { matches ->
-                    StatusRow("系统版本", if (matches) "与当前系统一致" else "来自旧的或不同的系统")
-                }
-                Text(state.originalRecord.detail, style = MaterialTheme.typography.bodySmall)
-            }
-
-            state.report?.let { DetectionDetails(it) }
-            }
             if (diagnosticTool == DiagnosticTool.SELF_TEST) {
             StatusCard("Guardian 推送自测") {
                 StatusRow("客户端配置", state.fcm.configuration.label())
@@ -813,12 +759,10 @@ internal fun SelectedTargetDetails(
 }
 
 @Composable
-private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onDetect: () -> Unit, onApps: () -> Unit,
+private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onApps: () -> Unit,
     onSettings: () -> Unit, onDiagnostics: () -> Unit, onShizukuAction: () -> Unit,
     onEnableMaster: () -> Unit, onDisableMaster: () -> Unit,
-    onEnableHeartbeat: () -> Unit, onDisableHeartbeat: () -> Unit,
-    onEnableDoze: () -> Unit, onApplyDoze: () -> Unit, onStopDoze: () -> Unit, onRestoreDoze: () -> Unit,
-    onEnableAutomaticDoze: () -> Unit) {
+    onEnableFcm: () -> Unit, onDisableFcm: () -> Unit) {
     val automatic = state.automaticProtection
     val shizuku = shizukuWorkModePresentation(state.shizuku)
     StatusCard("Shizuku", attention = state.shizuku.status != ShizukuStatus.READY_SHELL) {
@@ -844,32 +788,19 @@ private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onDetect: () -> 
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onApps) { Text("管理应用（${automatic.configuredIdentities.size}）") }
     }
-    StatusCard("Google Play 服务保护") {
-        val (configWall, configElapsed) = gmsConfigurationClock(state)
-        Text(gmsBackgroundSummary(state, configWall, configElapsed), style = MaterialTheme.typography.bodySmall)
-        Text("电池豁免支持单次执行；自动修复与重连尚未开放。", style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        GmsDozeControls(state.gmsDoze, state.shizuku.status == ShizukuStatus.READY_SHELL,
-            onEnableDoze, onApplyDoze, onStopDoze, onRestoreDoze)
-        GmsDozeAutomaticControls(state.gmsDozeAutomatic, state.shizuku.status == ShizukuStatus.READY_SHELL,
-            onEnableAutomaticDoze, onStopDoze)
-        OutlinedButton(onClick = onDetect, modifier = Modifier.fillMaxWidth(),
-            enabled = !state.gmsConfigChecking && !state.stoppedRecovery.needsReconcile) {
-            Text(if (state.gmsConfigChecking) "检查中…" else "检查后台配置")
-        }
+    StatusCard("FCM 连接与保活") {
         Text("FCM 连接状态", style = MaterialTheme.typography.titleSmall)
-        Text(gmsConnectionSummary(state.gmsConnection, gmsConnectionClock(state)), style = MaterialTheme.typography.bodySmall)
+        Text(fcmProtectionObservationText(state.fcmProtection, android.os.SystemClock.elapsedRealtime()), style = MaterialTheme.typography.bodySmall)
         TextButton(onClick = onGms) { Text("查看连接状态") }
-        GmsAutoHeartbeatControls(state.gmsAutoHeartbeat,
+        FcmProtectionControls(state.fcmProtection,
             automatic.enabled && state.shizuku.status == ShizukuStatus.READY_SHELL,
-            onEnableHeartbeat, onDisableHeartbeat)
+            onEnableFcm, onDisableFcm)
     }
     StatusCard("上次检查") {
         Text(diagnosticSummary(state), style = MaterialTheme.typography.bodyMedium,
             color = if (diagnosticIssues(state).isNotEmpty()) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurface)
-        val lastCheck = listOfNotNull(state.gmsConfigSnapshot?.checkedAtMillis,
-            state.dailyProtectionReport?.checkedAtEpochMillis).maxOrNull()
+        val lastCheck = state.dailyProtectionReport?.checkedAtEpochMillis
         Text(lastCheck?.let { "已保存检查：${formatRecordTime(it)}（历史记录）" } ?: "尚无已保存检查记录",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onDiagnostics) { Text("查看技术详情") }
@@ -883,22 +814,6 @@ private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onDetect: () -> 
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onSettings) { Text("连接与后台设置") }
     }
-}
-
-/** Only ages an existing snapshot; never starts a check or connection watchdog. */
-@Composable
-private fun gmsConfigurationClock(state: HomeUiState): Pair<Long, Long> {
-    var elapsed by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
-    var wall by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(state.gmsConfigSnapshot, state.gmsConfigContext) {
-        elapsed = android.os.SystemClock.elapsedRealtime(); wall = System.currentTimeMillis()
-        val snapshot = state.gmsConfigSnapshot ?: return@LaunchedEffect
-        while (snapshot.isFresh(state.gmsConfigContext, wall, elapsed)) {
-            kotlinx.coroutines.delay(30_000)
-            elapsed = android.os.SystemClock.elapsedRealtime(); wall = System.currentTimeMillis()
-        }
-    }
-    return wall to elapsed
 }
 
 @Composable
@@ -917,24 +832,8 @@ private fun gmsConnectionClock(state: HomeUiState): Long {
 }
 
 @Composable
-private fun GmsProtectionDetails(state: HomeUiState, onDetect: () -> Unit, onGms: () -> Unit) {
-    StatusCard("Google Play 服务只读详情") {
-        val (wall, elapsed) = gmsConfigurationClock(state)
-        Text(gmsBackgroundSummary(state, wall, elapsed), style = MaterialTheme.typography.bodySmall)
-        state.gmsConfigSnapshot?.let { snapshot ->
-            Text("最近检查：${formatRecordTime(snapshot.checkedAtMillis)}（历史读数）", style = MaterialTheme.typography.bodySmall)
-            Text(gmsConfigSettingsSummary(snapshot), style = MaterialTheme.typography.bodySmall)
-        }
-        Text(when {
-            !state.automaticProtection.enabled -> "只读定期检查：应用保护未运行。"
-            state.automaticProtection.waitingForPrivilege -> "只读定期检查：等待特权连接。"
-            state.automaticProtection.waitingForReconciliation -> "只读定期检查：等待恢复记录核对。"
-            else -> "只读定期检查：随应用保护运行，至少间隔 15 分钟，休眠可能延迟。"
-        }, style = MaterialTheme.typography.bodySmall)
-        Text("自动修复当前不支持；配置读数不证明 FCM 已连接或消息送达。", style = MaterialTheme.typography.bodySmall)
-        OutlinedButton(onClick = onDetect, enabled = !state.gmsConfigChecking && !state.stoppedRecovery.needsReconcile) {
-            Text(if (state.gmsConfigChecking) "检查中…" else "检查后台配置")
-        }
+private fun FcmConnectionDetails(state: HomeUiState, onGms: () -> Unit) {
+    StatusCard("FCM 连接详情") {
         Text(gmsConnectionSummary(state.gmsConnection, gmsConnectionClock(state)), style = MaterialTheme.typography.bodySmall)
         (state.gmsConnection.observation as? io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample)?.let {
             Text("观察时间：${formatRecordTime(it.observedAtMillis)}", style = MaterialTheme.typography.bodySmall)
@@ -1039,53 +938,6 @@ private fun NavigationGlyph(home: Boolean) {
 }
 
 @Composable
-private fun DetectionDetails(report: DetectionReport) {
-    StatusCard("特权只读结果") {
-        StatusRow("执行身份", report.privilegedAccess.name)
-        StatusRow("Android 用户", report.currentUser?.toString() ?: "未知")
-        StatusRow("Build 指纹", report.buildFingerprint ?: "读取失败")
-        when (report.appOpsWriteAdvisory.capability) {
-            AppOpsWriteCapability.SHELL_GUARD_WHILE_SHIZUKU_RUNNING -> {
-                Text("已知系统限制（历史验证，非本次写入测试）", fontWeight = FontWeight.SemiBold)
-                Text(
-                    "该系统版本曾验证到：Shizuku 运行时存在 shell AppOps 写入拦截。" +
-                        "手机端写入尚未实测，当前不提供此项自动修复；等效手动设置仍待验证。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            AppOpsWriteCapability.UNKNOWN ->
-                StatusRow("AppOps 写入能力", "未知；本次检测未测试写入")
-        }
-        StatusRow("GMS", report.gms.status.label())
-        StatusRow("GMS 启用", report.gms.enabled.label())
-
-        AppOp.entries.forEach { operation ->
-            val check = report.appOps[operation]
-            StatusRow(
-                operation.shellName,
-                check?.let {
-                    "${it.status.label()} · 包 ${it.packageState.modeLabel()} · UID ${it.uidState.modeLabel()}"
-                } ?: "无完整证据",
-            )
-        }
-
-        val sources = report.doze.sources.sortedBy(DozeSource::ordinal)
-            .joinToString { it.wireName }
-            .ifBlank { "未报告 GMS 条目" }
-        StatusRow("Doze whitelist", "${report.doze.status.label()} · $sources")
-        StatusRow("Vivo PEM 包", report.pem.packagePresence.label())
-        StatusRow("Vivo PEM", report.pem.listState.label())
-        Text("PEM 的 OriginOS 7 语义仍未验证。", style = MaterialTheme.typography.bodySmall)
-
-        if (report.problems.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Text("未决问题", fontWeight = FontWeight.SemiBold)
-            report.problems.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
-        }
-    }
-}
-
-@Composable
 private fun StatusCard(title: String, attention: Boolean = false, content: @Composable () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = if (attention) MaterialTheme.colorScheme.errorContainer
@@ -1109,34 +961,6 @@ private fun StatusRow(label: String, value: String) {
     }
 }
 
-private fun EvidenceStatus.label(): String = when (this) {
-    EvidenceStatus.CONFORMING -> "读数符合预期"
-    EvidenceStatus.ANOMALOUS -> "读数异常"
-    EvidenceStatus.UNKNOWN -> "未知"
-}
-
-private fun Presence.label(): String = when (this) {
-    Presence.PRESENT -> "存在"
-    Presence.ABSENT -> "不存在"
-    Presence.UNKNOWN -> "未知"
-}
-
-private fun EnabledState.label(): String = when (this) {
-    EnabledState.ENABLED -> "已启用"
-    EnabledState.DISABLED -> "已停用"
-    EnabledState.UNKNOWN -> "未知"
-}
-
-private fun PemListState.label(): String = when (this) {
-    PemListState.VALUE_REPORTED -> "读取到值（语义未验证）"
-    PemListState.NULL_OR_MISSING_AMBIGUOUS -> "返回 null（缺失/空值未区分）"
-    PemListState.UNKNOWN -> "未知"
-}
-
-private fun AppOpState.modeLabel(): String =
-    (reportedMode ?: reportedDefault)?.label() ?: "未知"
-
-private fun AppOpMode.label(): String = name.lowercase()
 
 private fun ShizukuStatus.label(): String = when (this) {
     ShizukuStatus.NOT_INSTALLED -> "未安装"
@@ -1159,7 +983,7 @@ private fun TargetAutostartStatus.label(): String = when (this) {
 }
 
 private fun ProtectionCheckStatus.label(): String = when (this) {
-    ProtectionCheckStatus.HEALTHY_READ_ONLY -> "关键读数符合预期"
+    ProtectionCheckStatus.HEALTHY_READ_ONLY -> "已选应用安装身份未变化"
     ProtectionCheckStatus.NEEDS_USER_ACTION -> "需要手动处理"
     ProtectionCheckStatus.UNKNOWN -> "结果不完整"
     ProtectionCheckStatus.BUILD_CHANGED -> "系统构建已变化"
@@ -1215,14 +1039,6 @@ private fun NetworkAvailability.label(): String = when (this) {
     NetworkAvailability.AVAILABLE -> "可用网络存在"
     NetworkAvailability.UNAVAILABLE -> "未观察到可用网络"
     NetworkAvailability.UNKNOWN -> "未知"
-}
-
-private fun OriginalRecordStatus.label(): String = when (this) {
-    OriginalRecordStatus.LOADING -> "正在检查"
-    OriginalRecordStatus.NOT_SAVED -> "尚未保存"
-    OriginalRecordStatus.SAVED -> "已保存"
-    OriginalRecordStatus.INCOMPLETE -> "证据不完整"
-    OriginalRecordStatus.DAMAGED -> "记录损坏或无法识别"
 }
 
 internal fun formatRecordTime(epochMillis: Long): String =

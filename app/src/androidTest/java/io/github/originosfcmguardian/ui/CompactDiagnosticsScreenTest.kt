@@ -31,8 +31,9 @@ class CompactDiagnosticsScreenTest {
         var available = false
         var launches = 0
         compose.setContent { Fixture(HomeUiState(), launch = { launches++; available }) }
-        compose.onNodeWithText("Google Play 服务保护").assertExists()
-        compose.onNodeWithText("目前仅支持只读检查，自动修复与自动重连未接入。").assertExists()
+        compose.onNodeWithText("FCM 连接与保活").assertExists()
+        compose.onNodeWithText("Google Play 服务保护").assertDoesNotExist()
+        compose.onNodeWithText("查看连接状态").assertExists()
         compose.onNodeWithText("FCM Diagnostics").assertIsDisplayed().performClick()
         compose.onNodeWithText(GMS_DIAGNOSTICS_UNAVAILABLE).assertExists()
         compose.runOnIdle {
@@ -112,7 +113,7 @@ class CompactDiagnosticsScreenTest {
     @Composable private fun Fixture(state: HomeUiState, launch: () -> Boolean = { false }, export: () -> Unit = {},
         stopMonitor: () -> Unit = {}, stopRecording: () -> Unit = {}, reconcile: () -> Unit = {}) {
         evidence.capture(LocalContext.current)
-        MaterialTheme { HomeScreen(state = state, onDetect = {}, onShizukuAction = {},
+        MaterialTheme { HomeScreen(state = state, onShizukuAction = {},
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
             onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},

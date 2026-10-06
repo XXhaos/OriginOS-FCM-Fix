@@ -6,7 +6,6 @@ import io.github.originosfcmguardian.autostart.TargetAutostartStatus
 import io.github.originosfcmguardian.core.trace.ProcessTraceEvent
 import io.github.originosfcmguardian.core.trace.ProcessTraceKind
 import io.github.originosfcmguardian.core.trace.ProcessTraceTarget
-import io.github.originosfcmguardian.device.GmsPackageSnapshot
 import io.github.originosfcmguardian.fcm.FcmReceipt
 import io.github.originosfcmguardian.fcm.FcmUiState
 import io.github.originosfcmguardian.fcm.MessagePriority
@@ -36,6 +35,72 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CombinedDiagnosticReportTest {
+    @Test fun unifiedProtectionSnapshotsAreExportedWithoutAuthoritySecrets() {
+        val protection = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(configured = true,
+            maintenance = io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState.WAITING_CONNECTED,
+            recoveryReady = true, confirmationFailure = io.github.originosfcmguardian.fcmprotection.FcmProtectionConfirmationFailure.NETWORK_UNAVAILABLE)
+        val report = buildCombinedDiagnosticReport(HomeUiState(fcmProtection = protection), environment(), 9000)
+        val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
+        assertTrue(json.contains("\"fcmProtection\":{\"configured\":true"))
+        assertTrue(json.contains("\"maintenance\":\"WAITING_CONNECTED\""))
+        assertTrue(json.contains("\"recoveryReady\":true"))
+        assertTrue(json.contains("\"confirmationFailure\":\"NETWORK_UNAVAILABLE\""))
+        assertFalse(json.contains("consentEpoch")); assertFalse(json.contains("installationBinding"))
+        assertTrue(encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8).contains("统一 FCM 保护授权"))
+    }
+    @Test fun powerReferenceExportIsNullableBoundedAndNeverAttributedEnergy() {
+        val power = io.github.originosfcmguardian.fcmrecovery.FcmPowerReference(80,
+            io.github.originosfcmguardian.fcmrecovery.FcmChargingStatus.DISCHARGING,
+            io.github.originosfcmguardian.fcmrecovery.FcmPluggedSource.UNPLUGGED, false, true,
+            123, 999, "12345678-1234-1234-1234-123456789abc")
+        val events = List(64) { index -> io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEvent(
+            index + 1L, index.toLong(), io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEventAction.POWER_SAMPLE,
+            observationUnknownReason = io.github.originosfcmguardian.core.gms.GmsUnknown.TIMED_OUT,
+            power = if (index == 0) null else if (index == 1) power.copy(batteryPercent = null,
+                mainProcessCpuMillis = null) else power) }
+        val report = buildCombinedDiagnosticReport(HomeUiState(fcmRecovery =
+            io.github.originosfcmguardian.fcmrecovery.FcmRecoveryUiState(events = events)), environment(), 9000)
+        val encoded = encodeCombinedDiagnosticReport(report)
+        assertTrue(encoded.size <= MAX_REPORT_BYTES)
+        val json = encoded.toString(Charsets.UTF_8)
+        listOf("\"powerReference\":null", "\"wholePhoneBatteryPercent\":null",
+            "\"wholePhoneBatteryPercent\":80", "\"guardianMainProcessCpuMillis\":null",
+            "\"guardianMainProcessCpuMillis\":123", "\"observationUnknownReason\":\"TIMED_OUT\"",
+            "not Guardian-attributed mAh or energy", "CPU excludes Shizuku/shell/GMS/radio",
+            "identical processInstanceId").forEach { assertTrue(it, json.contains(it)) }
+        assertFalse(json.contains("cpuDelta")); assertFalse(json.contains("attributedEnergy\":"))
+        val markdown = encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8)
+        assertTrue(markdown.contains("整机参考")); assertTrue(markdown.contains("字段缺失为未知"))
+        assertTrue(markdown.contains("主进程CPUms=未知")); assertTrue(markdown.contains("读取未知原因=TIMED_OUT"))
+    }
+    @Test fun fcmTrialExportRetainsBoundedMetadataAndSeparatesRequestFromObservedConnection() {
+        val events = List(90) { index -> io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEvent(index + 1L,
+            index.toLong(), io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEventAction.REQUEST_RESULT,
+            status = io.github.originosfcmguardian.core.gms.FcmRecoveryStatus.UNKNOWN,
+            reason = io.github.originosfcmguardian.core.gms.FcmRecoveryReason.TIMED_OUT) }
+        val report = buildCombinedDiagnosticReport(HomeUiState(fcmRecovery =
+            io.github.originosfcmguardian.fcmrecovery.FcmRecoveryUiState(configured = true, events = events)), environment(), 9000)
+        assertEquals(64, report.fcmRecoveryTrial.events.size)
+        val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
+        assertTrue(json.contains("\"fcmRecoveryTrial\""))
+        assertTrue(json.contains("\"requestStatus\":\"UNKNOWN\""))
+        assertTrue(json.contains("\"requestReason\":\"TIMED_OUT\""))
+        assertFalse(json.contains("binding")); assertFalse(json.contains("SenderProxy"))
+        assertTrue(encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8).contains("FCM 恢复试用事件"))
+    }
+    @Test
+    fun fcmFocusedExportPreservesPrivilegeStatusAndNamesTheNarrowDailyScope() {
+        val base = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9000)
+        listOf("READY_SHELL", "NOT_RUNNING").forEach { status ->
+            val json = encodeCombinedDiagnosticReport(base.copy(shizukuStatus = status)).toString(Charsets.UTF_8)
+            assertTrue(json.contains("\"shizukuStatus\":\"$status\""))
+            assertTrue(json.contains("\"scope\":\"SELECTED_APP_INSTALLATION_IDENTITY_ONLY\""))
+            assertTrue(json.contains("not stopped flags, FCM connectivity, or notification delivery"))
+            assertFalse(json.contains("\"gms\":"))
+            assertFalse(json.contains("\"privilegedDetection\":"))
+        }
+    }
+
     @Test
     fun retiredAutostartHistoryCannotExportCurrentHealthyOrNeedsActionStatus() {
         listOf(ProtectionCheckStatus.HEALTHY_READ_ONLY, ProtectionCheckStatus.NEEDS_USER_ACTION).forEach { status ->
@@ -121,7 +186,7 @@ class CombinedDiagnosticReportTest {
         val report = buildCombinedDiagnosticReport(state, environment(), 9_000)
         val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
 
-        assertTrue(json.contains("guardian.combined-diagnostic.v3"))
+        assertTrue(json.contains("guardian.combined-diagnostic.v7"))
         assertFalse(json.contains("guardianAutostartStatus"))
         assertFalse(json.contains("autostartStatus"))
         assertFalse(json.contains("ALLOWED"))
@@ -155,8 +220,6 @@ class CombinedDiagnosticReportTest {
 
         val report = buildCombinedDiagnosticReport(state, environment(), 9_000)
 
-        assertEquals(DiagnosticSourceAvailability.LOADING, report.sourceAvailability["normalGms"])
-        assertEquals(DiagnosticSourceAvailability.MISSING, report.sourceAvailability["privilegedDetection"])
         assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["targetSelection"])
         assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["fcmEvidence"])
         assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["notificationFacts"])
@@ -174,7 +237,6 @@ class CombinedDiagnosticReportTest {
     fun pendingAndFailedLoadsAreNotReportedAsEmpty() {
         val pending = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9_000)
 
-        assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["normalGms"])
         assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["targetSelection"])
         assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["fcmEvidence"])
         assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["notificationFacts"])
@@ -205,8 +267,6 @@ class CombinedDiagnosticReportTest {
 
         val failed = buildCombinedDiagnosticReport(
             HomeUiState(
-                gms = GmsPackageSnapshot(true, true, "stale-gms-version", 123L),
-                normalGmsLoadState = HomeSourceLoadState.FAILED,
                 targetSelectionLoadState = HomeSourceLoadState.FAILED,
                 fcmEvidenceLoadState = HomeSourceLoadState.FAILED,
                 notificationFactsLoadState = HomeSourceLoadState.FAILED,
@@ -221,8 +281,6 @@ class CombinedDiagnosticReportTest {
         }.values.all { it == DiagnosticSourceAvailability.UNAVAILABLE || it == DiagnosticSourceAvailability.MISSING })
         assertEquals(DiagnosticSourceAvailability.LOADING, failed.sourceAvailability["stoppedRecovery"])
         assertEquals(DiagnosticSourceAvailability.AVAILABLE, failed.sourceAvailability["automaticProtection"])
-        assertNull(failed.gmsInstalled)
-        assertNull(failed.gmsVersionName)
         val json = encodeCombinedDiagnosticReport(failed).toString(Charsets.UTF_8)
         assertFalse(json.contains("stale-gms-version"))
         assertTrue(json.contains("\"targets\":null"))

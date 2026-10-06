@@ -13,22 +13,6 @@ class SafeCommandTest {
             SafeCommand.GetGmsPackage.argv(),
         )
         assertEquals(
-            listOf("pm", "list", "packages", "--user", "0", "-e", "-U", GMS_PACKAGE_NAME),
-            SafeCommand.GetGmsEnabledPackage.argv(),
-        )
-        assertEquals(
-            listOf("cmd", "appops", "get", "--user", "0", GMS_PACKAGE_NAME, "WAKE_LOCK"),
-            SafeCommand.GetGmsAppOpByPackage(AppOp.WAKE_LOCK).argv(),
-        )
-        assertEquals(
-            listOf("cmd", "appops", "get", "--user", "0", "10208", "WAKE_LOCK"),
-            SafeCommand.GetAppOpByUid(10_208, AppOp.WAKE_LOCK).argv(),
-        )
-        assertEquals(
-            listOf("pm", "path", "--user", "0", "com.vivo.pem"),
-            SafeCommand.GetVivoPemPackagePath.argv(),
-        )
-        assertEquals(
             listOf("pm", "list", "packages", "--user", "0", "-U", GUARDIAN_PACKAGE_NAME),
             SafeCommand.GetGuardianPackage.argv(),
         )
@@ -64,12 +48,6 @@ class SafeCommandTest {
 
     @Test
     fun `factory reconstructs only exact allowlisted operations`() {
-        val command = SafeCommand.GetAppOpByUid(10_208, AppOp.RUN_ANY_IN_BACKGROUND)
-        assertEquals(command, SafeCommandFactory.fromIpc(command.operationId, 10_208))
-        assertEquals(
-            SafeCommand.GetDeviceIdleWhitelist,
-            SafeCommandFactory.fromIpc(SafeCommand.GetDeviceIdleWhitelist.operationId),
-        )
         assertEquals(
             SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger"),
             SafeCommandFactory.fromIpc(
@@ -80,9 +58,6 @@ class SafeCommandTest {
         )
 
         assertNull(SafeCommandFactory.fromIpc("run_arbitrary_shell", 10_208))
-        assertNull(SafeCommandFactory.fromIpc(command.operationId, null))
-        assertNull(SafeCommandFactory.fromIpc(command.operationId, 100_000))
-        assertNull(SafeCommandFactory.fromIpc(SafeCommand.GetDeviceIdleWhitelist.operationId, 10_208))
         assertNull(SafeCommandFactory.fromIpc(SafeCommand.GetGuardianAutostartRow.operationId, 10_362))
         assertNull(
             SafeCommandFactory.fromIpc(
@@ -131,11 +106,13 @@ class SafeCommandTest {
     }
 
     @Test
-    fun `uid command rejects root cross-user and invalid values`() {
-        for (uid in listOf(Int.MIN_VALUE, -1, 0, 100_000, 999_102_08)) {
-            assertFailsWith<IllegalArgumentException> {
-                SafeCommand.GetAppOpByUid(uid, AppOp.WAKE_LOCK)
-            }
+    fun `retired standalone GMS policy commands cannot be dispatched`() {
+        listOf("get_gms_enabled_package_user_0", "get_deviceidle_whitelist",
+            "get_vivo_pem_list", "get_vivo_pem_package_path",
+            "get_gms_appop_package_wake_lock", "get_gms_appop_uid_run_any_in_background"
+        ).forEach { id ->
+            assertNull(SafeCommandFactory.fromIpc(id), id)
+            assertNull(SafeCommandFactory.fromIpc(id, 10208), id)
         }
     }
 

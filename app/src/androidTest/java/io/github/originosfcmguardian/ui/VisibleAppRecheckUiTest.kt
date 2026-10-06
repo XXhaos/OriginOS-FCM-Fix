@@ -89,7 +89,7 @@ class VisibleAppRecheckUiTest {
     }
 
     @Composable private fun Fixture(state: HomeUiState, check: (SelectedTargetIdentity) -> Unit) {
-        MaterialTheme { HomeScreen(state = state, onDetect = {}, onShizukuAction = {},
+        MaterialTheme { HomeScreen(state = state, onShizukuAction = {},
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = { error("No package-only check expected") },
             onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},

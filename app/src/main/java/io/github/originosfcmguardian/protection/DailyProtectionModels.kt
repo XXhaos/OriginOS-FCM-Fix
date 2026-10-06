@@ -1,6 +1,5 @@
 package io.github.originosfcmguardian.protection
 
-import io.github.originosfcmguardian.core.DetectionReport
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 
 enum class ProtectionCheckReason {
@@ -51,7 +50,8 @@ data class DailyProtectionReport(
 ) {
     /** Immutable history remains readable but must not supply current permission conclusions. */
     val containsRetiredAutostartEvidence: Boolean
-        get() = summary.contains("自启动") || targets.any {
+        get() = summary.contains("Google Play") || summary.contains("后台权限") ||
+            summary.contains("待机白名单") || summary.contains("GMS=") || summary.contains("自启动") || targets.any {
             it.status in setOf(
                 TargetCheckStatus.ALLOWED,
                 TargetCheckStatus.NEEDS_USER_ACTION,
@@ -69,9 +69,4 @@ data class DailyProtectionReport(
     companion object {
         const val MAX_SUMMARY_CHARS = 800
     }
-}
-
-internal interface ProtectionReadPort : AutoCloseable {
-    suspend fun detectCore(): DetectionReport
-    override fun close()
 }

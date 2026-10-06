@@ -195,7 +195,7 @@ class ShizukuSafetyTest {
         )
         assertEquals(
             IpcArguments(IpcContract.NO_UID_ARGUMENT, null),
-            ipcArguments(SafeCommand.GetDeviceIdleWhitelist),
+            ipcArguments(SafeCommand.GetCurrentUser),
         )
     }
 

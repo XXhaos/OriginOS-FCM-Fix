@@ -1,6 +1,9 @@
 package io.github.originosfcmguardian.privileged
 
 import android.content.Intent
+import android.content.ComponentName
+import android.content.pm.ApplicationInfo
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
@@ -80,4 +83,17 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         return GmsReceiverInspection(true, receivers)
     }
     override fun elapsedRealtime() = SystemClock.elapsedRealtime()
+    override fun recoverySenderQualified(): Boolean {
+        val component = ComponentName(GMS_OBSERVATION_PACKAGE, FcmRecoveryPolicy.COMPONENT)
+        val receiver = api.getMethod("getReceiverInfo", ComponentName::class.java, Long::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType).invoke(remote, component, 0L, 0) as? ActivityInfo ?: return false
+        val app = receiver.applicationInfo ?: return false
+        val componentState = api.getMethod("getComponentEnabledSetting", ComponentName::class.java,
+            Int::class.javaPrimitiveType).invoke(remote, component, 0) as? Int ?: return false
+        return receiver.packageName == GMS_OBSERVATION_PACKAGE && receiver.name == FcmRecoveryPolicy.COMPONENT &&
+            receiver.exported && receiver.enabled && receiver.permission == null && app.enabled &&
+            app.flags and ApplicationInfo.FLAG_INSTALLED != 0 && app.flags and ApplicationInfo.FLAG_STOPPED == 0 &&
+            componentState in setOf(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.COMPONENT_ENABLED_STATE_ENABLED) &&
+            FcmPackageStateReader.read()
+    }
 }

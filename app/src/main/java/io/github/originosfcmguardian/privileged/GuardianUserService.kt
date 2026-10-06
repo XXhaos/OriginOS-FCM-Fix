@@ -32,6 +32,7 @@ class GuardianUserService : IGuardianUserService.Stub {
     private val gmsConnectionReader = GmsConnectionProbeRunner(::SystemGmsConnectionReadPort)
     private val gmsHeartbeatCallerReader = GmsHeartbeatCallerProbeRunner(::SystemGmsHeartbeatCallerReadPort)
     private val gmsHeartbeatRunner = GmsHeartbeatRunner(clock = android.os.SystemClock::elapsedRealtime)
+    private val fcmRecoveryRunner = FcmRecoveryRunner()
 
     constructor()
 
@@ -39,6 +40,18 @@ class GuardianUserService : IGuardianUserService.Stub {
     constructor(@Suppress("UNUSED_PARAMETER") context: Context)
 
     override fun getServiceUid(): Int = Os.getuid()
+
+    override fun requestFcmRecovery(requestId: Long, expectedBinding: String?, authority: IFcmRecoveryAuthority?): Bundle {
+        fun bundle(value: FcmRecoveryResult) = Bundle().apply { putString(FcmRecoveryCodec.KEY, FcmRecoveryCodec.encode(value)) }
+        if (getServiceUid() != 2000 || requestId <= 0 || expectedBinding == null || authority == null)
+            return bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.NOT_SENT, FcmRecoveryReason.INVALID_REQUEST))
+        val caller = Binder.getCallingUid()
+        if (!activeRequests.add(requestId)) return bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.NOT_SENT, FcmRecoveryReason.BUSY))
+        return try { bundle(fcmRecoveryRunner.request(requestId, caller, expectedBinding,
+            { authority.asBinder().isBinderAlive && authority.authorizeDispatch() }, { requestId in cancelledRequests })) }
+        catch (_: Throwable) { bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.UNKNOWN, FcmRecoveryReason.BRIDGE_UNAVAILABLE)) }
+        finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
+    }
 
     override fun qualifyHeartbeatCaller(requestId: Long, previousIdentity: String?): Bundle {
         // Capture on the Binder thread before dispatching to the bounded reader.
@@ -177,14 +190,6 @@ class GuardianUserService : IGuardianUserService.Stub {
             if (requestId in cancelledRequests) {
                 return errorResult(IpcContract.EXIT_CANCELLED, "Command cancelled")
             }
-            if (command is SafeCommand.GetAppOpByUid) {
-                val verificationError = verifyFreshGmsUid(
-                    requestedUid = command.uid,
-                    requestId = requestId,
-                    deadlineNanos = deadlineNanos,
-                )
-                if (verificationError != null) return verificationError
-            }
             if (command is SafeCommand.GetTargetProcessEvents) {
                 val verification = verifyFreshExclusiveSelectedTargetUid(
                     packageName = command.packageName,
@@ -245,10 +250,12 @@ class GuardianUserService : IGuardianUserService.Stub {
 
     override fun cancel(requestId: Long) {
         cancelledRequests.add(requestId)
+        fcmRecoveryRunner.cancel(requestId)
         running.remove(requestId)?.let(::terminateProcess)
     }
 
     override fun destroy() {
+        fcmRecoveryRunner.close()
         gmsHeartbeatRunner.close()
         gmsConnectionReader.close()
         gmsHeartbeatCallerReader.close()
@@ -274,45 +281,6 @@ class GuardianUserService : IGuardianUserService.Stub {
         putString(IpcContract.KEY_STDERR, result.stderr)
         putBoolean(IpcContract.KEY_TIMED_OUT, result.timedOut)
         putBoolean(IpcContract.KEY_OUTPUT_TRUNCATED, result.outputTruncated)
-    }
-
-    private fun verifyFreshGmsUid(
-        requestedUid: Int,
-        requestId: Long,
-        deadlineNanos: Long,
-    ): Bundle? {
-        val remainingMillis = remainingMillis(deadlineNanos)
-        if (remainingMillis <= 0) return timedOutResult("GMS UID validation budget exhausted")
-        val command = SafeCommand.GetGmsPackage
-        val argv = fixedSystemExecutable(command.argv())
-            ?: return errorResult(IpcContract.EXIT_INVALID_REQUEST, "Validation executable is not allowlisted")
-        val result = runner.run(
-            argv = argv,
-            timeoutMillis = remainingMillis,
-            wasCancelled = { requestId in cancelledRequests },
-            onProcessStarted = { process ->
-                running[requestId] = process
-                if (requestId in cancelledRequests) terminateProcess(process)
-            },
-        )
-        if (requestId in cancelledRequests || result.exitCode == IpcContract.EXIT_CANCELLED) {
-            return errorResult(IpcContract.EXIT_CANCELLED, "Command cancelled")
-        }
-        if (result.timedOut) return timedOutResult("GMS UID validation timed out")
-        if (result.outputTruncated || result.exitCode != 0 || result.stderr.isNotBlank()) {
-            return errorResult(
-                IpcContract.EXIT_PERMISSION_DENIED,
-                "Fresh exact GMS UID validation failed",
-            )
-        }
-        val exactUid = verifiedExactGmsUid(result.stdout)
-        if (exactUid != requestedUid) {
-            return errorResult(
-                IpcContract.EXIT_PERMISSION_DENIED,
-                "Requested UID does not match the fresh exact GMS package UID",
-            )
-        }
-        return null
     }
 
     private fun verifyFreshGuardianUid(

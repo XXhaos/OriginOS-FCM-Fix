@@ -35,7 +35,7 @@ object GmsHeartbeatPolicy {
         val sample = observation as GmsConnectionObservation.Sample
         val source = sample.gcmService
         if (source.userId != 0 || source.completeness != SourceCompleteness.COMPLETE ||
-            source.state == GcmConnectionState.UNKNOWN) return GmsHeartbeatReason.OBSERVATION_UNKNOWN
+            source.state == GcmConnectionState.UNKNOWN || source.state == GcmConnectionState.SERVICE_ABSENT) return GmsHeartbeatReason.OBSERVATION_UNKNOWN
         val elapsed = source.elapsedRealtimeMillis ?: return GmsHeartbeatReason.OBSERVATION_UNKNOWN
         if (!sample.isFresh(nowElapsed) || nowElapsed < elapsed || nowElapsed - elapsed > 30_000) return GmsHeartbeatReason.STALE_OBSERVATION
         return if (source.state == GcmConnectionState.REPORTED_CONNECTED) null else GmsHeartbeatReason.REPORTED_DISCONNECTED

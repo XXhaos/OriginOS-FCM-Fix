@@ -14,6 +14,10 @@ class GmsHeartbeatColdControllerTest {
     private val newOwner = oldOwner.copy(pid = 5002, startTicks = 200L)
     private inner class Backend : AutomaticHeartbeatBackend {
         override val callerQualificationRequired = true
+        var requireBundle = false
+        var parentEpoch: String? = null
+        override val bundledEpochRequired get() = requireBundle
+        override fun bundleAuthorized(epoch: String?) = !requireBundle || epoch != null && epoch == parentEpoch
         var identity: GmsHeartbeatCallerIdentity? = newOwner
         var proof = GmsHeartbeatCallerReason.OLD_INSTANCE_GONE
         var qualifiedPrevious: GmsHeartbeatCallerIdentity? = null
@@ -81,6 +85,25 @@ class GmsHeartbeatColdControllerTest {
             assertEquals(0, f.backend.requests); assertFalse(f.controller.manualHeartbeatAllowed())
             f.now += 899_999; f.wake.send(Unit); yield()
             assertEquals(0, f.backend.requests); assertEquals(1L, f.waits.last())
+        }
+    }
+    @Test fun completeParentBDoesNotColdResumeLegacyChildAEvenOnSameInstallation() = runBlocking {
+        Fixture().use { f ->
+            val childA = f.store.read()!!.durableConsent!!.epoch
+            f.backend.requireBundle = true; f.backend.parentEpoch = UUID.randomUUID().toString()
+            assertNotEquals(childA, f.backend.parentEpoch)
+            f.initialize(); yield()
+            assertEquals(0, f.backend.arms); assertEquals(0, f.backend.requests)
+            assertFalse(f.controller.confirmDurable()) // Ordinary legacy entry cannot mint random child C.
+            assertEquals(0, f.backend.arms); assertEquals(childA, f.store.read()!!.durableConsent!!.epoch)
+        }
+    }
+    @Test fun associatedBundleEpochStillUsesQualifiedColdContinuationAndFullInterval() = runBlocking {
+        Fixture().use { f ->
+            f.backend.requireBundle = true; f.backend.parentEpoch = f.store.read()!!.durableConsent!!.epoch
+            f.initialize()
+            assertEquals(1, f.backend.arms); assertEquals(0, f.backend.requests)
+            assertEquals(900_000L, f.waits.last())
         }
     }
     @Test fun newExplicitConsentCrossBootRearmsNewOwnerSameEpochAndWaitsFull15Minutes() = runBlocking {

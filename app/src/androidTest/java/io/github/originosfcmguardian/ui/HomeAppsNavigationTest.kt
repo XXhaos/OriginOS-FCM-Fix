@@ -228,7 +228,7 @@ class HomeAppsNavigationTest {
         val visibleState = state.copy(visibleApps = state.selectedTargets.map {
             VisibleProtectionApp(it.identity.packageName, it.label, it.identity, supported = true)
         }, visibleAppsLoadState = HomeSourceLoadState.LOADED)
-        MaterialTheme { HomeScreen(state = visibleState, onDetect = check, onShizukuAction = shizukuAction,
+        MaterialTheme { HomeScreen(state = visibleState, onShizukuAction = shizukuAction,
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = { check() },
             onRunDailyProtection = check, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},

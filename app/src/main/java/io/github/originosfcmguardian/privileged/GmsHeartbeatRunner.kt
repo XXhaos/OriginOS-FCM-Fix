@@ -173,7 +173,8 @@ internal class GmsHeartbeatRunner(
 }
 
 /** No drain threads or independent wait/get budgets: validation and pipe reads share one deadline. */
-internal fun readHeartbeatProcess(process: Process, deadline: Long, interruption: () -> GmsHeartbeatReason?): GmsHeartbeatReason {
+internal fun readHeartbeatProcess(process: Process, deadline: Long, interruption: () -> GmsHeartbeatReason?,
+    completion: (ByteArray) -> GmsHeartbeatReason = ::heartbeatCompletion): GmsHeartbeatReason {
     val out = ByteArrayOutputStream()
     val chunk = ByteArray(4096)
     var bytes = 0
@@ -200,7 +201,7 @@ internal fun readHeartbeatProcess(process: Process, deadline: Long, interruption
             if (!process.isAlive) {
                 drain(process.inputStream, true)?.let { return it }
                 drain(process.errorStream, false)?.let { return it }
-                return if (process.exitValue() == 0 && !stderr) heartbeatCompletion(out.toByteArray())
+                return if (process.exitValue() == 0 && !stderr) completion(out.toByteArray())
                 else GmsHeartbeatReason.COMMAND_FAILED
             }
             process.waitFor(10, TimeUnit.MILLISECONDS)
