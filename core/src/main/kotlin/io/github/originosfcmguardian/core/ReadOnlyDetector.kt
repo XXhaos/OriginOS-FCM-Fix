@@ -3,7 +3,12 @@ package io.github.originosfcmguardian.core
 import kotlinx.coroutines.CancellationException
 
 class ReadOnlyDetector(private val executor: PrivilegedExecutor) {
-    suspend fun detect(): DetectionReport {
+    suspend fun detect(): DetectionReport = detect(includePem = true)
+
+    /** Fixed GMS configuration reads only; daily/full detection retains its PEM reads. */
+    suspend fun detectGmsConfiguration(): DetectionReport = detect(includePem = false)
+
+    private suspend fun detect(includePem: Boolean): DetectionReport {
         val available = try {
             executor.isAvailable()
         } catch (cancelled: CancellationException) {
@@ -56,10 +61,10 @@ class ReadOnlyDetector(private val executor: PrivilegedExecutor) {
             )
         }
 
-        val pem = PemParser.parse(
+        val pem = if (includePem) PemParser.parse(
             listResult = safeExec(SafeCommand.GetVivoPemList),
             pathResult = safeExec(SafeCommand.GetVivoPemPackagePath),
-        )
+        ) else PemState(Presence.UNKNOWN, PemListState.UNKNOWN, emptySet(), "", "")
 
         val appOps = gms.appId?.let { appId ->
             AppOp.entries.associateWith { operation ->

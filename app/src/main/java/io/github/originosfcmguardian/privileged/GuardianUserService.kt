@@ -2,14 +2,13 @@ package io.github.originosfcmguardian.privileged
 
 import android.content.Context
 import android.os.Bundle
+import android.os.Binder
+import android.os.IBinder
+import io.github.originosfcmguardian.core.gms.*
 import android.system.Os
 import androidx.annotation.Keep
 import io.github.originosfcmguardian.core.GMS_PACKAGE_NAME
 import io.github.originosfcmguardian.core.GUARDIAN_PACKAGE_NAME
-import io.github.originosfcmguardian.core.AutostartUnknownReason
-import io.github.originosfcmguardian.core.CommandResult
-import io.github.originosfcmguardian.core.GuardianAutostartParser
-import io.github.originosfcmguardian.core.TargetAutostartParser
 import io.github.originosfcmguardian.core.SafeCommand
 import io.github.originosfcmguardian.core.SafeCommandFactory
 import io.github.originosfcmguardian.core.isUserZeroAppId
@@ -29,6 +28,10 @@ class GuardianUserService : IGuardianUserService.Stub {
     private val running = ConcurrentHashMap<Long, Process>()
     private val activeRequests = ConcurrentHashMap.newKeySet<Long>()
     private val cancelledRequests = ConcurrentHashMap.newKeySet<Long>()
+    private val stoppedIdentityReader = StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort)
+    private val gmsConnectionReader = GmsConnectionProbeRunner(::SystemGmsConnectionReadPort)
+    private val gmsHeartbeatCallerReader = GmsHeartbeatCallerProbeRunner(::SystemGmsHeartbeatCallerReadPort)
+    private val gmsHeartbeatRunner = GmsHeartbeatRunner(clock = android.os.SystemClock::elapsedRealtime)
 
     constructor()
 
@@ -36,6 +39,111 @@ class GuardianUserService : IGuardianUserService.Stub {
     constructor(@Suppress("UNUSED_PARAMETER") context: Context)
 
     override fun getServiceUid(): Int = Os.getuid()
+
+    override fun qualifyHeartbeatCaller(requestId: Long, previousIdentity: String?): Bundle {
+        // Capture on the Binder thread before dispatching to the bounded reader.
+        val callerUid = Binder.getCallingUid()
+        val callerPid = Binder.getCallingPid()
+        fun bundle(value: GmsHeartbeatCallerQualification) = Bundle().apply {
+            putString(GmsHeartbeatCallerCodec.BUNDLE_KEY, GmsHeartbeatCallerCodec.encode(requestId, value))
+        }
+        fun unknown() = bundle(GmsHeartbeatCallerQualification(null, GmsHeartbeatCallerReason.UNKNOWN))
+        if (getServiceUid() != 2000 || requestId <= 0) return unknown()
+        val previous = previousIdentity?.let { GmsHeartbeatCallerCodec.decodeIdentity(it) ?: return unknown() }
+        if (!activeRequests.add(requestId)) return unknown()
+        return try {
+            val value = gmsHeartbeatCallerReader.read(callerUid, callerPid, previous) { requestId in cancelledRequests }
+            if (requestId in cancelledRequests) unknown() else bundle(value)
+        } catch (_: Throwable) { unknown() }
+        finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
+    }
+
+    override fun armAutomaticGmsHeartbeat(requestId: Long, generation: Long, expectedBindingDigest: String?, lifetime: IBinder?): Bundle {
+        fun result(value: GmsAutoArmResult) = Bundle().apply {
+            putString(GmsAutoArmCodec.BUNDLE_KEY, GmsAutoArmCodec.encode(requestId, value))
+        }
+        if (getServiceUid() != 2000 || lifetime == null || expectedBindingDigest == null || requestId <= 0)
+            return result(GmsAutoArmResult(null, GmsAutoArmReason.INVALID_REQUEST))
+        val caller = Binder.getCallingUid()
+        if (!activeRequests.add(requestId)) return result(GmsAutoArmResult(null, GmsAutoArmReason.BUSY))
+        return try { result(gmsHeartbeatRunner.armAutomatic(requestId, caller, generation, expectedBindingDigest,
+            GmsHeartbeatBinderLifetime(lifetime)) { requestId in cancelledRequests }) }
+        catch (_: Throwable) { result(GmsAutoArmResult(null, GmsAutoArmReason.BRIDGE_UNAVAILABLE)) }
+        finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
+    }
+    override fun requestAutomaticGmsHeartbeat(requestId: Long, sessionId: String?, generation: Long,
+                                              bindingDigest: String?, attemptId: String?): Bundle {
+        fun bundle(value: GmsHeartbeatResult) = Bundle().apply { putString(GmsHeartbeatCodec.BUNDLE_KEY, GmsHeartbeatCodec.encode(value)) }
+        if (getServiceUid() != 2000 || requestId <= 0 || sessionId == null || bindingDigest == null || attemptId == null)
+            return bundle(GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.INVALID_REQUEST))
+        val automaticSession = runCatching { GmsAutoSession(sessionId, generation, bindingDigest) }.getOrNull()
+            ?: return bundle(GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.INVALID_REQUEST))
+        val caller = Binder.getCallingUid()
+        if (!activeRequests.add(requestId)) return bundle(GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.BUSY))
+        return try { bundle(gmsHeartbeatRunner.requestAutomatic(requestId, caller, automaticSession, attemptId) { requestId in cancelledRequests }) }
+        catch (_: Throwable) { bundle(GmsHeartbeatResult.unknown(requestId, GmsHeartbeatReason.BRIDGE_UNAVAILABLE)) }
+        finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
+    }
+    override fun revokeAutomaticGmsHeartbeat(generation: Long, sessionId: String?): Boolean =
+        getServiceUid() == 2000 && gmsHeartbeatRunner.revokeAutomatic(Binder.getCallingUid(), generation, sessionId)
+
+    /** Explicit manual request only. Target recovery leases grant no authority to this endpoint. */
+    override fun requestGmsHeartbeat(requestId: Long): Bundle {
+        fun bundle(value: io.github.originosfcmguardian.core.gms.GmsHeartbeatResult) = Bundle().apply {
+            putString(io.github.originosfcmguardian.core.gms.GmsHeartbeatCodec.BUNDLE_KEY,
+                io.github.originosfcmguardian.core.gms.GmsHeartbeatCodec.encode(value))
+        }
+        fun notSent(reason: io.github.originosfcmguardian.core.gms.GmsHeartbeatReason) = bundle(
+            io.github.originosfcmguardian.core.gms.GmsHeartbeatResult.notSent(requestId, reason))
+        if (getServiceUid() != 2000) return notSent(io.github.originosfcmguardian.core.gms.GmsHeartbeatReason.SHELL_UNAVAILABLE)
+        if (requestId <= 0) return notSent(io.github.originosfcmguardian.core.gms.GmsHeartbeatReason.INVALID_REQUEST)
+        if (!activeRequests.add(requestId)) return notSent(io.github.originosfcmguardian.core.gms.GmsHeartbeatReason.BUSY)
+        return try { bundle(gmsHeartbeatRunner.request(requestId) { requestId in cancelledRequests }) }
+        catch (_: Throwable) { bundle(io.github.originosfcmguardian.core.gms.GmsHeartbeatResult.unknown(
+            requestId, io.github.originosfcmguardian.core.gms.GmsHeartbeatReason.BRIDGE_UNAVAILABLE)) }
+        finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
+    }
+
+    override fun readGmsConnection(requestId: Long): Bundle {
+        fun bundle(value: io.github.originosfcmguardian.core.gms.GmsConnectionObservation) = Bundle().apply {
+            putString(io.github.originosfcmguardian.core.gms.GmsObservationCodec.BUNDLE_KEY,
+                io.github.originosfcmguardian.core.gms.GmsObservationCodec.encode(value))
+        }
+        fun unknown(reason: io.github.originosfcmguardian.core.gms.GmsUnknown) = bundle(
+            io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Unknown(requestId, reason))
+        if (getServiceUid() != 2000) return unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.SHELL_UNAVAILABLE)
+        if (requestId <= 0) return unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.INVALID_REQUEST)
+        if (!activeRequests.add(requestId)) return unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.BUSY)
+        return try {
+            val value = gmsConnectionReader.read(requestId) { requestId in cancelledRequests }
+            if (requestId in cancelledRequests) unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.CANCELLED) else bundle(value)
+        } catch (_: Throwable) { unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.CAPABILITY_UNAVAILABLE) }
+        finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
+    }
+
+    /** Separate read-only IPC: this endpoint cannot dispatch commands or accept target identity. */
+    override fun readTelegramStoppedIdentity(requestId: Long): Bundle {
+        fun unknown(reason: StoppedObservationUnknown) = stoppedObservationBundle(
+            StoppedTargetObservation.Unknown(requestId, reason),
+        )
+        if (!isAcceptedServiceUid(getServiceUid())) return unknown(StoppedObservationUnknown.SHELL_UNAVAILABLE)
+        if (requestId <= 0) return unknown(StoppedObservationUnknown.INVALID_REQUEST)
+        if (!activeRequests.add(requestId)) return unknown(StoppedObservationUnknown.BUSY)
+        return try {
+            val observation = stoppedIdentityReader.read(requestId) { requestId in cancelledRequests }
+            if (requestId in cancelledRequests) unknown(StoppedObservationUnknown.CANCELLED)
+            else stoppedObservationBundle(observation)
+        } catch (_: Throwable) {
+            unknown(StoppedObservationUnknown.CAPABILITY_UNAVAILABLE)
+        } finally {
+            activeRequests.remove(requestId)
+            cancelledRequests.remove(requestId)
+        }
+    }
+
+    private fun stoppedObservationBundle(observation: StoppedTargetObservation) = Bundle().apply {
+        putString(StoppedObservationCodec.BUNDLE_KEY, StoppedObservationCodec.encode(observation))
+    }
 
     override fun execute(
         requestId: Long,
@@ -76,25 +184,6 @@ class GuardianUserService : IGuardianUserService.Stub {
                     deadlineNanos = deadlineNanos,
                 )
                 if (verificationError != null) return verificationError
-            }
-            var verifiedGuardianUid: Int? = null
-            if (command == SafeCommand.GetGuardianAutostartRow) {
-                val verification = verifyFreshGuardianUid(
-                    requestId = requestId,
-                    deadlineNanos = deadlineNanos,
-                )
-                if (verification.error != null) return verification.error
-                verifiedGuardianUid = verification.uid
-            }
-            var verifiedTargetUid: Int? = null
-            if (command is SafeCommand.GetTargetAutostartRow) {
-                val verification = verifyFreshSelectedTargetUid(
-                    packageName = command.packageName,
-                    requestId = requestId,
-                    deadlineNanos = deadlineNanos,
-                )
-                if (verification.error != null) return verification.error
-                verifiedTargetUid = verification.uid
             }
             if (command is SafeCommand.GetTargetProcessEvents) {
                 val verification = verifyFreshExclusiveSelectedTargetUid(
@@ -138,51 +227,6 @@ class GuardianUserService : IGuardianUserService.Stub {
                 if (verification.error != null) return verification.error
                 return remoteResult(structured)
             }
-            if (
-                command == SafeCommand.GetGuardianAutostartRow &&
-                result.exitCode == 0 &&
-                !result.timedOut &&
-                !result.outputTruncated &&
-                result.stderr.isBlank()
-            ) {
-                val parsed = GuardianAutostartParser.parse(
-                    CommandResult(command, 0, result.stdout, ""),
-                    requireNotNull(verifiedGuardianUid),
-                )
-                if (parsed.unknownReason in setOf(
-                        AutostartUnknownReason.PACKAGE_MISMATCH,
-                        AutostartUnknownReason.UID_MISMATCH,
-                    )
-                ) {
-                    return errorResult(
-                        IpcContract.EXIT_PERMISSION_DENIED,
-                        "Autostart row does not match the fresh exact Guardian identity",
-                    )
-                }
-            }
-            if (
-                command is SafeCommand.GetTargetAutostartRow &&
-                result.exitCode == 0 &&
-                !result.timedOut &&
-                !result.outputTruncated &&
-                result.stderr.isBlank()
-            ) {
-                val parsed = TargetAutostartParser.parse(
-                    CommandResult(command, 0, result.stdout, ""),
-                    command.packageName,
-                    requireNotNull(verifiedTargetUid),
-                )
-                if (parsed.unknownReason in setOf(
-                        AutostartUnknownReason.PACKAGE_MISMATCH,
-                        AutostartUnknownReason.UID_MISMATCH,
-                    )
-                ) {
-                    return errorResult(
-                        IpcContract.EXIT_PERMISSION_DENIED,
-                        "Autostart row does not match the fresh exact selected-target identity",
-                    )
-                }
-            }
             return remoteResult(result)
         } catch (error: Throwable) {
             if (command is SafeCommand.GetTargetProcessEvents) {
@@ -205,6 +249,10 @@ class GuardianUserService : IGuardianUserService.Stub {
     }
 
     override fun destroy() {
+        gmsHeartbeatRunner.close()
+        gmsConnectionReader.close()
+        gmsHeartbeatCallerReader.close()
+        stoppedIdentityReader.close()
         running.values.forEach(::terminateProcess)
         running.clear()
         activeRequests.clear()
@@ -534,7 +582,6 @@ internal fun fixedSystemExecutable(argv: List<String>): List<String>? {
     val executable = when (argv.first()) {
         "am" -> "/system/bin/am"
         "cmd" -> "/system/bin/cmd"
-        "content" -> "/system/bin/content"
         "getprop" -> "/system/bin/getprop"
         "id" -> "/system/bin/id"
         "logcat" -> "/system/bin/logcat"

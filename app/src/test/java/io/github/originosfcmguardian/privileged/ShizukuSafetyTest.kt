@@ -9,6 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class ShizukuSafetyTest {
     @Test
@@ -54,10 +55,7 @@ class ShizukuSafetyTest {
         )
         assertEquals(null, fixedSystemExecutable(listOf("sh", "-c", "id")))
         assertEquals(null, fixedSystemExecutable(emptyList()))
-        assertEquals(
-            listOf("/system/bin/content", "query", "--user", "0"),
-            fixedSystemExecutable(listOf("content", "query", "--user", "0")),
-        )
+        assertNull(fixedSystemExecutable(listOf("content", "query", "--user", "0")))
         assertEquals(
             listOf("/system/bin/logcat", "-b", "events", "-d"),
             fixedSystemExecutable(listOf("logcat", "-b", "events", "-d")),
@@ -263,7 +261,7 @@ class ShizukuSafetyTest {
     @Test
     fun outputLimitIsReportedAndStillReturnsBoundedOutput() {
         val result = RemoteCommandRunner(maxCombinedOutputBytes = 4).run(
-            argv = listOf("/usr/bin/printf", "abcdef"),
+            argv = fixtureCommand("output"),
             wasCancelled = { false },
             onProcessStarted = {},
         )
@@ -276,7 +274,7 @@ class ShizukuSafetyTest {
     @Test
     fun cancelledRemoteCommandKeepsCancelledExitCode() {
         val result = RemoteCommandRunner().run(
-            argv = listOf("/usr/bin/true"),
+            argv = fixtureCommand("silent"),
             wasCancelled = { true },
             onProcessStarted = {},
         )
@@ -284,5 +282,19 @@ class ShizukuSafetyTest {
         assertEquals(IpcContract.EXIT_CANCELLED, result.exitCode)
         assertEquals("Command cancelled", result.stderr)
         assertFalse(result.timedOut)
+    }
+
+    private fun fixtureCommand(action: String): List<String> = listOf(
+        File(System.getProperty("java.home"), "bin/java${if (isWindows()) ".exe" else ""}").path,
+        "-cp",
+        File(Class.forName(FIXTURE_CLASS).protectionDomain.codeSource.location.toURI()).path,
+        FIXTURE_CLASS,
+        action,
+    )
+
+    private fun isWindows(): Boolean = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+
+    private companion object {
+        const val FIXTURE_CLASS = "io.github.originosfcmguardian.privileged.RemoteCommandRunnerFixture"
     }
 }

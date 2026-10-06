@@ -11,22 +11,33 @@ if (hasGoogleServicesConfig) {
 android {
     namespace = "io.github.originosfcmguardian"
     compileSdk = 37
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "io.github.originosfcmguardian"
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0-read-only"
+        versionCode = 58
+        versionName = "0.1.0-gms-check-preview"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "FIREBASE_CONFIG_INCLUDED", hasGoogleServicesConfig.toString())
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildFeatures {
         aidl = true
         compose = true
         buildConfig = true
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
     }
 
     // Optional project-specific copy of the existing test-device debug key when changing computers.
@@ -43,7 +54,20 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // Shizuku's APK-only class loader needs a verified extracted library for System.load.
+        // This costs installed disk space and APK compression; it grants no execution entry point.
+        jniLibs.useLegacyPackaging = true
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "4.1.2"
+        }
+    }
+
+    // Retain explicit redistribution license texts in both APK variants.
+    sourceSets.getByName("main").assets.srcDir(rootProject.file("licenses"))
 }
 
 dependencies {

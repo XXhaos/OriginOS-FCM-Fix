@@ -26,7 +26,30 @@ class TargetSelectionTest {
     }
 
     @Test
-    fun malformedDuplicateAndOversizedSelectionFailClosed() {
+    fun moreThanTenIdentitiesRoundTripWithoutTruncation() {
+        val identities = (0 until 12).map(::identityAt)
+
+        val encoded = TargetSelectionCodec.encode(identities)
+
+        assertEquals(
+            TargetSelectionDecodeResult.Valid(identities.sortedBy { it.packageName }),
+            TargetSelectionCodec.decode(encoded),
+        )
+    }
+
+    @Test
+    fun storeAcceptsMoreThanTenIdentitiesWithoutDroppingEarlierSelections() {
+        val preferences = FakeTargetSelectionPreferences("")
+        val store = TargetSelectionStore(preferences)
+        val identities = (0 until 12).map(::identityAt)
+
+        identities.forEach { selected -> assertTrue(store.replace(selected)) }
+
+        assertEquals(identities.sortedBy { it.packageName }, store.load())
+    }
+
+    @Test
+    fun malformedDuplicateAndByteOversizedSelectionFailClosed() {
         assertEquals(TargetSelectionDecodeResult.Corrupt, TargetSelectionCodec.decode("bad|row"))
         assertEquals(
             TargetSelectionDecodeResult.Corrupt,
@@ -35,9 +58,7 @@ class TargetSelectionTest {
                     TargetSelectionCodec.encode(listOf(identity)),
             ),
         )
-        val oversized = (0..MAX_SELECTED_TARGETS).joinToString("\n") { index ->
-            "app.example.p$index|${10_000 + index}|${1_700_000_000_000 + index}|${"b".repeat(64)}"
-        }
+        val oversized = "x".repeat(MAX_TARGET_SELECTION_BYTES + 1)
         assertEquals(TargetSelectionDecodeResult.Corrupt, TargetSelectionCodec.decode(oversized))
     }
 
@@ -81,6 +102,13 @@ class TargetSelectionTest {
         assertEquals(identity, tracker.consumeReturn())
         assertNull(tracker.consumeReturn())
     }
+
+    private fun identityAt(index: Int) = SelectedTargetIdentity(
+        packageName = "app.example.p$index",
+        uid = 10_000 + index,
+        firstInstallTime = 1_700_000_000_000 + index,
+        signerSha256 = listOf("b".repeat(64)),
+    )
 
     private class FakeTargetSelectionPreferences(initial: String) : TargetSelectionPreferences {
         var raw: String = initial

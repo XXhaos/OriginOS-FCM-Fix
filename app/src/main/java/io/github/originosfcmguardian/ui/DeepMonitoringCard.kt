@@ -66,7 +66,7 @@ internal fun DeepMonitoringCard(
                     )
                 }
             }
-            if (packages.isEmpty()) Text("请先在“即时通知应用”中选择目标应用。")
+            if (packages.isEmpty()) Text("请先在“关注应用”中选择目标应用。")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { chosen?.let(onStart) },
@@ -115,6 +115,8 @@ internal fun DeepMonitoringCard(
                             ProcessTraceKind.PROCESS_START -> "进程启动（PID ${event.pid}）"
                             ProcessTraceKind.UID_ACTIVE -> "UID 活跃"
                             ProcessTraceKind.UID_IDLE -> "UID 空闲"
+                            ProcessTraceKind.UID_RUNNING -> "UID 开始运行"
+                            ProcessTraceKind.UID_STOPPED -> "UID 停止运行"
                         }
                         Text("${DateFormat.getDateTimeInstance().format(Date(event.timestampEpochMillis))} · $name", style = MaterialTheme.typography.bodySmall)
                     }
@@ -137,6 +139,8 @@ private fun ProcessTraceKind.label(): String = when (this) {
     ProcessTraceKind.PROCESS_START -> "进程启动"
     ProcessTraceKind.UID_ACTIVE -> "UID 活跃"
     ProcessTraceKind.UID_IDLE -> "UID 空闲"
+    ProcessTraceKind.UID_RUNNING -> "UID 开始运行"
+    ProcessTraceKind.UID_STOPPED -> "UID 停止运行"
 }
 
 private fun MonitorSessionStatus.label(): String = when (this) {

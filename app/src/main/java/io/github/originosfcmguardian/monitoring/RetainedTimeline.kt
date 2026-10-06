@@ -16,6 +16,8 @@ enum class RetainedTimelineKind {
     PROCESS_START,
     UID_ACTIVE,
     UID_IDLE,
+    UID_RUNNING,
+    UID_STOPPED,
 }
 
 enum class RetainedTimelineTimestampMeaning {
@@ -226,6 +228,8 @@ private fun ProcessTraceKind.toTimelineKind(): RetainedTimelineKind = when (this
     ProcessTraceKind.PROCESS_START -> RetainedTimelineKind.PROCESS_START
     ProcessTraceKind.UID_ACTIVE -> RetainedTimelineKind.UID_ACTIVE
     ProcessTraceKind.UID_IDLE -> RetainedTimelineKind.UID_IDLE
+    ProcessTraceKind.UID_RUNNING -> RetainedTimelineKind.UID_RUNNING
+    ProcessTraceKind.UID_STOPPED -> RetainedTimelineKind.UID_STOPPED
 }
 
 const val MAX_RETAINED_TIMELINE_ITEMS = 700
@@ -242,4 +246,6 @@ private val PROCESS_KINDS = setOf(
     RetainedTimelineKind.PROCESS_START,
     RetainedTimelineKind.UID_ACTIVE,
     RetainedTimelineKind.UID_IDLE,
+    RetainedTimelineKind.UID_RUNNING,
+    RetainedTimelineKind.UID_STOPPED,
 )

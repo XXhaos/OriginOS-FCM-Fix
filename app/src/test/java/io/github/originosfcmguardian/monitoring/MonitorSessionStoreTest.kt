@@ -33,6 +33,15 @@ class MonitorSessionStoreTest {
     }
 
     @Test
+    fun uidLifecycleRoundTripsThroughPersistedSessionWithoutPid() {
+        val expected = session().copy(events = listOf(
+            ProcessTraceEvent(START, ProcessTraceTarget(identity.packageName, identity.uid), ProcessTraceKind.UID_RUNNING),
+            ProcessTraceEvent(START + 1, ProcessTraceTarget(identity.packageName, identity.uid), ProcessTraceKind.UID_STOPPED),
+        ))
+        assertEquals(expected, MonitorSessionCodec.decode(MonitorSessionCodec.encode(expected)))
+    }
+
+    @Test
     fun corruptArtifactRefusesOverwriteUntilExplicitClear() {
         val corrupt = "not-a-monitor-session".toByteArray()
         val access = FakeMonitorSessionFileAccess().apply {

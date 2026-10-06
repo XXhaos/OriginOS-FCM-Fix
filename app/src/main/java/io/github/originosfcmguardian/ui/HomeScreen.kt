@@ -1,6 +1,10 @@
 package io.github.originosfcmguardian.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,11 +13,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -25,14 +33,31 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import io.github.originosfcmguardian.BuildConfig
+import io.github.originosfcmguardian.monitoring.MonitorRunPhase
+import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
 import io.github.originosfcmguardian.core.AppOp
 import io.github.originosfcmguardian.core.AppOpMode
 import io.github.originosfcmguardian.core.AppOpState
@@ -42,12 +67,12 @@ import io.github.originosfcmguardian.core.DozeSource
 import io.github.originosfcmguardian.core.EnabledState
 import io.github.originosfcmguardian.core.EvidenceStatus
 import io.github.originosfcmguardian.core.PemListState
-import io.github.originosfcmguardian.core.PlanDisposition
 import io.github.originosfcmguardian.core.Presence
 import io.github.originosfcmguardian.data.journal.OriginalRecordStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatus
-import io.github.originosfcmguardian.autostart.AutostartUiStatus
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
+import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
+import io.github.originosfcmguardian.autostart.SelectedTargetUiState
 import io.github.originosfcmguardian.protection.ProtectionCheckStatus
 import io.github.originosfcmguardian.fcm.FcmConfigurationStatus
 import io.github.originosfcmguardian.fcm.MessagePriority
@@ -65,14 +90,13 @@ import io.github.originosfcmguardian.notification.queryNotificationFacts
 fun HomeScreen(
     state: HomeUiState,
     onDetect: () -> Unit,
+    onCheckGmsConfiguration: () -> Unit = onDetect,
     onShizukuAction: () -> Unit,
-    onCheckAutostart: () -> Unit,
     onOpenAutostartSettings: () -> Unit,
     onShowTargetSelection: () -> Unit,
     onDismissTargetSelection: () -> Unit,
     onSetTargetSelected: (String, Boolean) -> Unit,
     onCheckTarget: (String) -> Unit,
-    onOpenTargetSettings: (String) -> Unit,
     onRunDailyProtection: () -> Unit,
     onClearCorruptTargetSelection: () -> Unit,
     onRequestFcmToken: () -> Unit,
@@ -88,151 +112,306 @@ fun HomeScreen(
     onStopDeepMonitoring: () -> Unit = {},
     onClearDeepMonitoring: () -> Unit = {},
     onExportMonitorSession: (io.github.originosfcmguardian.monitoring.MonitorSessionQuery) -> Unit = {},
+    onExportCombinedDiagnosticReport: (DiagnosticReportFormat) -> Unit = {},
+    onRequestStoppedRecovery: (SelectedTargetIdentity) -> Unit = {},
+    onConfirmStoppedRecovery: () -> Unit = {},
+    onDismissStoppedRecovery: () -> Unit = {},
+    onReconcileStoppedRecovery: () -> Unit = {},
+    onRequestAutomaticProtection: () -> Unit = {},
+    onConfirmAutomaticProtection: () -> Unit = {},
+    onDismissAutomaticProtection: () -> Unit = {},
+    onStopAutomaticProtection: () -> Unit = {},
+    onRequestTargetAutomaticProtection: (SelectedTargetIdentity) -> Unit = { onRequestAutomaticProtection() },
+    onStopTargetAutomaticProtection: (SelectedTargetIdentity) -> Unit = { onStopAutomaticProtection() },
+    onRequestAppAutomaticProtection: (String) -> Unit = {},
+    onRefreshApps: () -> Unit = {},
+    onSetHiddenFromRecents: (Boolean) -> Unit = {},
+    onOpenProtectionNotificationSettings: () -> Boolean = { false },
+    onRefreshShizuku: () -> Unit = {},
+    onOpenShizuku: () -> Unit = {},
+    onOpenGmsConnection: () -> Unit = {},
+    onOpenFcmDiagnostics: () -> Boolean = { false },
+    onReadGmsConnection: () -> Unit = {},
+    onRequestGmsHeartbeat: () -> Unit = {},
+    onRequestAutomaticGmsHeartbeat: () -> Unit = {},
+    onConfirmAutomaticGmsHeartbeat: () -> Unit = {},
+    onDismissAutomaticGmsHeartbeat: () -> Unit = {},
+    onDisableAutomaticGmsHeartbeat: () -> Unit = {},
+    onRequestGmsDozeEnable: () -> Unit = {},
+    onConfirmGmsDozeEnable: () -> Unit = {},
+    onDismissGmsDozeConfirmation: () -> Unit = {},
+    onRunGmsDozeOnce: () -> Unit = {},
+    onStopGmsDoze: () -> Unit = {},
+    onRequestGmsDozeRestore: () -> Unit = {},
+    onConfirmGmsDozeRestore: () -> Unit = {},
+    onRequestGmsDozeAutomatic: () -> Unit = {},
+    onConfirmGmsDozeAutomatic: () -> Unit = {},
+    onDismissGmsConnection: () -> Unit = {},
+    onRequestAddGuardianTile: ((String) -> Unit) -> Unit = { result ->
+        result("下拉控制中心，进入编辑，将“推送保护”拖到常用区域。")
+    },
+    onCheckVisibleApp: (SelectedTargetIdentity) -> Unit = { onCheckTarget(it.packageName) },
+    onRecheckSelectedApps: () -> Unit = {},
 ) {
+    var primaryTab by rememberSaveable { mutableStateOf("home") }
+    var secondaryDestination by rememberSaveable { mutableStateOf<String?>(null) }
+    var diagnosticToolName by rememberSaveable { mutableStateOf<String?>(null) }
+    var advancedDiagnostics by rememberSaveable { mutableStateOf(false) }
+    var fcmDiagnosticsUnavailable by rememberSaveable { mutableStateOf(false) }
+    val diagnosticTool = DiagnosticTool.entries.firstOrNull { it.name == diagnosticToolName }
+    var appSearch by rememberSaveable { mutableStateOf("") }
+    val destination = secondaryDestination ?: primaryTab
+    val homeScroll = rememberScrollState()
+    val settingsScroll = rememberScrollState()
+    val diagnosticsScroll = rememberScrollState()
+    LaunchedEffect(secondaryDestination, diagnosticToolName) {
+        if (secondaryDestination == "diagnostics") diagnosticsScroll.scrollTo(0)
+    }
+    BackHandler(enabled = secondaryDestination != null || primaryTab != "home") {
+        if (secondaryDestination == "diagnostics" && diagnosticTool != null) diagnosticToolName = null
+        else if (secondaryDestination != null) secondaryDestination = null else primaryTab = "home"
+    }
+    if (state.gmsConnection.visible) GmsConnectionDialog(state.gmsConnection, onReadGmsConnection,
+        onDismissGmsConnection, onRequestGmsHeartbeat, !state.gmsAutoHeartbeat.manualBlocked)
+    if (state.gmsAutoHeartbeatConfirmation) GmsAutoHeartbeatConfirmation(
+        onConfirmAutomaticGmsHeartbeat, onDismissAutomaticGmsHeartbeat)
+    state.gmsDozeOnConfirmation?.let { target ->
+        GmsDozeOnConfirmation(target.ledgerId != null, onConfirmGmsDozeEnable, onDismissGmsDozeConfirmation)
+    }
+    if (state.gmsDozeRestoreConfirmation != null)
+        GmsDozeRestoreConfirmation(onConfirmGmsDozeRestore, onDismissGmsDozeConfirmation)
+    if (state.gmsDozeAutomaticConfirmation != null)
+        GmsDozeAutomaticConfirmation(onConfirmGmsDozeAutomatic, onDismissGmsDozeConfirmation)
+    var showNoTouchProtection by remember { mutableStateOf(false) }
+    if (showNoTouchProtection) {
+        NoTouchProtectionDialog(onDismiss = { showNoTouchProtection = false },
+            onRequestAddTile = onRequestAddGuardianTile)
+    }
+    fun eligible(target: io.github.originosfcmguardian.autostart.SelectedTargetUiState) =
+        !state.automaticProtection.enabled && !state.automaticProtection.busy && canOfferStoppedRecovery(target, state.stoppedRecovery,
+            state.targetSelectionLoadState == HomeSourceLoadState.LOADED && !state.targetSelectionStoreCorrupt,
+            state.recoveryFirmwareSupported, state.shizuku.status == ShizukuStatus.READY_SHELL,
+            state.detecting || target.identity in state.targetReadInFlight)
+    if (recoveryConfirmationStillValid(state.stoppedRecovery.confirmationIdentity, state.selectedTargets, ::eligible)) {
+        val target = state.selectedTargets.first { it.identity == state.stoppedRecovery.confirmationIdentity }
+        StoppedRecoveryConfirmation(onConfirmStoppedRecovery, onDismissStoppedRecovery, target.label, target.identity.packageName)
+    }
+    val confirmingApp = state.visibleApps.firstOrNull { it.identity == state.automaticConfirmationIdentity }
+    if (state.automaticConfirmationIdentity != null && confirmingApp != null && appProtectionPrerequisites(state, confirmingApp)) {
+        AutomaticProtectionConfirmation(onConfirmAutomaticProtection, onDismissAutomaticProtection,
+            confirmingApp.label,
+            state.automaticConfirmationIdentity.packageName)
+    }
     Scaffold(
-        topBar = { TopAppBar(title = { Text("OriginOS FCM Guardian") }) },
+        topBar = { TopAppBar(
+            title = {
+                Column {
+                    Text(when (destination) {
+                        "apps" -> "应用"
+                        "settings" -> "设置"
+                        "diagnostics" -> diagnosticTool?.label ?: "诊断"
+                        else -> "Guardian"
+                    }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (destination == "home") Text("OriginOS 后台管理",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            },
+            navigationIcon = {
+                if (secondaryDestination != null) TextButton(onClick = {
+                    if (secondaryDestination == "diagnostics" && diagnosticTool != null) diagnosticToolName = null
+                    else secondaryDestination = null
+                }) { Text("返回") }
+            },
+            actions = {
+                if (secondaryDestination == null) TextButton(onClick = {
+                    fcmDiagnosticsUnavailable = !onOpenFcmDiagnostics()
+                }) { Text("FCM Diagnostics", style = MaterialTheme.typography.labelLarge, maxLines = 1) }
+                else if (destination == "diagnostics") TextButton(onClick = { secondaryDestination = "settings" }) { Text("设置") }
+                else if (destination == "settings") TextButton(onClick = {
+                    diagnosticToolName = null
+                    secondaryDestination = "diagnostics"
+                }) { Text("诊断") }
+            },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+        )
+        },
+        bottomBar = {
+            Column {
+                // Stops stay outside scrollable destinations, even after the target is removed.
+                ProtectionStopBar(state, onStopAutomaticProtection, onStopDeepMonitoring,
+                    { onSetNotificationFactsEnabled(false) }, onOpenNotificationListenerSettings)
+                NavigationBar {
+                    NavigationBarItem(selected = primaryTab == "home" && secondaryDestination == null,
+                        onClick = { primaryTab = "home"; secondaryDestination = null },
+                        icon = { NavigationGlyph(home = true) }, label = { Text("主页") },
+                        modifier = Modifier.semantics { contentDescription = "主页标签" })
+                    NavigationBarItem(selected = primaryTab == "apps" && secondaryDestination == null,
+                        onClick = { primaryTab = "apps"; secondaryDestination = null },
+                        icon = { NavigationGlyph(home = false) }, label = { Text("应用") },
+                        modifier = Modifier.semantics { contentDescription = "应用标签" })
+                }
+            }
+        },
     ) { contentPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(contentPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .then(if (destination == "apps") Modifier else Modifier.verticalScroll(when (destination) {
+                    "settings" -> settingsScroll
+                    "diagnostics" -> diagnosticsScroll
+                    else -> homeScroll
+                }))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("设备与推送诊断", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-            Text(
-                "当前提供系统状态检查、所选应用管理、Guardian 自测与通知事实记录；各卡片分别说明证据边界。",
-                style = MaterialTheme.typography.bodyMedium,
+            if (fcmDiagnosticsUnavailable && secondaryDestination == null) Text(
+                io.github.originosfcmguardian.fcm.GMS_DIAGNOSTICS_UNAVAILABLE,
+                color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            if (destination == "home") {
+                HomeOverview(state, onOpenGmsConnection, onCheckGmsConfiguration, { primaryTab = "apps" },
+                    { secondaryDestination = "settings" }, {
+                        diagnosticToolName = null
+                        secondaryDestination = "diagnostics"
+                    }, onShizukuAction = onShizukuAction,
+                    onEnableMaster = onRequestAutomaticProtection, onDisableMaster = onStopAutomaticProtection,
+                    onEnableHeartbeat = onRequestAutomaticGmsHeartbeat, onDisableHeartbeat = onDisableAutomaticGmsHeartbeat,
+                    onEnableDoze = onRequestGmsDozeEnable, onApplyDoze = onRunGmsDozeOnce,
+                    onStopDoze = onStopGmsDoze, onRestoreDoze = onRequestGmsDozeRestore,
+                    onEnableAutomaticDoze = onRequestGmsDozeAutomatic)
+            }
+
+            if (destination == "settings") {
+            StatusCard("工作模式") {
+                ShizukuWorkModeContent(state.shizuku, onShizukuAction, onRefreshShizuku,
+                    onOpenShizuku, onNoTouch = { showNoTouchProtection = true })
+            }
+
+            AutomaticProtectionCard(state.automaticProtection, canEnableAutomaticProtection(state),
+                state.hiddenFromRecents, state.recentsMessage, onRequestAutomaticProtection,
+                onStopAutomaticProtection, onSetHiddenFromRecents, onOpenProtectionNotificationSettings,
+                showProtectionControls = false, notificationVisibility = state.protectionNotificationVisibility)
+
+            StatusCard("自启动设置") {
+                Text("请手动允许 Guardian 和需要接收通知的应用自启动。", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = onOpenAutostartSettings) { Text("打开自启动设置") }
+                state.autostartSettingsMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+            StatusCard("关于") {
+                Text("OriginOS FCM Guardian", style = MaterialTheme.typography.bodyMedium)
+                StatusRow("版本", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            }
+            }
+
+            if (destination == "apps") {
+            AppsProtectionList(state, appSearch, { appSearch = it }, onRefreshApps,
+                onRequestAppAutomaticProtection, onStopTargetAutomaticProtection, onClearCorruptTargetSelection,
+                onRecheckSelected = onRecheckSelectedApps,
+                modifier = Modifier.weight(1f), details = { row ->
+                    val target = protectionAppRecheckTarget(state, row)
+                    AppRecheckDetails(target,
+                        checking = row.currentInstallation && row.app.identity in state.targetReadInFlight,
+                        blocked = !canRecheckProtectionApp(state, row),
+                        onCheck = {
+                            if (canRecheckProtectionApp(state, row)) row.app.identity?.let(onCheckVisibleApp)
+                        })
+                }
             )
-
-            StatusCard("Google Play services") {
-                StatusRow("普通 API", state.gms?.summary ?: "正在读取")
-                state.report?.let { report ->
-                    StatusRow("shell 复核", report.gms.status.label())
-                }
             }
 
-            StatusCard("Shizuku") {
-                StatusRow("状态", state.shizuku.status.label())
-                Text(state.shizuku.detail, style = MaterialTheme.typography.bodySmall)
-                if (state.shizuku.status in setOf(
-                        ShizukuStatus.NOT_INSTALLED,
-                        ShizukuStatus.NOT_RUNNING,
-                        ShizukuStatus.PERMISSION_REQUIRED,
-                    )
-                ) {
-                    Spacer(Modifier.height(4.dp))
-                    OutlinedButton(onClick = onShizukuAction) {
-                        Text(state.shizuku.status.actionLabel())
+            if (destination == "diagnostics") {
+            if (diagnosticTool == null) {
+                StatusCard("问题摘要") {
+                    Text(diagnosticSummary(state), style = MaterialTheme.typography.bodyMedium)
+                    diagnosticIssues(state).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    if (state.stoppedRecovery.needsReconcile || state.stoppedRecovery.storageBlocked) {
+                        StoppedRecoveryReceipt(state.stoppedRecovery,
+                            reconcileBusy = state.detecting || state.automaticProtection.enabled || state.automaticProtection.busy,
+                            onReconcile = onReconcileStoppedRecovery)
+                    }
+                }
+                StatusCard("最近操作") {
+                    val recent = recentDiagnosticActions(state)
+                    if (recent.isEmpty()) Text("暂无已保存操作")
+                    recent.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    TextButton(onClick = { diagnosticToolName = DiagnosticTool.RECOVERY.name }) { Text("查看操作历史") }
+                }
+                StatusCard("导出报告") {
+                    Text("含设备型号、系统版本、所选应用包名和名称，分享前请检查；不含令牌、通知正文、testId、Android ID、签名、UID、PID 或原始命令输出。",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("只导出已有快照，不执行新的特权读取；连接和投递因果仍可能未知。", style = MaterialTheme.typography.bodySmall)
+                    DiagnosticReportExportButton(state.diagnosticReportExportBusy, onExportCombinedDiagnosticReport)
+                    state.diagnosticReportExportFeedback?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+                StatusCard("高级排查") {
+                    TextButton(onClick = { advancedDiagnostics = !advancedDiagnostics }) {
+                        Text(if (advancedDiagnostics) "收起工具入口" else "查看工具入口")
+                    }
+                    if (advancedDiagnostics) DiagnosticTool.entries.forEach { tool ->
+                        TextButton(onClick = { diagnosticToolName = tool.name }) { Text(tool.label) }
+                    }
+                }
+                if (advancedDiagnostics) {
+                    GmsProtectionDetails(state, onCheckGmsConfiguration, onOpenGmsConnection)
+                    RecoveryCountsCard(state)
+                    StatusCard("自动保护详情") {
+                        Text(state.automaticProtection.detail, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
-
-            StatusCard("检测") {
-                Text(state.detectionMessage, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = onDetect,
-                    enabled = !state.detecting && state.autostart.status != AutostartUiStatus.CHECKING,
-                ) {
-                    Text(if (state.detecting) "检测中…" else "重新检测")
-                }
+            if (diagnosticTool == DiagnosticTool.RECOVERY) {
+            StoppedRecoveryReceipt(state.stoppedRecovery,
+                reconcileBusy = state.detecting || state.automaticProtection.enabled || state.automaticProtection.busy,
+                onReconcile = onReconcileStoppedRecovery)
+            if (state.stoppedRecovery.receiptOutcome == null && !state.stoppedRecovery.needsReconcile) Text("暂无恢复操作记录")
             }
-
-            StatusCard("Guardian 自启动") {
-                StatusRow("状态", state.autostart.status.label())
-                Text(state.autostart.detail, style = MaterialTheme.typography.bodySmall)
-                Text(
-                    "这里只读 Guardian 自身状态。系统字段读数不能证明 FCM 投递成功。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onCheckAutostart,
-                        enabled = !state.detecting && state.autostart.status != AutostartUiStatus.CHECKING,
-                    ) {
-                        Text(if (state.autostart.status == AutostartUiStatus.CHECKING) "检查中…" else "手动检查")
-                    }
-                    OutlinedButton(
-                        onClick = onOpenAutostartSettings,
-                        enabled = !state.detecting && state.autostart.status != AutostartUiStatus.CHECKING,
-                    ) {
-                        Text("打开自启动设置")
-                    }
-                }
-            }
-
-            StatusCard("即时通知应用") {
-                Text(
-                    "选择最多 10 个需要即时通知的应用。Guardian 只读取其系统自启动权限，不会自动修改。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Button(onClick = onShowTargetSelection) {
-                    Text("选择应用（${state.selectedTargets.size}/10）")
-                }
-                if (state.targetSelectionStoreCorrupt) {
-                    Text(
-                        "应用选择记录损坏，Guardian 已停止使用且不会覆盖该记录。",
+            if (diagnosticTool == DiagnosticTool.DAILY) {
+            StatusCard("定期巡检") {
+                Text("每日巡检不含应用停止标记；请在“应用”页复检。", style = MaterialTheme.typography.bodySmall)
+                when (state.dailyProtectionLoadState) {
+                    HomeSourceLoadState.LOADING -> Text("正在读取巡检记录…")
+                    HomeSourceLoadState.FAILED -> Text(
+                        "巡检记录读取失败；下方若有旧记录，不代表本次读取成功",
                         color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
                     )
-                    TextButton(onClick = onClearCorruptTargetSelection) {
-                        Text("清除损坏记录")
-                    }
+                    HomeSourceLoadState.LOADED -> Unit
                 }
-                if (state.selectedTargets.isEmpty()) {
-                    Text("尚未选择应用", style = MaterialTheme.typography.bodyMedium)
-                }
-                val targetBusy = state.selectedTargets.any { it.status == TargetAutostartStatus.CHECKING }
-                state.selectedTargets.forEach { target ->
-                    Spacer(Modifier.height(6.dp))
-                    Text(target.label, fontWeight = FontWeight.SemiBold)
-                    StatusRow("自启动", target.status.label())
-                    Text(target.detail, style = MaterialTheme.typography.bodySmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { onCheckTarget(target.identity.packageName) },
-                            enabled = !targetBusy && !state.detecting,
-                        ) {
-                            Text("复检")
-                        }
-                        OutlinedButton(
-                            onClick = { onOpenTargetSettings(target.identity.packageName) },
-                            enabled = !targetBusy && !state.detecting,
-                        ) {
-                            Text("系统设置")
-                        }
-                        TextButton(onClick = { onSetTargetSelected(target.identity.packageName, false) }) {
-                            Text("移除")
-                        }
-                    }
-                }
-                Text(
-                    "自启动权限只是系统条件之一，不能证明 FCM 长连接或消息投递成功。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-
-            StatusCard("每日保护") {
                 state.dailyProtectionReport?.let { report ->
-                    StatusRow("最近结果", report.status.label())
+                    StatusRow("上次完整巡检", if (report.containsRetiredAutostartEvidence) "旧范围记录" else report.status.label())
                     StatusRow("检查时间", formatRecordTime(report.checkedAtEpochMillis))
-                    Text(report.summary, style = MaterialTheme.typography.bodySmall)
-                } ?: Text("尚无巡检结果", style = MaterialTheme.typography.bodyMedium)
+                    Text(if (report.containsRetiredAutostartEvidence) "检测范围已更新，请重新巡检。" else report.summary, style = MaterialTheme.typography.bodySmall)
+                    DailyProtectionDetails(
+                        report = report,
+                        selectedTargets = state.selectedTargets,
+                        selectionReady = state.targetSelectionLoadState == HomeSourceLoadState.LOADED &&
+                            !state.targetSelectionStoreCorrupt &&
+                            state.dailyProtectionLoadState == HomeSourceLoadState.LOADED,
+                        busy = state.detecting || state.selectedTargets.any {
+                            it.status == TargetAutostartStatus.CHECKING
+                        },
+                        onCheckTarget = onCheckTarget,
+                        onShowTargetSelection = onShowTargetSelection,
+                    )
+                } ?: if (state.dailyProtectionLoadState == HomeSourceLoadState.LOADED) {
+                    Text("尚无可用巡检结果", style = MaterialTheme.typography.bodyMedium)
+                } else Unit
                 Button(
                     onClick = onRunDailyProtection,
-                    enabled = !state.dailyProtectionQueued,
+                    enabled = !state.dailyProtectionSubmitting,
                 ) {
-                    Text(if (state.dailyProtectionQueued) "已提交…" else "立即巡检")
+                    Text(if (state.dailyProtectionSubmitting) "提交中…" else "立即巡检")
                 }
+                state.dailyProtectionSubmissionMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 Text(
                     "低频只读检查可能被系统延后；不会启动前台服务或自动修改系统设置。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-
+            }
+            if (diagnosticTool == DiagnosticTool.NOTIFICATIONS) {
             StatusCard("所选应用通知记录") {
                 var chosenPackage by remember { mutableStateOf<String?>(null) }
                 var recentOnly by remember { mutableStateOf(false) }
@@ -299,7 +478,7 @@ fun HomeScreen(
                 }
                 if (state.notificationFacts.targetCount < 1) {
                     Text(
-                        "请先在“即时通知应用”中选择至少一个身份有效的应用，才能开启记录。",
+                        "请先在“关注应用”中选择至少一个身份有效的应用，才能开启记录。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -396,11 +575,21 @@ fun HomeScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-
+            }
+            if (diagnosticTool == DiagnosticTool.MONITOR) {
             DeepMonitoringCard(state, onStartDeepMonitoring, onStopDeepMonitoring, onClearDeepMonitoring, onExportMonitorSession)
-
+            }
+            if (diagnosticTool == DiagnosticTool.TIMELINE) {
             RetainedTimelineCard(state)
-
+            }
+            if (diagnosticTool == DiagnosticTool.BASELINE) {
+            StatusCard("只读检查") {
+                Text(state.detectionMessage, style = MaterialTheme.typography.bodySmall)
+                Button(onClick = onDetect, enabled = !state.detecting) {
+                    Text(if (state.detecting) "检测中…" else "立即检查")
+                }
+                TextButton(onClick = onOpenGmsConnection) { Text("GMS 连接") }
+            }
             StatusCard("原始状态记录") {
                 StatusRow("状态", state.originalRecord.status.label())
                 state.originalRecord.capturedAtEpochMillis?.let { capturedAt ->
@@ -413,8 +602,9 @@ fun HomeScreen(
             }
 
             state.report?.let { DetectionDetails(it) }
-
-            StatusCard("FCM 实际健康度") {
+            }
+            if (diagnosticTool == DiagnosticTool.SELF_TEST) {
+            StatusCard("Guardian 推送自测") {
                 StatusRow("客户端配置", state.fcm.configuration.label())
                 StatusRow("注册", state.fcm.registration.label())
                 Text(state.fcm.registrationDetail, style = MaterialTheme.typography.bodySmall)
@@ -480,50 +670,35 @@ fun HomeScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-
-            StatusCard("修复与恢复") {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {}, enabled = false) { Text("一键修复") }
-                    OutlinedButton(onClick = {}, enabled = false) { Text("恢复原始配置") }
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "修复与恢复仍在验证中，当前版本仅支持检测。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                state.plan?.let { plan ->
-                    Text(
-                        when {
-                            plan.disposition == PlanDisposition.NO_WRITE ->
-                                "当前检测未发现需要处理的异常；当前没有可执行的修复操作。"
-                            plan.candidates.isEmpty() ->
-                                "部分状态仍待验证；当前没有可执行的修复操作。"
-                            else ->
-                                "发现 ${plan.candidates.size} 项待验证状态；当前没有可执行的修复操作。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
+            }
             }
         }
     }
 
     if (state.targetSelection.visible) {
-        val selectedCount = state.targetSelection.candidates.count { it.selected }
+        var selectionSearch by rememberSaveable { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = onDismissTargetSelection,
-            title = { Text("选择即时通知应用") },
+            title = { Text("选择关注应用") },
             text = {
                 Column(
                     modifier = Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
+                    Text("建议仅选择需要重点检查的应用，避免选择过多。")
+                    Text("关注选择不授权自动恢复；保护需要另行确认。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(value = selectionSearch, onValueChange = { selectionSearch = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("搜索可选应用") })
                     if (state.targetSelection.loading) Text("正在读取可启动应用…")
-                    state.targetSelection.candidates.forEach { candidate ->
+                    val candidates = state.targetSelection.candidates.filter {
+                        it.label.contains(selectionSearch.trim(), ignoreCase = true) ||
+                            it.packageName.contains(selectionSearch.trim(), ignoreCase = true)
+                    }
+                    if (!state.targetSelection.loading && candidates.isEmpty()) Text("没有匹配的应用")
+                    candidates.forEach { candidate ->
                         Row(modifier = Modifier.fillMaxWidth()) {
                             Checkbox(
                                 checked = candidate.selected,
-                                enabled = candidate.selected || selectedCount < 10,
                                 onCheckedChange = { checked ->
                                     onSetTargetSelected(candidate.packageName, checked)
                                 },
@@ -542,6 +717,324 @@ fun HomeScreen(
                 TextButton(onClick = onDismissTargetSelection) { Text("完成") }
             },
         )
+    }
+}
+
+@Composable
+internal fun NoTouchProtectionDialog(onDismiss: () -> Unit,
+    onRequestAddTile: ((String) -> Unit) -> Unit) {
+    var additionPending by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("无感保活") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("将盾牌“推送保护”放到控制中心常用区域。下拉到按钮可见时，Guardian 会尝试恢复已开启的保护，无需点击。")
+                Text("先连接特权服务并开启自动保护。亮起表示检测运行中；点击按钮可打开 Guardian。手动关闭的保护不会自动开启。")
+                Text("这是辅助恢复，不保证永久常驻。权限未就绪或系统限制时，请打开应用处理。")
+                Text("也可手动添加：控制中心 → 编辑 → 推送保护。")
+                message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !additionPending, onClick = {
+                additionPending = true
+                onRequestAddTile { additionPending = false; message = it }
+            }) { Text(if (additionPending) "等待系统确认…" else "添加磁贴") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
+internal fun SelectedTargetDetails(
+    target: SelectedTargetUiState,
+    checking: Boolean,
+    recovery: StoppedRecoveryUiState,
+    recoveryEligible: Boolean,
+    detectionBusy: Boolean = false,
+    onCheck: () -> Unit,
+    onSettings: () -> Unit,
+    onRemove: () -> Unit,
+    onRequestRecovery: () -> Unit,
+    onReconcile: () -> Unit,
+    automaticControls: (@Composable () -> Unit)? = null,
+    automaticToggle: (@Composable () -> Unit)? = null,
+    automaticStatus: String? = null,
+    initiallyExpanded: Boolean = true,
+    confirmedCounts: String? = null,
+    showHeader: Boolean = true,
+) {
+    var expanded by rememberSaveable(target.identity.packageName, target.identity.firstInstallTime) { mutableStateOf(initiallyExpanded) }
+    val recovering = recovery.phase == StoppedRecoveryPhase.RECOVERING && recovery.activeIdentity == target.identity
+    val wake = targetWakePresentation(target, checking)
+    Card(Modifier.fillMaxWidth()) {
+    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (showHeader) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TargetAppIcon(target)
+            Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                Text(target.label, fontWeight = FontWeight.SemiBold)
+                automaticStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                if (automaticControls == null) Text("仅检查与设置引导", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).background(wake.tone.color(), CircleShape))
+                    Text(wake.text, color = wake.tone.color(), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            automaticToggle?.invoke()
+            TextButton(onClick = { expanded = !expanded },
+                modifier = Modifier.semantics { contentDescription = "${target.label}详情" }) {
+                Text(if (expanded) "收起" else "详情")
+            }
+        }
+        }
+    if (!showHeader || expanded) {
+    if (!showHeader) Text(wake.text, color = wake.tone.color(), style = MaterialTheme.typography.bodySmall)
+    Text(target.identity.packageName, style = MaterialTheme.typography.bodySmall)
+    confirmedCounts?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    if (automaticControls == null) Text("此应用目前仅支持只读检查与设置引导。", style = MaterialTheme.typography.bodySmall)
+    automaticControls?.invoke()
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = onCheck, enabled = !checking && !recovering && !detectionBusy) {
+            Text(if (checking) "复检中…" else "复检")
+        }
+        OutlinedButton(onClick = onSettings) { Text("系统设置") }
+        TextButton(onClick = onRemove) { Text("移除") }
+    }
+    StoppedRecoveryAction(stoppedRecoveryActionPresentation(target, recovery, recoveryEligible), onRequestRecovery)
+    if (recovery.recordIdentity == target.identity) {
+        StoppedRecoveryReceipt(recovery, target, reconcileBusy = checking || detectionBusy, onReconcile = onReconcile)
+    }
+    }
+    }
+    }
+}
+
+@Composable
+private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onDetect: () -> Unit, onApps: () -> Unit,
+    onSettings: () -> Unit, onDiagnostics: () -> Unit, onShizukuAction: () -> Unit,
+    onEnableMaster: () -> Unit, onDisableMaster: () -> Unit,
+    onEnableHeartbeat: () -> Unit, onDisableHeartbeat: () -> Unit,
+    onEnableDoze: () -> Unit, onApplyDoze: () -> Unit, onStopDoze: () -> Unit, onRestoreDoze: () -> Unit,
+    onEnableAutomaticDoze: () -> Unit) {
+    val automatic = state.automaticProtection
+    val shizuku = shizukuWorkModePresentation(state.shizuku)
+    StatusCard("Shizuku", attention = state.shizuku.status != ShizukuStatus.READY_SHELL) {
+        Text(shizuku.statusLabel, style = MaterialTheme.typography.bodyLarge)
+        Text(when (state.shizuku.status) {
+            ShizukuStatus.PERMISSION_REQUIRED -> if (state.shizuku.authorizationBlocked)
+                "请在 Shizuku 中检查 Guardian 的授权。" else "授权 Guardian 后，可检查并恢复应用的停止限制。"
+            else -> shizuku.summary
+        }, style = MaterialTheme.typography.bodyMedium)
+        shizuku.actionLabel?.let { label -> Button(onClick = onShizukuAction) { Text(label) } }
+    }
+    StatusCard("自动保护") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(automaticProtectionStatus(automatic), modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge)
+            AutomaticProtectionToggle(automatic, canEnableAutomaticProtection(state), onEnableMaster, onDisableMaster)
+        }
+        Text(if (automatic.configurationAvailable) "已选择 ${automatic.configuredIdentities.size} 个应用；关闭总开关会保留选择。"
+            else "应用选择记录暂不可用；保留上次已知选择。", style = MaterialTheme.typography.bodySmall)
+        if (automatic.revocationSaveFailed) TextButton(onClick = onDisableMaster) { Text("重试保存关闭状态") }
+        Text("每轮检查后等待约 30 秒；休眠可能延后，不保证通知送达。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = onApps) { Text("管理应用（${automatic.configuredIdentities.size}）") }
+    }
+    StatusCard("Google Play 服务保护") {
+        val (configWall, configElapsed) = gmsConfigurationClock(state)
+        Text(gmsBackgroundSummary(state, configWall, configElapsed), style = MaterialTheme.typography.bodySmall)
+        Text("电池豁免支持单次执行；自动修复与重连尚未开放。", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        GmsDozeControls(state.gmsDoze, state.shizuku.status == ShizukuStatus.READY_SHELL,
+            onEnableDoze, onApplyDoze, onStopDoze, onRestoreDoze)
+        GmsDozeAutomaticControls(state.gmsDozeAutomatic, state.shizuku.status == ShizukuStatus.READY_SHELL,
+            onEnableAutomaticDoze, onStopDoze)
+        OutlinedButton(onClick = onDetect, modifier = Modifier.fillMaxWidth(),
+            enabled = !state.gmsConfigChecking && !state.stoppedRecovery.needsReconcile) {
+            Text(if (state.gmsConfigChecking) "检查中…" else "检查后台配置")
+        }
+        Text("FCM 连接状态", style = MaterialTheme.typography.titleSmall)
+        Text(gmsConnectionSummary(state.gmsConnection, gmsConnectionClock(state)), style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = onGms) { Text("查看连接状态") }
+        GmsAutoHeartbeatControls(state.gmsAutoHeartbeat,
+            automatic.enabled && state.shizuku.status == ShizukuStatus.READY_SHELL,
+            onEnableHeartbeat, onDisableHeartbeat)
+    }
+    StatusCard("上次检查") {
+        Text(diagnosticSummary(state), style = MaterialTheme.typography.bodyMedium,
+            color = if (diagnosticIssues(state).isNotEmpty()) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurface)
+        val lastCheck = listOfNotNull(state.gmsConfigSnapshot?.checkedAtMillis,
+            state.dailyProtectionReport?.checkedAtEpochMillis).maxOrNull()
+        Text(lastCheck?.let { "已保存检查：${formatRecordTime(it)}（历史记录）" } ?: "尚无已保存检查记录",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = onDiagnostics) { Text("查看技术详情") }
+    }
+    StatusCard("诊断信息") {
+        Text("用于故障排查和技术支持的记录。", style = MaterialTheme.typography.bodyMedium)
+        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("打开诊断信息") }
+    }
+    StatusCard("设置") {
+        Text("Shizuku 连接、后台运行与通知设置。", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = onSettings) { Text("连接与后台设置") }
+    }
+}
+
+/** Only ages an existing snapshot; never starts a check or connection watchdog. */
+@Composable
+private fun gmsConfigurationClock(state: HomeUiState): Pair<Long, Long> {
+    var elapsed by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
+    var wall by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(state.gmsConfigSnapshot, state.gmsConfigContext) {
+        elapsed = android.os.SystemClock.elapsedRealtime(); wall = System.currentTimeMillis()
+        val snapshot = state.gmsConfigSnapshot ?: return@LaunchedEffect
+        while (snapshot.isFresh(state.gmsConfigContext, wall, elapsed)) {
+            kotlinx.coroutines.delay(30_000)
+            elapsed = android.os.SystemClock.elapsedRealtime(); wall = System.currentTimeMillis()
+        }
+    }
+    return wall to elapsed
+}
+
+@Composable
+private fun gmsConnectionClock(state: HomeUiState): Long {
+    var elapsed by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
+    LaunchedEffect(state.gmsConnection.observation) {
+        elapsed = android.os.SystemClock.elapsedRealtime()
+        val sample = state.gmsConnection.observation as? io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample
+            ?: return@LaunchedEffect
+        while (sample.isFresh(elapsed)) {
+            kotlinx.coroutines.delay(1_000)
+            elapsed = android.os.SystemClock.elapsedRealtime()
+        }
+    }
+    return elapsed
+}
+
+@Composable
+private fun GmsProtectionDetails(state: HomeUiState, onDetect: () -> Unit, onGms: () -> Unit) {
+    StatusCard("Google Play 服务只读详情") {
+        val (wall, elapsed) = gmsConfigurationClock(state)
+        Text(gmsBackgroundSummary(state, wall, elapsed), style = MaterialTheme.typography.bodySmall)
+        state.gmsConfigSnapshot?.let { snapshot ->
+            Text("最近检查：${formatRecordTime(snapshot.checkedAtMillis)}（历史读数）", style = MaterialTheme.typography.bodySmall)
+            Text(gmsConfigSettingsSummary(snapshot), style = MaterialTheme.typography.bodySmall)
+        }
+        Text(when {
+            !state.automaticProtection.enabled -> "只读定期检查：应用保护未运行。"
+            state.automaticProtection.waitingForPrivilege -> "只读定期检查：等待特权连接。"
+            state.automaticProtection.waitingForReconciliation -> "只读定期检查：等待恢复记录核对。"
+            else -> "只读定期检查：随应用保护运行，至少间隔 15 分钟，休眠可能延迟。"
+        }, style = MaterialTheme.typography.bodySmall)
+        Text("自动修复当前不支持；配置读数不证明 FCM 已连接或消息送达。", style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = onDetect, enabled = !state.gmsConfigChecking && !state.stoppedRecovery.needsReconcile) {
+            Text(if (state.gmsConfigChecking) "检查中…" else "检查后台配置")
+        }
+        Text(gmsConnectionSummary(state.gmsConnection, gmsConnectionClock(state)), style = MaterialTheme.typography.bodySmall)
+        (state.gmsConnection.observation as? io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample)?.let {
+            Text("观察时间：${formatRecordTime(it.observedAtMillis)}", style = MaterialTheme.typography.bodySmall)
+        }
+        Text("自动重连未接入，未开启；TCP 迹象不证明通知送达。", style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = onGms) { Text("单次只读观察") }
+    }
+}
+
+@Composable
+private fun RecoveryCountsCard(state: HomeUiState) {
+    StatusCard("解除停止限制") {
+        val counts = state.recoveryCounts
+        Text("当前关注应用的已保存确认次数", style = MaterialTheme.typography.bodySmall)
+        if (counts.available) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(counts.byIdentity.values.sumOf { it.today }.toString(), style = MaterialTheme.typography.headlineMedium)
+                    Text("今日确认解除", style = MaterialTheme.typography.labelMedium)
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(counts.byIdentity.values.sumOf { it.week }.toString(), style = MaterialTheme.typography.headlineMedium)
+                    Text("本周确认解除", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        Text(counts.detail, style = MaterialTheme.typography.bodySmall)
+        if (counts.available) Text(recoveryCountsSnapshotLabel(counts.calculatedAtMillis, counts.zoneId),
+            style = MaterialTheme.typography.bodySmall)
+        Text("仅计实际写入并读回确认的解除；不是通知送达次数。", style = MaterialTheme.typography.bodySmall)
+    }
+    state.automaticProtection.lastOutcome?.let { outcome ->
+        Text(when (outcome) {
+            "FLAG_CLEARED" -> "最新操作：停止限制已解除"
+            "NO_WRITE_NEEDED" -> "最新操作：无需恢复"
+            "STILL_STOPPED" -> "最新操作：限制仍存在"
+            "UNCONFIRMED" -> "最新操作：恢复结果待确认"
+            else -> "最新操作：未完成，请查看应用详情"
+        }, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private fun automaticProtectionStatus(state: io.github.originosfcmguardian.autoprotection.AutomaticProtectionState): String = when {
+    state.waitingForReconciliation -> "等待只读复检"
+    state.busy -> "启动或恢复中"
+    state.waitingForPrivilege -> "等待特权；尚未执行保护"
+    state.enabled -> "停止限制检测已开启"
+    state.revocationSaveFailed -> "关闭状态未可靠保存"
+    state.savedAuthorization -> "等待恢复检测"
+    else -> "检测未开启"
+}
+
+private fun recoveryCountsSnapshotLabel(calculatedAtMillis: Long?, zoneId: String?): String {
+    val timestamp = if (calculatedAtMillis != null && zoneId != null) runCatching {
+        java.time.Instant.ofEpochMilli(calculatedAtMillis).atZone(java.time.ZoneId.of(zoneId))
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+    }.getOrNull() else null
+    return if (timestamp != null) "统计截至 $timestamp（$zoneId）；回到应用刷新"
+        else "统计时间或时区未知；回到应用刷新"
+}
+
+@Composable
+private fun ProtectionStopBar(state: HomeUiState, onStopProtection: () -> Unit, onStopMonitor: () -> Unit,
+    onStopNotificationRecording: () -> Unit, onOpenNotificationSettings: () -> Unit) {
+    if (state.deepMonitoring.busy) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (state.deepMonitoring.phase == MonitorRunPhase.STOPPING) "监控正在停止…" else "深度监控活动中",
+                modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onStopMonitor, enabled = state.deepMonitoring.phase != MonitorRunPhase.STOPPING) { Text("停止监控") }
+        }
+    }
+    if (state.notificationFacts.enabled || state.notificationFacts.stopPersistenceUncertain) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (state.notificationFacts.stopPersistenceUncertain) "记录停止未可靠保存" else "通知记录已开启",
+                modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onStopNotificationRecording) {
+                Text(if (state.notificationFacts.stopPersistenceUncertain) "重试停止记录" else "停止通知记录")
+            }
+            if (state.notificationFacts.stopPersistenceUncertain) TextButton(onClick = onOpenNotificationSettings) { Text("撤销使用权") }
+        }
+    }
+}
+
+@Composable
+private fun NavigationGlyph(home: Boolean) {
+    val color = MaterialTheme.colorScheme.onSurface
+    Canvas(Modifier.size(24.dp)) {
+        val unit = size.width / 24f
+        val stroke = Stroke(width = 1.8.dp.toPx())
+        if (home) {
+            drawPath(Path().apply {
+                moveTo(3 * unit, 11 * unit); lineTo(12 * unit, 3 * unit); lineTo(21 * unit, 11 * unit)
+                moveTo(6 * unit, 9 * unit); lineTo(6 * unit, 21 * unit); lineTo(18 * unit, 21 * unit); lineTo(18 * unit, 9 * unit)
+                moveTo(10 * unit, 21 * unit); lineTo(10 * unit, 15 * unit); lineTo(14 * unit, 15 * unit); lineTo(14 * unit, 21 * unit)
+            }, color, style = stroke)
+        } else {
+            listOf(4f to 4f, 14f to 4f, 4f to 14f, 14f to 14f).forEach { (x, y) ->
+                drawRect(color, Offset(x * unit, y * unit), Size(6 * unit, 6 * unit), style = stroke)
+            }
+        }
     }
 }
 
@@ -593,11 +1086,14 @@ private fun DetectionDetails(report: DetectionReport) {
 }
 
 @Composable
-private fun StatusCard(title: String, content: @Composable () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+private fun StatusCard(title: String, attention: Boolean = false, content: @Composable () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = if (attention) MaterialTheme.colorScheme.errorContainer
+            else MaterialTheme.colorScheme.surfaceContainer,
+            contentColor = if (attention) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface)) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             content()
@@ -646,26 +1142,11 @@ private fun ShizukuStatus.label(): String = when (this) {
     ShizukuStatus.NOT_INSTALLED -> "未安装"
     ShizukuStatus.NOT_RUNNING -> "未启动"
     ShizukuStatus.PERMISSION_REQUIRED -> "待授权"
-    ShizukuStatus.READY_SHELL -> "shell 只读桥已连接（UID 2000）"
-    ShizukuStatus.READY_ROOT -> "READY_ROOT（不可用）"
+    ShizukuStatus.READY_SHELL -> "已授权 · shell 就绪"
+    ShizukuStatus.READY_ROOT -> "Root 模式（不支持）"
     ShizukuStatus.ERROR -> "错误"
 }
 
-private fun ShizukuStatus.actionLabel(): String = when (this) {
-    ShizukuStatus.NOT_INSTALLED -> "获取 Shizuku"
-    ShizukuStatus.NOT_RUNNING -> "打开 Shizuku"
-    ShizukuStatus.PERMISSION_REQUIRED -> "请求授权"
-    else -> "刷新状态"
-}
-
-private fun AutostartUiStatus.label(): String = when (this) {
-    AutostartUiStatus.NOT_CHECKED -> "尚未检查"
-    AutostartUiStatus.CHECKING -> "正在检查"
-    AutostartUiStatus.ALLOWED -> "已允许"
-    AutostartUiStatus.NEEDS_USER_ACTION -> "未允许"
-    AutostartUiStatus.UNKNOWN -> "未知"
-    AutostartUiStatus.UNAVAILABLE -> "暂不可读取"
-}
 
 private fun TargetAutostartStatus.label(): String = when (this) {
     TargetAutostartStatus.NOT_CHECKED -> "尚未检查"
@@ -744,7 +1225,7 @@ private fun OriginalRecordStatus.label(): String = when (this) {
     OriginalRecordStatus.DAMAGED -> "记录损坏或无法识别"
 }
 
-private fun formatRecordTime(epochMillis: Long): String =
+internal fun formatRecordTime(epochMillis: Long): String =
     java.text.DateFormat.getDateTimeInstance(
         java.text.DateFormat.MEDIUM,
         java.text.DateFormat.SHORT,

@@ -1,0 +1,217 @@
+package io.github.originosfcmguardian.recovery
+
+import io.github.originosfcmguardian.autostart.*
+import io.github.originosfcmguardian.privileged.*
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.DataInputStream
+import java.util.concurrent.atomic.AtomicInteger
+
+class RecipientStoppedRecoveryTest {
+    private val qualifications = RecoveryTargetQualifications(true, true, false, false, false, true)
+    private val fields = StoppedPackageFields("com.example.recipient", "com.example.recipient", 10234, 100,
+        listOf(byteArrayOf(1, 2, 3)), true, qualifications)
+    private val identity = validatedStoppedPackage(fields, "com.example.recipient")!!.first
+    private val consent = AutomaticRecoveryConsent("b1a9dce2-544b-499a-9dc3-16eb5b4c97a2", 90, 4)
+    private fun known(stopped: Boolean = true) = StoppedTargetObservation.Known(1, identity, stopped, true, 100, qualifiedRecipient = true)
+    private class Memory : RecoveryJournalStorage {
+        var bytes: ByteArray? = null
+        override fun read() = bytes?.clone()
+        override fun write(bytes: ByteArray) { this.bytes = bytes.clone() }
+        override fun markUncertain() = Unit
+    }
+    private inner class Port(var samples: List<StoppedPackageFields?> = listOf(fields, fields),
+        var owners: List<String>? = listOf(identity.packageName)) : StoppedIdentityReadPort {
+        val targets = mutableListOf<String>()
+        var index = 0
+        override fun environment() = StoppedProbeEnvironment(VERIFIED_AUTOSTART_FINGERPRINT, 0, 2000)
+        override fun telegramPackage(): StoppedPackageFields? = error("Legacy route must not read recipient")
+        override fun targetPackage(packageName: String): StoppedPackageFields? { targets += packageName; return samples[index++] }
+        override fun packagesForUid(uid: Int) = owners
+    }
+
+    @Test fun qualifiedTargetReadBindsFullExpectedIdentityAndFinalFlag() {
+        val port = Port(listOf(fields, fields.copy(stopped = false)))
+        val result = observeStoppedTarget(1, identity, port) as StoppedTargetObservation.Known
+        assertEquals(listOf(identity.packageName, identity.packageName), port.targets)
+        assertEquals(identity, result.identity)
+        assertTrue(result.qualifiedRecipient)
+        assertFalse(result.stopped)
+    }
+
+    @Test fun sharedServiceTargetReadSamplesOnlyLocalCancellationOnProbeThread() {
+        val owner = Thread.currentThread()
+        val authorityCalls = AtomicInteger(0)
+        val localCalls = AtomicInteger(0)
+        val reader = StoppedIdentityProbeRunner({ Port() }, 2_000)
+        try {
+            // Both observeTarget and every recoverTarget engine sample use this exact helper.
+            val result = readTargetRecoveryObservation(reader, 12, identity,
+                { localCalls.incrementAndGet(); true },
+                { assertSame("Authority callback must not run on concurrent probe worker", owner, Thread.currentThread()); authorityCalls.incrementAndGet(); true })
+            assertTrue(result is StoppedTargetObservation.Known)
+            assertEquals(12L, result.requestId)
+            assertEquals(2, authorityCalls.get())
+            assertTrue(localCalls.get() > authorityCalls.get())
+        } finally { reader.close() }
+    }
+
+    @Test fun sharedServiceTargetReadStillChecksRevocationAfterRead() {
+        var authorityCalls = 0
+        val reader = StoppedIdentityProbeRunner({ Port() }, 2_000)
+        try {
+            assertThrows(IllegalStateException::class.java) {
+                readTargetRecoveryObservation(reader, 12, identity, { true }, { ++authorityCalls == 1 })
+            }
+            assertEquals(2, authorityCalls)
+        } finally { reader.close() }
+    }
+
+    @Test fun unavailableRecipientReadBlocksAsIdentityUnknownWithoutClaim() {
+        val result = StoppedRecoveryEngine({ id -> StoppedTargetObservation.Unknown(id, StoppedObservationUnknown.CAPABILITY_UNAVAILABLE) },
+            { error("claim") }, { true }, { error("write") }).recover(12, identity)
+        assertEquals(StoppedRecoveryOutcome.BLOCKED, result.outcome)
+        assertTrue(result.detail.contains("IDENTITY_UNKNOWN"))
+    }
+
+    @Test fun incompleteAndUnsafeQualificationsNeverReturnKnown() {
+        val unsafe = listOf(null, qualifications.copy(installed = null), qualifications.copy(installed = false),
+            qualifications.copy(enabled = false), qualifications.copy(system = true), qualifications.copy(updatedSystem = true),
+            qualifications.copy(persistent = true), qualifications.copy(enabledExportedLauncher = false),
+            qualifications.copy(enabledExportedLauncher = null))
+        unsafe.forEach { value ->
+            assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields.copy(qualifications = value)))) is StoppedTargetObservation.Unknown)
+            assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields, fields.copy(qualifications = value)))) is StoppedTargetObservation.Unknown)
+        }
+    }
+
+    @Test fun sharedMissingDuplicateAndForeignOwnersFailClosed() {
+        listOf(null, emptyList(), listOf(identity.packageName, "com.example.shared"),
+            listOf(identity.packageName, identity.packageName), listOf("com.example.other")).forEach { owners ->
+            assertTrue(observeStoppedTarget(1, identity, Port(owners = owners)) is StoppedTargetObservation.Unknown)
+        }
+    }
+
+    @Test fun identityDriftBeforeOrAfterOwnershipDiscardsEvidence() {
+        val drift = fields.copy(firstInstallTime = 101)
+        assertTrue(observeStoppedTarget(1, identity, Port(listOf(drift))) is StoppedTargetObservation.Unknown)
+        assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields, drift))) is StoppedTargetObservation.Unknown)
+    }
+
+    @Test fun stableReinstallIsDistinctFromSamplingRaceForReadonlyReconciliation() {
+        val reinstalled = fields.copy(firstInstallTime = 101)
+        assertEquals(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED,
+            (observeStoppedTarget(1, identity, Port(listOf(reinstalled, reinstalled))) as StoppedTargetObservation.Unknown).reason)
+        assertEquals(StoppedObservationUnknown.IDENTITY_CHANGED,
+            (observeStoppedTarget(1, identity, Port(listOf(fields, reinstalled))) as StoppedTargetObservation.Unknown).reason)
+    }
+
+    @Test fun cancelledTargetReadReturnsNoEvidence() {
+        val port = Port()
+        assertEquals(StoppedObservationUnknown.CANCELLED,
+            (observeStoppedTarget(1, identity, port, { StoppedObservationUnknown.CANCELLED }) as StoppedTargetObservation.Unknown).reason)
+        assertTrue(port.targets.isEmpty())
+    }
+
+    @Test fun targetCodecRequiresExpectedFullIdentityAndVersionedQualification() {
+        val raw = StoppedObservationCodec.encode(known())
+        assertTrue(raw.startsWith("2|"))
+        assertEquals(known(), StoppedObservationCodec.decode(raw, 1, identity))
+        listOf(StoppedObservationCodec.decode(raw, 1),
+            StoppedObservationCodec.decode(raw, 1, identity.copy(firstInstallTime = 101)),
+            StoppedObservationCodec.decode(raw.dropLast(1) + "0", 1, identity),
+            StoppedObservationCodec.decode(raw.substringBeforeLast('|').replaceFirst("2|", "1|"), 1, identity)).forEach {
+            assertTrue(it is StoppedTargetObservation.Unknown)
+        }
+    }
+
+    @Test fun excludedPackagesCannotEnterRecipientServiceRoute() {
+        listOf("android", "io.github.originosfcmguardian", "io.github.originosfcmguardian.test", "com.google.android.gms",
+            "moe.shizuku.privileged.api", "com.android.vending", "com.android.shell", "com.android.systemui").forEach {
+            assertFalse(isRecoveryTargetPackage(it))
+            assertThrows(IllegalArgumentException::class.java) { stoppedRecoveryArgv(identity.copy(packageName = it)) }
+        }
+    }
+
+    @Test fun fixedArgvAllowsOnlyOneValidatedTargetArgument() {
+        assertEquals(listOf("/system/bin/cmd", "package", "unstop", "--user", "0", identity.packageName), stoppedRecoveryArgv(identity))
+        listOf("com.example.app;id", "--user", "com.example.app\ncmd").forEach { name ->
+            assertThrows(IllegalArgumentException::class.java) { identity.copy(packageName = name) }
+        }
+    }
+
+    @Test fun legacyEndpointScopeRemainsExactTelegramWithoutRecipientQualification() {
+        val telegram = identity.copy(packageName = "org.telegram.messenger")
+        assertEquals(telegram, decodeRecoveryTarget(TargetSelectionCodec.encode(listOf(telegram)), false))
+        assertThrows(IllegalArgumentException::class.java) { decodeRecoveryTarget(TargetSelectionCodec.encode(listOf(identity)), false) }
+        assertEquals(identity, decodeRecoveryTarget(TargetSelectionCodec.encode(listOf(identity)), true))
+        var reads = 0
+        val result = StoppedRecoveryEngine({ StoppedTargetObservation.Known(1, telegram, ++reads < 3, true, 100) },
+            { true }, { true }, { 0 }).recover(1, telegram)
+        assertEquals(StoppedRecoveryOutcome.FLAG_CLEARED, result.outcome)
+    }
+
+    @Test fun schemaThreeAutomaticRetainsPolicyFourAndGlobalPendingBlockade() {
+        val memory = Memory()
+        var journal = StoppedRecoveryJournal(memory)
+        val record = journal.prepareAutomatically(identity, known(), consent)
+        assertEquals(3, DataInputStream(memory.bytes!!.inputStream()).readInt())
+        assertEquals(4, record.consentVersion)
+        assertTrue(journal.claim(record.requestId))
+        journal = StoppedRecoveryJournal(memory)
+        val other = identity.copy(packageName = "com.example.second", uid = 10235)
+        assertThrows(IllegalStateException::class.java) {
+            journal.prepareAutomatically(other, known().copy(identity = other), consent)
+        }
+        journal.finish(record.requestId, StoppedRecoveryOutcome.FLAG_CLEARED, "confirmed")
+        assertEquals(2L, journal.prepareAutomatically(other, known().copy(identity = other), consent).requestId)
+        assertFalse(journal.claim(record.requestId))
+    }
+
+    @Test fun schemaThreeManualRequiresConfirmationAndNoAutomaticConsent() {
+        val memory = Memory()
+        val journal = StoppedRecoveryJournal(memory)
+        assertThrows(IllegalStateException::class.java) { journal.prepare(identity, known(), false) }
+        val record = journal.prepare(identity, known(), true)
+        assertEquals(3, DataInputStream(memory.bytes!!.inputStream()).readInt())
+        assertTrue(record.confirmedManualAction)
+        assertNull(record.consentId)
+        assertEquals(record, StoppedRecoveryJournal(memory).load().latest)
+    }
+
+    @Test fun oldConsentAndOldSchemaCannotExpandToRecipientTargets() {
+        val memory = Memory()
+        val journal = StoppedRecoveryJournal(memory)
+        assertThrows(IllegalStateException::class.java) { journal.prepareAutomatically(identity, known(), consent.copy(version = 2)) }
+        assertNull(memory.bytes)
+        journal.prepareAutomatically(identity, known(), consent)
+        val oldSchema = memory.bytes!!.clone().also { it[3] = 2 }
+        assertThrows(IllegalArgumentException::class.java) { RecoveryJournalCodec.decode(oldSchema) }
+        assertThrows(IllegalArgumentException::class.java) { consent.copy(version = 3).validate() }
+    }
+
+    @Test fun finalEligibilityLossAndWrongRequestPreventDispatch() {
+        var reads = 0
+        var writes = 0
+        val result = StoppedRecoveryEngine({ if (++reads == 1) known() else StoppedTargetObservation.Unknown(1, StoppedObservationUnknown.INELIGIBLE_TARGET) },
+            { true }, { true }, { writes++; 0 }).recover(1, identity)
+        assertEquals(StoppedRecoveryOutcome.UNCONFIRMED, result.outcome)
+        assertEquals(0, writes)
+        val mismatch = StoppedRecoveryEngine({ known().copy(requestId = 2) }, { error("claim") }, { true }, { error("write") }).recover(1, identity)
+        assertEquals(StoppedRecoveryOutcome.BLOCKED, mismatch.outcome)
+    }
+
+    @Test fun clearedReadbackCountsOnlyNewSuccessfulCommittedRecovery() {
+        val journal = StoppedRecoveryJournal(Memory())
+        val record = journal.prepareAutomatically(identity, known(), consent)
+        var reads = 0
+        var writes = 0
+        val result = StoppedRecoveryEngine({ known(++reads < 3) }, journal::claim, { true }, { writes++; 0 }).recover(record.requestId, identity)
+        assertEquals(1, writes)
+        assertEquals(StoppedRecoveryOutcome.FLAG_CLEARED, result.outcome)
+        val finished = journal.finish(record.requestId, result.outcome, result.detail)
+        assertEquals(identity, confirmedRecoveryReceipt(result.copy(record = finished), finished.createdAtMillis + 1)?.identity)
+        assertNull(confirmedRecoveryReceipt(result.copy(record = finished, commandSucceeded = false), finished.createdAtMillis + 1))
+        assertNull(confirmedRecoveryReceipt(result.copy(record = finished.copy(stage = StoppedRecoveryStage.RECONCILED)), finished.createdAtMillis + 1))
+    }
+}

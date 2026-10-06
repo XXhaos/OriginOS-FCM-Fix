@@ -10,6 +10,32 @@ import kotlin.test.assertTrue
 
 class ReadOnlyDetectorTest {
     @Test
+    fun `full and configuration detection never query OEM autostart permissions`() = runBlocking {
+        for (configurationOnly in listOf(false, true)) {
+            val executor = FixtureExecutor()
+            val detector = ReadOnlyDetector(executor)
+            if (configurationOnly) detector.detectGmsConfiguration() else detector.detect()
+            assertFalse(executor.commands.any {
+                it == SafeCommand.GetGuardianAutostartRow || it is SafeCommand.GetTargetAutostartRow
+            })
+        }
+    }
+
+    @Test
+    fun `GMS config reads fixed settings without PEM while full detection retains PEM`() = runBlocking {
+        val executor = FixtureExecutor()
+        val lean = ReadOnlyDetector(executor).detectGmsConfiguration()
+        assertEquals(11, executor.execCount)
+        assertFalse(executor.commands.any { it == SafeCommand.GetVivoPemList || it == SafeCommand.GetVivoPemPackagePath })
+        assertEquals(EvidenceStatus.CONFORMING, lean.gms.status)
+        assertEquals(EvidenceStatus.CONFORMING, lean.doze.status)
+        assertTrue(lean.appOps.values.all { it.status == EvidenceStatus.CONFORMING })
+        val full = FixtureExecutor()
+        ReadOnlyDetector(full).detect()
+        assertEquals(13, full.execCount)
+        assertTrue(full.commands.containsAll(listOf(SafeCommand.GetVivoPemList, SafeCommand.GetVivoPemPackagePath)))
+    }
+    @Test
     fun `clean PD2609 null PEM snapshot plans no write without claiming FCM health`() = runBlocking {
         val executor = FixtureExecutor()
         val report = ReadOnlyDetector(executor).detect()
@@ -140,6 +166,7 @@ class ReadOnlyDetectorTest {
             "vivo/PD2609/PD2609:17/CP2A.260605.016_V000L1/260923024147:user/release-keys\n",
     ) : PrivilegedExecutor {
         var execCount: Int = 0
+        val commands = mutableListOf<SafeCommand>()
 
         override suspend fun isAvailable(): Boolean = true
 
@@ -147,6 +174,7 @@ class ReadOnlyDetectorTest {
 
         override suspend fun exec(command: SafeCommand): CommandResult {
             execCount += 1
+            commands += command
             return when (command) {
                 SafeCommand.GetCurrentUser -> result(command, currentUserOutput)
                 SafeCommand.GetBuildFingerprint -> result(

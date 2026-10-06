@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Internal, explicitly granted experiment. No production entry point uses this permission. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:node="replace" tools:ignore="ProtectedPermissions" />
+</manifest>

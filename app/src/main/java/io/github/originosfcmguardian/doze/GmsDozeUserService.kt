@@ -16,10 +16,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Separate short-lived shell service. Its public IPC has no target, UID, command, or write-method
- * argument. The fixed GMS command port is usable only after an app-owned durable journal callback
- * is accepted. This boundary trusts Guardian's own app code; it does not claim protection from
- * malicious code running under the same app UID.
+ * Separate short-lived legacy shell service. Inspection retains its bounded journal/identity checks.
+ * Legacy apply/restore are permanently rejected before any callback, command, or engine execution;
+ * future writes require the separate finite broker protocol.
  */
 abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTransaction.Stub() {
     private val callLock = Any()
@@ -29,11 +28,11 @@ abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTr
 
     override fun getServiceUid(): Int = Os.getuid()
 
-    override fun inspect(journal: IDozeJournalCallback?): Bundle = execute(Mode.INSPECT, journal)
-    override fun apply(journal: IDozeJournalCallback?): Bundle = execute(Mode.APPLY, journal)
-    override fun restore(journal: IDozeJournalCallback?): Bundle = execute(Mode.RESTORE, journal)
+    override fun inspect(journal: IDozeJournalCallback?): Bundle = inspectOnly(journal)
+    override fun apply(journal: IDozeJournalCallback?): Bundle = legacyDozeWriteRejection().asBundle()
+    override fun restore(journal: IDozeJournalCallback?): Bundle = legacyDozeWriteRejection().asBundle()
 
-    private fun execute(mode: Mode, journal: IDozeJournalCallback?): Bundle {
+    private fun inspectOnly(journal: IDozeJournalCallback?): Bundle {
         // Capture before callbacks or other outbound Binder calls can alter the calling identity.
         val callerUid = Binder.getCallingUid()
         return synchronized(callLock) {
@@ -56,7 +55,6 @@ abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTr
             val checkedActive = {
                 localActive() && boundedCallback.call { callback.isSessionActive }
             }
-            var port: FixedDozeDevicePort? = null
             try {
                 check(getServiceUid() == SHELL_UID) { "Doze service must run as shell UID 2000" }
                 check(Build.FINGERPRINT == KNOWN_FINGERPRINT) { "Unknown device fingerprint" }
@@ -79,7 +77,7 @@ abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTr
                 )
                 check(owners == setOf(GUARDIAN_PACKAGE)) { "Caller is not fresh exact Guardian UID" }
 
-                port = FixedDozeDevicePort(runner, target)
+                val port = FixedDozeDevicePort(runner, target)
                 val durable = object : DozeJournalPort {
                     override fun load(): ByteArray? {
                         check(checkedActive()) { "Journal callback closed before read" }
@@ -102,15 +100,10 @@ abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTr
                     target = target,
                     mayContinue = checkedActive,
                 )
-                val outcome = when (mode) {
-                    Mode.INSPECT -> engine.inspect()
-                    Mode.APPLY -> engine.apply()
-                    Mode.RESTORE -> engine.restore()
-                }
-                outcome.asBundle()
+                engine.inspect().asBundle()
             } catch (failure: Throwable) {
                 DozeOutcome(
-                    code = if (port?.writeAttempted == true) DozeOutcomeCode.UNCERTAIN else DozeOutcomeCode.BLOCKED,
+                    code = DozeOutcomeCode.BLOCKED,
                     detail = boundedFailureDetail(failure),
                 ).asBundle()
             } finally {
@@ -150,8 +143,6 @@ abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTr
         putString("detail", detail.take(192))
     }
 
-    private enum class Mode { INSPECT, APPLY, RESTORE }
-
     private companion object {
         const val SHELL_UID = 2_000
         const val GUARDIAN_PACKAGE = "io.github.originosfcmguardian"
@@ -160,6 +151,12 @@ abstract class FixedDozeUserService(private val target: DozeTarget) : IGmsDozeTr
             "vivo/PD2609/PD2609:17/CP2A.260605.016_V000L1/260923024147:user/release-keys"
     }
 }
+
+/** No journal or execution dependency can enter this legacy rejection path. */
+internal fun legacyDozeWriteRejection(): DozeOutcome = DozeOutcome(
+    DozeOutcomeCode.BLOCKED,
+    detail = "Legacy Doze writes are disabled; the finite broker protocol is required",
+)
 
 /** Release entry point stays permanently fixed to GMS. */
 class GmsDozeUserService : FixedDozeUserService {

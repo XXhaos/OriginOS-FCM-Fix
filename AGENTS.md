@@ -1,5 +1,27 @@
 # AGENTS.md — OriginOS FCM Guardian
 
+## Latest workflow override — no speculative failure gate (2026-10-05)
+
+The user confirms there is currently no reported missed-message incident with automatic protection
+actually operating. Continue from the accepted working baseline. The earlier Telegram incident was
+protection OFF with stopped=true, followed by successful recovery; do not reuse it as evidence of
+failure under enabled protection. Daily feedback is follow-up, not a prerequisite for independent
+development or delivery. Reopen an accepted behavior only for a concrete report, observed failure or
+relevant code change. Lack of a reported fault means no known fault; it is not universal efficacy proof.
+Keep unimplemented GMS repair/reconnect/boot privilege capabilities separate from current defects.
+When a capability lacks a supported implementation path, record it as deferred and advance another
+ready item; do not require the user to produce a failure or repeat accepted tests to continue.
+
+## Latest workflow override — local-only completion (2026-10-05)
+
+The user explicitly ended cross-computer development. From this decision onward, do not write or
+update handoff records, including `docs/CODEX_HANDOFF.md` and `docs/CROSS_COMPUTER_HANDOFF.md`,
+or prepare migration packages. Keep existing handoff files as historical records; do not delete them.
+This supersedes all mandatory handoff-reading/writing and cross-computer steps below. Resume from
+`docs/PROJECT_STATE.md` and `docs/ACCELERATED_PLAN.md`; maintain only concise current status, necessary
+task/defect and test/device evidence. Preserve local changes and private files; local-only is not
+permission to delete backups, skip tests, commit or push. Avoid repetitive status-document copies.
+
 ## 1. Purpose
 
 This repository contains **OriginOS FCM Guardian**, an Android project for vivo / iQOO China-ROM devices, with OriginOS 7 as the primary target.
@@ -25,13 +47,13 @@ When instructions appear to conflict:
 
 The primary Codex thread is the **project Orchestrator**.
 
-The Orchestrator model is **not fixed by this repository**. The parent agent is always the model + reasoning effort that the user currently selected for the main Codex thread.
+The project default/recommendation is **GPT-6.1 Sol / high** (user decision, 2026-09-30). The parent agent is always the model + reasoning effort that the user currently selected for the main Codex thread; that explicit choice overrides the recommendation. Updating this file does not change a live thread or pin the main model in `.codex/config.toml`.
 
 Examples:
 
 ```text
-main thread = GPT-5.6 Sol / high
-→ GPT-5.6 Sol / high is the Orchestrator for that turn/session state
+main thread = GPT-6.1 Sol / high
+→ GPT-6.1 Sol / high is the Orchestrator for that turn/session state
 
 main thread switched to GPT-6 Astra / medium
 → GPT-6 Astra / medium becomes the Orchestrator for subsequent work
@@ -39,7 +61,7 @@ main thread switched to GPT-6 Astra / medium
 
 Do not rewrite `.codex/config.toml` to pin the primary model. Do not assume that the parent is GPT-6. Respect the user's current main-thread model selection.
 
-A stronger parent model is recommended when the current task involves architecture, ambiguous requirements, conflicting evidence, or first-time high-risk device decisions, but ordinary project work may be orchestrated by GPT-5.6 Sol when it is sufficient.
+Routine orchestration uses the GPT-6.1 Sol / high recommendation. The six triggers in §5.1 route the relevant analysis/review to **GPT-6 Astra**, without silently changing the user-selected parent. Reuse the resulting decision/evidence when returning routine implementation to Sol.
 
 The parent agent is primarily responsible for:
 
@@ -84,9 +106,9 @@ Therefore:
 
 ```text
 explorer != Terra
-worker   != GPT-5.6
+worker   != Sol
 utility  != Luna
-reviewer != GPT-5.6
+reviewer != Sol
 ```
 
 Those are only common starting pairings. Do not permanently bind a role to a model unless a future verified reason requires it.
@@ -95,12 +117,12 @@ Those are only common starting pairings. Do not permanently bind a role to a mod
 
 The primary Codex thread is always the **Orchestrator**.
 
-Its model and reasoning effort are whatever the user currently selected for the main thread. This repository must not pin the parent to GPT-6 or any other model.
+Its model and reasoning effort are whatever the user currently selected for the main thread. GPT-6.1 Sol / high is the recommended default, not a forced setting. The Astra escalation rules below apply to delegated analysis/review even when a different parent remains selected.
 
 Examples:
 
 ```text
-main thread = GPT-5.6 Sol / high
+main thread = GPT-6.1 Sol / high
 → that model is the current Orchestrator
 
 user later switches main thread to GPT-6 Astra / medium
@@ -192,7 +214,7 @@ Expected behavior:
 - build/test affected code before returning when practical;
 - report changed files, tests, assumptions, and remaining risk.
 
-Common starting model: **GPT-5.6 Sol / medium-high**.
+Common starting model: **GPT-6.1 Sol / medium-high**.
 
 For very narrow, low-risk implementation, a cheaper capable model may be used. For complex lifecycle, rollback, concurrency, or cross-module work, increase model capability/reasoning while keeping the worker role.
 
@@ -215,7 +237,7 @@ running clearly specified low-risk commands
 
 Do not use for architecture, ambiguous coding, OriginOS reverse engineering, or deciding whether a vivo-private system write is safe.
 
-Common starting model: **GPT-5.6 Luna / low**.
+Common starting model: **GPT-6 Luna / low**.
 
 If the work remains mechanical but becomes too large or error-prone for Luna, keep the utility role and use Terra. If the work becomes semantic implementation, change to worker instead.
 
@@ -240,7 +262,7 @@ phase acceptance gaps
 
 Reviewer should normally be read-only and return findings to the parent rather than silently rewriting implementation.
 
-Common starting model: **GPT-5.6 Sol / high** for core safety-sensitive work.
+Common starting model: **GPT-6.1 Sol / high** for routine independent implementation review; **GPT-6 Astra / high** when §5.1 is triggered, including phase-level final audit and a proposed new system write.
 
 A lightweight review may use a cheaper model. If the review becomes difficult, keep the reviewer role and upgrade the model/reasoning before changing roles.
 
@@ -252,30 +274,81 @@ Use for ordinary delegated work that does not cleanly fit another specialist rol
 
 # 5. Dynamic model routing policy
 
-The parent routes by **difficulty, ambiguity, risk, and context size**. Defaults, not bindings:
+Updated 2026-09-30 at the user's request. Defaults describe workload routing, not permanent role/model bindings.
 
-| Task profile | Typical model | Reasoning |
+| Task profile | Preferred model | Reasoning |
 |---|---|---|
-| deterministic / repetitive | GPT-5.6 Luna | low |
-| read-heavy exploration / ordinary local work | GPT-5.6 Terra | medium |
-| serious implementation / lifecycle / rollback | GPT-5.6 Sol | medium-high |
-| architecture / conflicting evidence / first-write risk | current parent or stronger main-thread model | high as needed |
+| parent / orchestration | GPT-6.1 Sol | high; user's selected main-thread setting overrides |
+| routine implementation | GPT-6.1 Sol | medium for clear bounded work; high for lifecycle/concurrency/rollback complexity |
+| routine independent review | GPT-6.1 Sol | high |
+| deterministic / mechanical work | GPT-6 Luna | low |
+| inexpensive read-heavy or larger mechanical work | GPT-5.6 Terra | medium |
+| any escalation trigger below | GPT-6 Astra | high; increase only for demonstrated need |
 
-Select the **lowest-cost model confidently sufficient on the first attempt**.
+These are project engineering choices, not claims that one model guarantees correct diagnosis.
+Official OpenAI documentation checked 2026-09-30:
+[GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) and
+[GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra).
+The active host's callable model/effort list controls actual availability.
 
-Do not use a blind escalation ladder such as “always try Luna, then Terra, then Sol”. That wastes tokens and may create bad partial work. Route directly based on the actual task.
+## 5.1 Required Astra escalation triggers
+
+Route the relevant causal analysis, design decision or independent review to GPT-6 Astra when:
+
+1. Multiple plausible causal explanations remain and the next decision depends on choosing between them.
+2. Two valid attempts fail to resolve the same substantive problem.
+3. A previously unvalidated OEM-private mechanism is discovered.
+4. A new real-device system write is proposed, before executing it.
+5. Architecture or the meaning/classification of evidence is being changed.
+6. A phase-level final audit or acceptance decision is being conducted.
+
+Do not wait for two failed attempts when another trigger already applies. A valid attempt has
+usable inputs/environment, an explicit hypothesis or fix and meaningful verification; the second
+must add discriminating evidence rather than repeat an equivalent path. Downloads, network
+outages, missing permissions, offline devices, command/tool formatting errors and mere failure
+to reproduce a symptom do not count as substantive model failures. Record the two approaches
+and their results in a bounded handoff; do not extend investigation indefinitely.
+
+A new system write includes a newly introduced mutation class, an unvalidated OEM path or a
+changed target/rollback/evidence assumption. A previously reviewed same-path repetition with
+fresh identity/baseline does not by itself require a new model escalation. Ordinary code editing,
+builds and read-only ADB checks are not phone system writes.
+
+A phase audit is the exit/scope/acceptance judgment, not every routine build or document edit.
+For a discovered OEM-private mechanism, inexpensive agents may collect read-only raw facts,
+but Astra reviews interpretation and any proposed use before it informs a risky decision.
+
+## 5.2 How to escalate and return
+
+- If the selected parent is already GPT-6 Astra, keep its user-selected reasoning setting and
+  arrange independent review as required. Do not claim a particular active model without metadata.
+- Otherwise delegate the triggered task to Astra, pass existing evidence/failures and keep the
+  selected parent responsible for integration and final device-safety approval.
+- Do not silently switch a live parent or edit configuration to force one. If the needed Astra
+  capability is unavailable, preserve the exact blocker and continue safe independent preparation;
+  do not execute the dependent new write or close the phase by silently substituting a cheap model.
+- After the Astra decision/review is resolved, return bounded routine work to Sol and mechanical
+  work to Luna/Terra. Escalation does not require moving the entire project to Astra permanently.
+- A stronger model never replaces authorization, fresh device identity/baseline, verified readback,
+  rollback or the user's no-lock/no-reboot boundary.
+
+Choose the lowest-cost sufficient model within the applicable routing class. Do not use a blind
+Luna → Terra → Sol retry ladder or downgrade an active Astra trigger to save cost.
+The parent may perform small routine tasks directly when delegation costs more than it saves.
+The existing Terra fallback in configuration is insurance for low-risk tasks, not authority to
+route complex implementation or an Astra-triggered review to Terra.
 
 Examples:
 
 ```text
-rename fixtures → utility + Luna / low
-large call-graph search → explorer + Terra / medium
-difficult vivo Provider analysis → explorer + GPT-5.6 Sol / high
-RepairEngine + rollback → worker + GPT-5.6 Sol / high
-first-write safety review → reviewer + GPT-5.6 Sol / high → parent approval
+rename fixtures → utility + GPT-6 Luna / low
+large bounded read-only search → explorer + GPT-5.6 Terra / medium
+routine implementation → worker + GPT-6.1 Sol / medium
+lifecycle/rollback implementation → worker + GPT-6.1 Sol / high
+new vivo Provider semantics → explorer + GPT-6 Astra / high
+first system-write review → reviewer + GPT-6 Astra / high → parent safety approval
+phase final audit → reviewer + GPT-6 Astra / high
 ```
-
-The parent may work directly when delegation costs more context than it saves.
 
 ---
 
@@ -291,10 +364,10 @@ Examples:
 
 ```text
 explorer + Terra cannot resolve a complex Binder/provider chain
-→ re-delegate as explorer + stronger model / higher reasoning
+→ re-delegate causal/OEM interpretation as explorer + GPT-6 Astra / high (§5.1)
 
 reviewer + Terra finds a complicated rollback state machine
-→ re-delegate as reviewer + GPT-5.6 Sol / high
+→ reviewer + GPT-6.1 Sol / high; use GPT-6 Astra when §5.1 is triggered
 
 utility + Luna is still doing deterministic bulk work but the operation is too large/error-prone
 → utility + Terra
@@ -333,7 +406,7 @@ first execution of a risky mutation
 
 return the decision to the parent Orchestrator.
 
-If the current parent is not strong enough for the decision, persist state and recommend that the user switch the main thread to a stronger model/reasoning level rather than repeatedly failing with child agents.
+Apply §5.1: obtain GPT-6 Astra analysis/review of the relevant decision before dependent risky execution. The selected parent retains final authority. If Astra is unavailable, preserve a bounded handoff and continue independent safe work; do not repeat failed child attempts or pretend the parent was switched.
 
 ## 6.4 Re-routing must reuse prior work
 
@@ -390,6 +463,13 @@ The user explicitly requires fast completion. Apply this rule to every subsequen
 - Reuse passed tests and valid device evidence. Repeat checks only after relevant changes,
   failures, evidence drift or a specific unresolved acceptance risk. Batch independent work
   with clear ownership; run device mutations and their dependent checks sequentially.
+- Before device acceptance, identify the exact outstanding item, prior evidence and the
+  concrete change/failure that invalidates it (if it was already passed). A newer version,
+  connected phone, generic "continue", or host-only branch alone is not a repeat trigger.
+  User-accepted UI remains accepted. Explain any necessary delta briefly before acting.
+  Close completed items in the current queue immediately; historical queues are not tasks.
+  With no justified outstanding item, advance a concrete implementation defect or explain
+  the actual blocker; do not substitute another acceptance/review cycle for development.
 - Bound each investigation and name its stopping condition. Once a path is unsupported,
   record the limitation and use the authorized fallback instead of retrying equivalent work.
 - When a phase runs long, immediately maintain a short exit checklist: passed items,
@@ -713,11 +793,16 @@ A new primary session should be able to continue without asking the user to reco
 
 ---
 
-# 12. Development phase gating
+# 12. Dependency-based development and phase acceptance
 
 Follow `OriginOS_FCM_Guardian_Development_Spec.md`.
 
-Order:
+Latest scheduling decision (2026-10-04): the user explicitly authorizes independent offline work
+across Phase1–5 while the phone is normally disconnected. Phase numbers describe responsibilities,
+not a global serial lock. This supersedes the old Phase5-last development restriction, not safety,
+per-feature dependencies, device acceptance or the original notification-reliability goal.
+
+Responsibilities:
 
 ```text
 Phase 0 — OriginOS 7 read-only investigation
@@ -725,17 +810,27 @@ Phase 1 — Core ADB / Shizuku detection and repair
 Phase 2 — Autostart management, auto-protection, rollback
 Phase 3 — Real FCM health testing
 Phase 4 — Third-party tracing / Deep Monitoring
-Phase 5 — UI, reports, polish
+Phase 5 — optional visual/report polish (basic usable UI accompanies Phase1–3)
 ```
 
-Do not jump ahead because a later feature is interesting.
+Follow the eligible work packages in `docs/ACCELERATED_PLAN.md`. Known core defects take priority;
+when a core item only awaits device evidence or has a recorded unsupported path, implement useful,
+independent Phase4/5 slices instead of treating phone access as a prerequisite for all development.
+Shared files/contracts still require serialized ownership. Do not invent optional work just to fill
+a phase, or reopen cancelled/unsupported experiments solely because scheduling is parallel.
 
 Especially:
 
-- no deep logging before repair is reliable;
+- no new logging framework or sources without a concrete need and bounded approved contract;
+- existing diagnostic correctness and bounded report-format work may proceed offline;
 - no complex UI before state and rollback correctness;
 - no automated vivo-private write before manual verification;
+- a supported manual effect remains a prerequisite for its corresponding automatic capability;
+- host verification is not device, notification-delivery or battery acceptance;
 - no phase completion until acceptance criteria pass.
+
+Maintain one device-acceptance queue and upgrade once to the latest host-verified candidate after
+fresh connection confirmation. Phone absence blocks those checks, not unrelated host packages.
 
 If the user explicitly changes priorities, update `PROJECT_STATE.md`.
 
@@ -744,6 +839,23 @@ If the user explicitly changes priorities, update `PROJECT_STATE.md`.
 # 13. Real-device safety and parent approval
 
 The phone is a real user device. Treat system mutations as production-sensitive.
+
+## 13.0 Device availability default (user instruction, 2026-10-02)
+
+Unless the user explicitly says the phone is connected for the current work, assume it is
+unavailable. Do not poll ADB, inspect or operate the phone, or repeatedly request a connection.
+Continue independent local implementation, host tests, builds and reviews; record device-only
+acceptance as pending. A past connection or historical device snapshot is not current access.
+When the user later confirms connection, refresh only the baseline needed for the queued
+acceptance. This rule persists across sessions and computers and does not expand mutation authority.
+
+Maintain `docs/DEVICE_ACCEPTANCE_QUEUE.md` as the single device-acceptance batch queue. Every
+offline package adds or updates affected pending checks, candidate build, dependencies, required
+user interaction and acceptance criteria. On explicit connection, batch ready independent checks
+with one appropriate verified build, preserve unready/conditional items, record results/evidence and
+cleanup, then tell the user when unplugging is safe. Reuse valid passes; reopen only affected checks
+with a stated reason. Read this queue when resuming or switching computers. It does not replace the
+development roadmap or authorize new device mutations/reboots; no continuous USB connection required.
 
 ## 13.1 Phase 0 is read-only
 
@@ -770,7 +882,7 @@ known device/build recorded
 risk reviewed by parent agent
 ```
 
-The first execution of a new mutation class must be approved/reviewed by the **parent Orchestrator**.
+The first execution of a new mutation class requires **GPT-6 Astra independent safety review (§5.1)** and final approval by the **parent Orchestrator**. This model requirement does not expand the user's device-mutation authorization.
 
 Examples:
 
@@ -798,7 +910,8 @@ Do not use:
 - disabling `com.vivo.pem`;
 - disabling vivo core services;
 - permanent wakelocks;
-- always-on foreground service in Daily Protection mode;
+- always-on foreground service in ordinary Daily Protection mode, except the explicitly user-approved
+  opt-in Telegram automatic-recovery service described in §15;
 - blanket unrestricted battery for apps;
 - blanket Doze whitelist;
 - unknown provider/database writes;
@@ -817,6 +930,32 @@ paste when supported. Verify the resulting field text exactly before submitting,
 or changing a setting. If an IME converts letters/punctuation or chooses a suggestion, stop,
 correct the field and recheck; never continue on an assumed value. Do not change the default
 keyboard or disable IME protections merely to automate entry.
+
+## 13.5 Persistent installation interaction authorization (2026-10-03)
+
+The user explicitly authorizes the agent to operate the phone installation confirmation for
+Guardian and its necessary companion test APKs: inspect the current installer, select the required
+allow checkbox directly above the install button, confirm installation, then verify the installed
+package/version. Do not repeatedly ask the user to perform this routine confirmation. This does not
+authorize unrelated software, blanket permission changes, disabling installer protections, or device
+access when the user has not confirmed connection (§13.0). If the actual dialog differs materially or
+requires a credential/biometric, stop and ask rather than guessing.
+
+## 13.6 Exact UI labels in user instructions (2026-10-03)
+
+Before giving a phone navigation path, verify the current installed version's visible labels or
+matching source. Quote the exact button label, distinguish a section/card heading from a button
+and destination title, and do not substitute an internal feature name or an older version's label.
+For v13, Settings → 工作模式 card → 内置连接 button opens 工作模式 · 内置启动; these are not interchangeable.
+
+## 13.7 Routine test authorization (2026-10-03)
+
+The user explicitly authorizes routine in-scope project tests without asking for each test again.
+This includes the disclosed finite FCM Toolbox force-stop followed by Guardian manual stopped-state
+recovery, with the target restored afterward. Record the exact target, original state and outcome.
+This is not blanket authorization to erase data, reboot the phone, disturb unrelated applications or
+shared services, or bypass the first-write gate. Device availability still follows §13.0; new mutation
+classes still require independent review and parent approval before execution.
 
 # 14. Evidence levels
 
@@ -856,6 +995,70 @@ Examples:
 Keep the two modes separate.
 
 ## Daily Protection
+
+Latest recovery scheduling decision (2026-10-04): the user explicitly removes the normal automatic
+recovery quotas (5-minute minimum / 3 attempts per hour). Production startup and admission now
+fresh-check the current exact durable lease, not the historical budget. Preserve legacy records
+unchanged for compatibility; do not clear, normalize or migrate authority to remove a quota.
+Keep the sole owner, serial single-flight execution, fresh identity/connection/write-ticket checks,
+pending-result read-only reconciliation and existing best-effort 30-second polling. False flags
+must not cause writes, and failures must not introduce an immediate retry loop. This supersedes
+historical quota-preservation requirements below, not explicit OFF, revocation or storage safety.
+See docs/RECOVERY_FREQUENCY_POLICY.md. Never equate uncapped attempts with guaranteed delivery.
+
+Latest backend decision (2026-10-03): user abandoned Guardian-owned pairing/startup and chose external
+Shizuku as the sole active backend, with GKD-like explicit authorization interaction. This supersedes
+older internal-only/app-owned activation requirements below. Follow EXTERNAL_SHIZUKU_V18 and the active
+ACCELERATED_PLAN; cancelled D03/internal recovery/policy3 work is not accepted capability. Preserve all
+private records/keys and external policy2 semantics. Permission authorization is not protection consent;
+explicit revocation retains the existing stop rule. Guardian may wait after boot for externally restored
+Shizuku, but must not claim it can make that external shell service survive/restart without Root.
+No automatic wireless settings writes or shared-service manipulation for this external-only route.
+
+Latest product scope (2026-10-01): stability first, then minimum independent Home/Apps navigation;
+Settings/Diagnostics are secondary. Core startup, protection, app management and basic usable UI
+belong to Phase1–3, not optional Phase5 polish. Read docs/PRODUCT_ROADMAP.md and the single active
+docs/ACCELERATED_PLAN.md queue with status/handoff. Old R1/R2 queues are archived, not current tasks.
+Planning acceptance is not implementation or field acceptance. Preserve attention-vs-consent separation,
+live privilege/readiness semantics, journal/reconciliation, active monitor Stop and private screenshots.
+
+Latest explicit product override (2026-10-04): configured applications are persistent settings.
+The Home master switch controls running intent; global OFF, unavailable privilege and ordinary
+failure must not silently cancel those selections. Only an explicit per-app OFF removes that
+configuration. OFF still synchronously revokes future execution and must be durably fail-closed;
+retained configuration is not current write authority. Architecture design requires a single atomic
+authority schema3, distinct configured-vs-runnable reads, independent master history acknowledgement,
+identity invalidation and interrupted-storage gates. Read docs/MASTER_SWITCH_APP_SELECTION.md.
+This supersedes older global Stop-clears-all product behavior, not identity/journal/permission gates.
+Never reconstruct already-retired consent from backups. Historical v44 stopping caller is UNKNOWN;
+do not claim lifecycle/GKD/system causality or restored FCM benefit from this redesign.
+
+Latest lifecycle requirement (2026-10-01): the user explicitly prioritizes one-time opt-in,
+boot/reboot startup and recovery of actual Guardian protection, plus app-owned privilege activation.
+The old no-boot/session-only rule below describes shipped v5, not the desired final product.
+Implementing durable consent/restart is now in scope, but legacy session grants must not silently
+become durable write consent. Preserve explicit stop/revocation, fresh identity/journal checks,
+cross-process authority locks, no Root/wakelock/fake accessibility/VPN, and user-hidden notifications.
+An app process starting is not privileged readiness. No new device mutation or agent-initiated
+phone reboot is authorized by this product requirement; apply the existing first-write gates.
+See docs/PRIVILEGE_STARTUP_PLAN.md; architecture and implementation review precede deployment.
+
+Latest user override (2026-10-01): user rejects persistent notification drawer clutter. Platform FGS
+notification submission remains mandatory, but user notification suppression/dismissal must not itself
+revoke explicit protection consent. Preserve in-app status/stop and OS Task Manager stop controls.
+Use the normal channel settings UI; do not fake accessibility/media roles or bypass platform service
+requirements. Revised architecture approved by independent Astra review; final code/device checks
+are still required.
+
+2026-10-01 explicit user exception: Guardian-only foreground service with user-controlled notification
+visibility is allowed for opt-in Telegram automatic stopped-flag recovery. Target apps must not be
+kept resident. No permanent wakelock, exact-alarm loop, blanket exemption, boot restart or silent
+re-enable. The initial version is a foreground-user-started, non-sticky session; process loss/reboot
+requires explicit re-enable. Best-effort 30-second reads may be delayed by suspend/Doze/OEM policy;
+never promise continuous protection or a hard receipt deadline. Persistent consent must not be
+fabricated from a manual recovery confirmation; record automatic provenance separately. Disabling
+revokes future operations, but cannot undo a command already dispatched. Existing daily read-only
+inspection remains separate. This supersedes the no-FGS default only for this approved service.
 
 Default priorities:
 
@@ -1098,10 +1301,10 @@ Do not ask the user to repeat information already stored in project files.
 
 ## 22.1 Mandatory concise milestone report
 
-按用户最新澄清（2026-09-28），每有关键节点进展或完成时，用三条短句报告以下内容。
+按用户汇报偏好及最新目标澄清（2026-09-30），每有关键节点进展或完成时，用三条短句报告以下内容。
 用户要的是方便跟踪项目的粗略工程判断，不是统计概率论文；普通澄清不必反复套完整简报。
 
-- **可行性概率**：给出当前核心目标（FCM 长连接可靠性改善及目标应用被推送拉起处理）的
+- **可行性概率**：给出当前核心目标（真实应用在日常屏幕/供电/网络条件下减少漏收与异常延迟）的
   工程估计概率或区间，标注“工程估计，非实测成功率”；不得用检测界面的可实现性代替
   修复效果的可行性。证据不足时说明不确定性，不承诺必成，不制造精确数字；没有新证据
   不上调概率，评估变化须说明关键依据并更新 `docs/FEASIBILITY_ASSESSMENT.md`。
@@ -1115,9 +1318,11 @@ Do not ask the user to repeat information already stored in project files.
 Keep the entire closing report short and direct. Distinguish implemented, tested and
 device-verified outcomes; never substitute test counts for actual FCM efficacy.
 
-用户再次明确（2026-09-28）：对外只围绕一个最终结果汇报——OriginOS 锁屏、目标 App
-已退出时，FCM 能使其启动并处理消息，用户最终收到通知。默认不展开多维概率或长篇
-机制分析；详细证据留在 docs，除非用户追问。内部仍保留证据等级、实际条件和修复因果边界。
+用户最新明确（2026-09-30）：核心前提是目标App开启自启动、主/附属进程均不在后台，
+目标是FCM到达后按需启动、处理并发布通知。App常驻时正常按用户工作前提处理，不再
+反复验收或用常驻保活替代修复；屏幕/供电/Wi-Fi/移动网络均围绕无进程场景取样。
+第三方消息是否经FCM、是否由推送拉起必须依证据判断，不预设。默认不展开多维
+概率或长篇机制分析；详细证据留在docs，除非用户追问。范围收敛不代表核心效果已经达标。
 
 ---
 
@@ -1270,6 +1475,7 @@ No recorded decisions yet.
 [ ] Confirm device/build if doing device work
 [ ] Confirm active phase acceptance criteria
 [ ] Treat the currently selected main-thread model/reasoning as the Orchestrator; do not assume GPT-6
+[ ] Apply §5: default preference Sol6.1 high, manual selection wins, check all six Astra triggers
 [ ] Decide whether work should stay in parent or be delegated
 [ ] For each delegation choose task role first, then model + reasoning explicitly
 [ ] Continue from the recorded next action
@@ -1304,6 +1510,7 @@ Current main-thread model = Orchestrator
 worker + suitable implementation model
   ↓ implement PrivilegedExecutor / detector / repair / rollback
 reviewer + suitable review model
+  ↓ routine Sol6.1 review; new system write requires independent Astra safety review (§5.1)
   ↓ check correctness, safety, rollback, tests
 Parent
   ↓ approve first real-device write

@@ -4,6 +4,12 @@ description = "Independent reviewer for correctness, safety, regressions, tests,
 developer_instructions = """
 Review the assigned implementation independently and primarily read-only.
 
+Apply the model-routing rules in AGENTS.md section 5. Routine review may use GPT-6.1 Sol high;
+phase-final audit, changed architecture/evidence semantics, newly discovered OEM-private paths,
+new phone system writes, unresolved competing causes or two substantive failed attempts require
+GPT-6 Astra review. If assigned on an insufficient model, return a bounded handoff before the
+dependent decision or write. Model escalation never replaces parent approval or user authority.
+
 Prioritize findings in this order:
 
 1. real-device safety or irreversible-state risk

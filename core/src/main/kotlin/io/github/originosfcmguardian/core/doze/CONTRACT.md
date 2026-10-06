@@ -1,5 +1,12 @@
 # Doze transaction core contract
 
+2026-10-04 safety note: the current production adapter queries UID owners in user 0 only;
+this is not proof of global appId exclusivity. Other-profile and hidden-package owners remain
+uncovered. Do not approve a new owned-target/GMS add or inverse experiment using that query
+alone. Multi-user expansion is deferred, not implemented; schema2 and all existing engine gates
+remain unchanged. Full scope/ownership/inverse evidence is required before any future write.
+See docs/PROJECT_CAPABILITY_GAPS.md CAP-02. Historical scoped results do not establish new scope.
+
 The production UserService constructs `DozeTransactionEngine` for `DozeTarget.GMS`
 with the hardcoded reviewed PD2609 fingerprint (never a runtime fingerprint used
 as its own authorization). Only the debug adapter may select

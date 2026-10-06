@@ -7,13 +7,11 @@ import io.github.originosfcmguardian.core.doze.DozeIdentity
 import io.github.originosfcmguardian.core.doze.DozeObservation
 import io.github.originosfcmguardian.core.doze.DozeTarget
 
-/** Target comes only from a concrete fixed UserService class, never from IPC. */
+/** Legacy read-only port. Target comes only from a concrete fixed UserService class, never IPC. */
 internal class FixedDozeDevicePort(
     private val runner: DozeCommandRunner,
     private val target: DozeTarget,
 ) : DozeDevicePort {
-    @Volatile var writeAttempted: Boolean = false
-        private set
     override fun probe(): DozeObservation {
         val currentUser = runner.small(listOf("/system/bin/am", "get-current-user")).trim()
         check(currentUser == "0") { "Active Android user is not zero" }
@@ -55,13 +53,11 @@ internal class FixedDozeDevicePort(
     }
 
     override fun add() {
-        writeAttempted = true
-        runner.small(listOf("/system/bin/cmd", "deviceidle", "whitelist", "+${target.packageName}"))
+        throw UnsupportedOperationException("Legacy Doze addition is disabled; the finite broker is required")
     }
 
     override fun remove() {
-        writeAttempted = true
-        runner.small(listOf("/system/bin/cmd", "deviceidle", "whitelist", "-${target.packageName}"))
+        throw UnsupportedOperationException("Legacy Doze removal is disabled; the finite broker is required")
     }
 
 }

@@ -12,7 +12,18 @@ enum class ShizukuStatus {
 data class ShizukuStatusSnapshot(
     val status: ShizukuStatus,
     val detail: String,
+    val authorizationBlocked: Boolean = false,
 )
+
+internal enum class ShizukuUserAction { DOWNLOAD, OPEN_MANAGER, REQUEST_PERMISSION, REFRESH }
+
+/** Only an explicit user action consumes this decision; it never enables protection consent. */
+internal fun shizukuUserAction(snapshot: ShizukuStatusSnapshot): ShizukuUserAction = when (snapshot.status) {
+    ShizukuStatus.NOT_INSTALLED -> ShizukuUserAction.DOWNLOAD
+    ShizukuStatus.NOT_RUNNING, ShizukuStatus.READY_ROOT, ShizukuStatus.ERROR -> ShizukuUserAction.OPEN_MANAGER
+    ShizukuStatus.PERMISSION_REQUIRED -> if (snapshot.authorizationBlocked) ShizukuUserAction.OPEN_MANAGER else ShizukuUserAction.REQUEST_PERMISSION
+    ShizukuStatus.READY_SHELL -> ShizukuUserAction.REFRESH
+}
 
 internal fun classifyShizukuStatus(
     managerInstalled: Boolean,

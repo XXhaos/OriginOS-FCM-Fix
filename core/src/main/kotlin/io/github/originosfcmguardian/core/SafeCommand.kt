@@ -93,12 +93,7 @@ sealed interface SafeCommand {
         )
     }
 
-    /**
-     * Fixed, read-only OriginOS provider query for Guardian's own row.
-     *
-     * The package and selection are deliberately compiled into the operation. This is not a
-     * generic content/SQL or package-name IPC surface.
-     */
+    /** Historical fixture/parser descriptor only; retired from the IPC execution allowlist. */
     data object GetGuardianAutostartRow : SafeCommand {
         override val operationId = "get_guardian_vivo_autostart_row_user_0"
         override fun argv() = listOf(
@@ -133,7 +128,7 @@ sealed interface SafeCommand {
         }
     }
 
-    /** Package-typed read only; the service reconstructs the predicate from this field. */
+    /** Historical fixture/parser descriptor only; retired from the IPC execution allowlist. */
     data class GetTargetAutostartRow(val packageName: String) : SafeCommand {
         init {
             require(isSafeAndroidPackageName(packageName)) { "Invalid package name" }
@@ -162,7 +157,8 @@ sealed interface SafeCommand {
         override val operationId = "get_selected_target_process_events_user_0"
         override fun argv() = listOf(
             "logcat", "-b", "events", "-d", "-t", "256", "-v", "epoch",
-            "am_proc_start:I", "am_uid_active:I", "am_uid_idle:I", "*:S",
+            "am_proc_start:I", "am_uid_active:I", "am_uid_idle:I",
+            "am_uid_running:I", "am_uid_stopped:I", "*:S",
         )
     }
 }
@@ -198,10 +194,6 @@ object SafeCommandFactory {
             noArguments(uid, packageName, SafeCommand.GetVivoPemPackagePath)
         SafeCommand.GetGuardianPackage.operationId ->
             noArguments(uid, packageName, SafeCommand.GetGuardianPackage)
-        SafeCommand.GetGuardianAutostartRow.operationId ->
-            noArguments(uid, packageName, SafeCommand.GetGuardianAutostartRow)
-        SafeCommand.GetTargetAutostartRow("example.valid").operationId ->
-            targetAutostart(uid, packageName)
         SafeCommand.GetTargetProcessEvents(10_000, "example.valid").operationId ->
             targetProcessEvents(uid, packageName)
         else -> decodeAppOp(operationId, uid, packageName)
@@ -220,13 +212,6 @@ object SafeCommandFactory {
         }
         return null
     }
-
-    private fun targetAutostart(uid: Int?, packageName: String?): SafeCommand? =
-        if (uid == null && packageName != null && isSafeAndroidPackageName(packageName)) {
-            SafeCommand.GetTargetAutostartRow(packageName)
-        } else {
-            null
-        }
 
     private fun targetProcessEvents(uid: Int?, packageName: String?): SafeCommand? =
         if (uid != null && isUserZeroTargetAppUid(uid) &&

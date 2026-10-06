@@ -92,6 +92,22 @@ class MonitorSessionQueryTest {
     }
 
     @Test
+    fun uidLifecycleCanBeFilteredAndExportedWithoutPidOrCausality() {
+        val monitoringSession = session(events = listOf(
+            event(START, ProcessTraceKind.UID_RUNNING),
+            event(START + 1, ProcessTraceKind.UID_STOPPED),
+        ))
+        listOf(ProcessTraceKind.UID_RUNNING, ProcessTraceKind.UID_STOPPED).forEach { kind ->
+            val query = MonitorSessionQuery(ID, kind = kind)
+            assertEquals(kind, queryMonitorSession(monitoringSession, query).single().kind)
+            val json = encodeMonitorSessionExport(monitoringSession, query).decodeToString()
+            assertTrue(json.contains("\"kind\":\"${kind.name}\""))
+            assertFalse(json.contains("\"pid\":"))
+            assertTrue(json.contains("\"fcmCause\":\"UNKNOWN\""))
+        }
+    }
+
+    @Test
     fun runningEmptySnapshotStatesPartialAndUnknownWithoutClaimingAbsenceOrCause() {
         val json = encodeMonitorSessionExport(session(), MonitorSessionQuery(ID)).decodeToString()
 

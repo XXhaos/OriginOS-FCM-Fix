@@ -17,6 +17,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.ByteArrayInputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -221,7 +224,7 @@ class DozeAdapterTest {
         }
         override fun finishWrite(output: FileOutputStream) {
             output.close()
-            check(pending.renameTo(base))
+            Files.move(pending.toPath(), base.toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
         }
         override fun failWrite(output: FileOutputStream?) { output?.close() }
     }

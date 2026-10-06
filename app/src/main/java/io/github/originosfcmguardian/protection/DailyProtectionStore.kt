@@ -8,7 +8,7 @@ class DailyProtectionStore(context: Context) {
 
     @Synchronized
     fun save(report: DailyProtectionReport) {
-        val targets = report.targets.joinToString(",") { "${it.packageName}=${it.status.name}" }
+        val targets = DailyProtectionTargetsCodec.encode(report.targets)
         preferences.edit()
             .putLong(KEY_CHECKED_AT, report.checkedAtEpochMillis)
             .putString(KEY_REASON, report.reason.name)
@@ -27,17 +27,9 @@ class DailyProtectionStore(context: Context) {
         val fingerprint = preferences.getString(KEY_FINGERPRINT, null)
         val summary = preferences.getString(KEY_SUMMARY, null)
         if (checkedAt < 0 || reason == null || status == null || fingerprint == null || summary == null) return null
-        val targets = preferences.getString(KEY_TARGETS, "").orEmpty()
-            .split(',')
-            .filter(String::isNotBlank)
-            .mapNotNull { encoded ->
-                val separator = encoded.lastIndexOf('=')
-                if (separator <= 0) return@mapNotNull null
-                val targetStatus = enumValueOrNull<TargetCheckStatus>(encoded.substring(separator + 1))
-                    ?: return@mapNotNull null
-                TargetCheckResult(encoded.substring(0, separator), targetStatus)
-            }
-            .take(DailyProtectionReport.MAX_TARGETS)
+        val targets = DailyProtectionTargetsCodec.decode(
+            preferences.getString(KEY_TARGETS, "").orEmpty(),
+        ) ?: return null
         return runCatching {
             DailyProtectionReport(checkedAt, reason, fingerprint, status, summary, targets)
         }.getOrNull()
@@ -115,3 +107,34 @@ internal data class ProtectionEventStamps(
     val gmsVersion: Long,
     val shizukuAvailable: Boolean?,
 )
+
+internal object DailyProtectionTargetsCodec {
+    const val MAX_BYTES = 256 * 1024
+
+    fun encode(targets: List<TargetCheckResult>): String {
+        require(targets.map(TargetCheckResult::packageName).distinct().size == targets.size) {
+            "Daily protection target packages must be unique"
+        }
+        val encoded = targets.joinToString(",") { "${it.packageName}=${it.status.name}" }
+        require(encoded.toByteArray(Charsets.UTF_8).size <= MAX_BYTES) {
+            "Daily protection targets exceed storage safety bound"
+        }
+        return encoded
+    }
+
+    fun decode(raw: String): List<TargetCheckResult>? {
+        if (raw.toByteArray(Charsets.UTF_8).size > MAX_BYTES) return null
+        if (raw.isBlank()) return emptyList()
+        val decoded = raw.split(',').map { encoded ->
+            val separator = encoded.lastIndexOf('=')
+            if (separator <= 0) return null
+            val status = runCatching {
+                enumValueOf<TargetCheckStatus>(encoded.substring(separator + 1))
+            }.getOrNull() ?: return null
+            runCatching { TargetCheckResult(encoded.substring(0, separator), status) }.getOrNull()
+                ?: return null
+        }
+        if (decoded.map(TargetCheckResult::packageName).distinct().size != decoded.size) return null
+        return decoded
+    }
+}

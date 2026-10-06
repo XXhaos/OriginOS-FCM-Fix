@@ -1,7 +1,6 @@
 package io.github.originosfcmguardian.protection
 
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
-import io.github.originosfcmguardian.core.AutostartReadStatus
 import io.github.originosfcmguardian.core.AppOp
 import io.github.originosfcmguardian.core.AppOpCheck
 import io.github.originosfcmguardian.core.AppOpMode
@@ -12,7 +11,6 @@ import io.github.originosfcmguardian.core.DozeState
 import io.github.originosfcmguardian.core.EnabledState
 import io.github.originosfcmguardian.core.EvidenceStatus
 import io.github.originosfcmguardian.core.GmsPackageState
-import io.github.originosfcmguardian.core.GuardianAutostartRead
 import io.github.originosfcmguardian.core.PemListState
 import io.github.originosfcmguardian.core.PemState
 import io.github.originosfcmguardian.core.Presence
@@ -25,6 +23,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -66,8 +65,8 @@ class DailyProtectionTest {
     }
 
     @Test
-    fun missingIdentitySkipsPrivilegedTargetReadAndReportsAction() = runBlocking {
-        val port = FakePort(healthyReport(), allowedRead())
+    fun missingIdentityReportsAction() = runBlocking {
+        val port = FakePort(healthyReport())
         val report = executeCheck(
             now = 10,
             reason = ProtectionCheckReason.DAILY_FALLBACK,
@@ -79,23 +78,14 @@ class DailyProtectionTest {
         )
 
         assertEquals(1, port.coreReads)
-        assertEquals(0, port.targetReads)
         assertEquals(TargetCheckStatus.MISSING, report.targets.single().status)
         assertEquals(ProtectionCheckStatus.NEEDS_USER_ACTION, report.status)
         assertTrue(report.summary.contains("1 项需手动处理"))
     }
 
     @Test
-    fun targetActionStatusUsesFreshIdentityBeforeAndAfterRead() = runBlocking {
-        val port = FakePort(
-            healthyReport(),
-            GuardianAutostartRead(
-                status = AutostartReadStatus.READ_ONLY_VALUE_PRESENT,
-                packageUid = identity.uid,
-                currentState = 1,
-                setByUser = 1,
-            ),
-        )
+    fun changedIdentityReportsActionWithoutPermissionClassification() = runBlocking {
+        val port = FakePort(healthyReport())
         var probes = 0
         val report = executeCheck(
             10,
@@ -103,19 +93,18 @@ class DailyProtectionTest {
             "known",
             "present",
             listOf(identity),
-            identityProbe = { probes += 1; identity },
+            identityProbe = { probes += 1; identity.copy(firstInstallTime = identity.firstInstallTime + 1) },
             port = port,
         )
 
-        assertEquals(2, probes)
-        assertEquals(1, port.targetReads)
-        assertEquals(TargetCheckStatus.NEEDS_USER_ACTION, report.targets.single().status)
+        assertEquals(1, probes)
+        assertEquals(TargetCheckStatus.IDENTITY_CHANGED, report.targets.single().status)
         assertEquals(ProtectionCheckStatus.NEEDS_USER_ACTION, report.status)
     }
 
     @Test
-    fun matchingAllowedTargetAndHealthyCoreProduceReadOnlyHealthyStatus() = runBlocking {
-        val port = FakePort(healthyReport(), allowedRead())
+    fun matchingIdentityAndHealthyCoreDoNotClaimTargetPermissionAllowed() = runBlocking {
+        val port = FakePort(healthyReport())
         val report = executeCheck(
             10,
             ProtectionCheckReason.APP_START,
@@ -127,13 +116,83 @@ class DailyProtectionTest {
         )
 
         assertEquals(ProtectionCheckStatus.HEALTHY_READ_ONLY, report.status)
-        assertEquals(TargetCheckStatus.ALLOWED, report.targets.single().status)
-        assertEquals(1, port.targetReads)
+        assertEquals(TargetCheckStatus.IDENTITY_MATCH, report.targets.single().status)
+        assertFalse(report.summary.contains("自启动"))
+        assertTrue(report.summary.contains("目标应用身份"))
+        assertFalse(report.containsRetiredAutostartEvidence)
+    }
+
+    @Test
+    fun moreThanTenTargetsAreAllCheckedAndReportedWithoutTruncation() = runBlocking {
+        val identities = (0 until 12).map { index ->
+            identity.copy(
+                packageName = "example.target.p$index",
+                uid = identity.uid + index,
+                firstInstallTime = identity.firstInstallTime + index,
+            )
+        }
+        val byPackage = identities.associateBy(SelectedTargetIdentity::packageName)
+        val port = FakePort(healthyReport())
+
+        val report = executeCheck(
+            10,
+            ProtectionCheckReason.APP_START,
+            "known",
+            "present",
+            identities,
+            identityProbe = byPackage::get,
+            port = port,
+        )
+
+        assertEquals(12, report.targets.size)
+        assertEquals(identities.map { it.packageName }, report.targets.map { it.packageName })
+        assertTrue(report.targets.all { it.status == TargetCheckStatus.IDENTITY_MATCH })
+        assertTrue(report.summary.contains("12 项已检查"))
+    }
+
+    @Test
+    fun dailyProtectionPersistenceCodecRoundTripsMoreThanTenTargets() {
+        val targets = (0 until 12).map { index ->
+            TargetCheckResult("example.target.p$index", TargetCheckStatus.IDENTITY_MATCH)
+        }
+
+        val encoded = DailyProtectionTargetsCodec.encode(targets)
+
+        assertEquals(targets, DailyProtectionTargetsCodec.decode(encoded))
+    }
+
+    @Test
+    fun dailyProtectionPersistenceCodecRejectsCorruptOrByteOversizedData() {
+        assertNull(DailyProtectionTargetsCodec.decode("example.target=NOT_A_STATUS"))
+        assertNull(DailyProtectionTargetsCodec.decode("not a package=ALLOWED"))
+        assertNull(
+            DailyProtectionTargetsCodec.decode(
+                "x".repeat(DailyProtectionTargetsCodec.MAX_BYTES + 1),
+            ),
+        )
+    }
+
+    @Test
+    fun legacyAutostartStatusesRemainReadableForHistoricalReports() {
+        val legacy = listOf(
+            TargetCheckStatus.ALLOWED,
+            TargetCheckStatus.NEEDS_USER_ACTION,
+            TargetCheckStatus.UNKNOWN,
+            TargetCheckStatus.UNAVAILABLE,
+        ).mapIndexed { index, status -> TargetCheckResult("example.legacy.p$index", status) }
+        assertEquals(legacy, DailyProtectionTargetsCodec.decode(DailyProtectionTargetsCodec.encode(legacy)))
+        val historical = DailyProtectionReport(1, ProtectionCheckReason.MANUAL, "known",
+            ProtectionCheckStatus.NEEDS_USER_ACTION, "historical", legacy)
+        assertTrue(historical.containsRetiredAutostartEvidence)
+        assertTrue(historical.copy(targets = emptyList(), summary = "Guardian 自启动状态未知")
+            .containsRetiredAutostartEvidence)
+        assertFalse(historical.copy(targets = listOf(TargetCheckResult(identity.packageName, TargetCheckStatus.MISSING)))
+            .containsRetiredAutostartEvidence)
     }
 
     @Test
     fun sessionAlwaysClosesAfterFailure() = runBlocking {
-        val port = FakePort(healthyReport(), allowedRead())
+        val port = FakePort(healthyReport())
         runCatching {
             runProtectionSession(port) { error("boom") }
         }
@@ -142,7 +201,7 @@ class DailyProtectionTest {
 
     @Test
     fun sessionAlwaysClosesAfterCancellation() = runBlocking {
-        val port = FakePort(healthyReport(), allowedRead())
+        val port = FakePort(healthyReport())
         val entered = CompletableDeferred<Unit>()
         val job = launch {
             runProtectionSession(port) {
@@ -157,8 +216,8 @@ class DailyProtectionTest {
     }
 
     @Test
-    fun unavailableCoreDoesNotAttemptTargetReadOrMutation() = runBlocking {
-        val port = FakePort(healthyReport().copy(privilegedAccess = PrivilegedAccessState.UNAVAILABLE), allowedRead())
+    fun unavailableCoreStillChecksTargetIdentityWithoutClaimingPermissionState() = runBlocking {
+        val port = FakePort(healthyReport().copy(privilegedAccess = PrivilegedAccessState.UNAVAILABLE))
         val report = executeCheck(
             10,
             ProtectionCheckReason.SHIZUKU_AVAILABLE,
@@ -169,8 +228,7 @@ class DailyProtectionTest {
             port = port,
         )
 
-        assertEquals(0, port.targetReads)
-        assertEquals(TargetCheckStatus.UNAVAILABLE, report.targets.single().status)
+        assertEquals(TargetCheckStatus.IDENTITY_MATCH, report.targets.single().status)
         assertEquals(ProtectionCheckStatus.UNKNOWN, report.status)
         assertTrue(report.summary.contains("Shizuku 只读检测不可用"))
     }
@@ -184,7 +242,7 @@ class DailyProtectionTest {
             "present",
             emptyList(),
             identityProbe = { null },
-            port = FakePort(healthyReport().copy(appOps = emptyMap()), allowedRead()),
+            port = FakePort(healthyReport().copy(appOps = emptyMap())),
         )
 
         assertEquals(ProtectionCheckStatus.UNKNOWN, report.status)
@@ -192,10 +250,8 @@ class DailyProtectionTest {
 
     private class FakePort(
         private val report: DetectionReport,
-        private val read: GuardianAutostartRead,
     ) : ProtectionReadPort {
         var coreReads = 0
-        var targetReads = 0
         var closed = false
 
         override suspend fun detectCore(): DetectionReport {
@@ -203,22 +259,10 @@ class DailyProtectionTest {
             return report
         }
 
-        override suspend fun readTarget(identity: SelectedTargetIdentity): GuardianAutostartRead {
-            targetReads += 1
-            return read
-        }
-
         override fun close() {
             closed = true
         }
     }
-
-    private fun allowedRead() = GuardianAutostartRead(
-        status = AutostartReadStatus.READ_ONLY_VALUE_PRESENT,
-        packageUid = identity.uid,
-        currentState = 0,
-        setByUser = 1,
-    )
 
     private fun healthyReport() = DetectionReport(
         privilegedAccess = PrivilegedAccessState.READY_SHELL,

@@ -58,6 +58,9 @@ internal class PrivilegedSessionState<Remote : Any, Connection : Any> {
     }
 
     @Synchronized
+    fun isCurrentBind(ticket: BindTicket, connection: Connection): Boolean = isCurrentPending(ticket, connection)
+
+    @Synchronized
     fun runIfCurrentBind(
         ticket: BindTicket,
         connection: Connection,

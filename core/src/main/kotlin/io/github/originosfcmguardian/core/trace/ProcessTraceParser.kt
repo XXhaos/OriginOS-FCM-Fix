@@ -9,7 +9,7 @@ object ProcessTraceParser {
     private const val MAX_RAW_LINES = 260
     private val prefix = Regex(
         "^\\s*(\\d{10})\\.(\\d{3,9})\\s+\\d+\\s+\\d+\\s+I\\s+" +
-            "(am_proc_start|am_uid_active|am_uid_idle):\\s*(.*?)\\s*$",
+            "(am_proc_start|am_uid_active|am_uid_idle|am_uid_running|am_uid_stopped):\\s*(.*?)\\s*$",
     )
     private val positiveInt = Regex("[1-9][0-9]*")
     private val nonnegativeInt = Regex("0|[1-9][0-9]*")
@@ -47,13 +47,18 @@ object ProcessTraceParser {
                             )) return@forEach
                     events += ProcessTraceEvent(timestamp, target, ProcessTraceKind.PROCESS_START, pid)
                 }
-                "am_uid_active", "am_uid_idle" -> {
+                "am_uid_active", "am_uid_idle", "am_uid_running", "am_uid_stopped" -> {
                     val uidText = if (data.startsWith('[') && data.endsWith(']')) {
                         data.substring(1, data.length - 1)
                     } else data
                     val uid = uidText.takeIf(positiveInt::matches)?.toIntOrNull()
                     if (uid != target.uid) return@forEach
-                    val kind = if (tag == "am_uid_active") ProcessTraceKind.UID_ACTIVE else ProcessTraceKind.UID_IDLE
+                    val kind = when (tag) {
+                        "am_uid_active" -> ProcessTraceKind.UID_ACTIVE
+                        "am_uid_idle" -> ProcessTraceKind.UID_IDLE
+                        "am_uid_running" -> ProcessTraceKind.UID_RUNNING
+                        else -> ProcessTraceKind.UID_STOPPED
+                    }
                     events += ProcessTraceEvent(timestamp, target, kind)
                 }
             }

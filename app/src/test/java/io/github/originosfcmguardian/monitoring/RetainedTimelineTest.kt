@@ -159,6 +159,26 @@ class RetainedTimelineTest {
     }
 
     @Test
+    fun uidLifecycleRemainsDistinctInProcessSourceAndKindFilters() {
+        val snapshot = combineRetainedTimeline(
+            notificationEvents = emptyList(),
+            notificationHistoryCorrupt = false,
+            processSession = session(events = listOf(
+                process(START, ProcessTraceKind.UID_RUNNING),
+                process(START + 1, ProcessTraceKind.UID_STOPPED),
+            )),
+            processHistoryCorrupt = false,
+        )
+        listOf(RetainedTimelineKind.UID_RUNNING, RetainedTimelineKind.UID_STOPPED).forEach { kind ->
+            val result = queryRetainedTimeline(snapshot, RetainedTimelineQuery(
+                source = RetainedTimelineSource.PROCESS_SESSION,
+                kind = kind,
+            ))
+            assertEquals(kind, result.single().kind)
+        }
+    }
+
+    @Test
     fun preservesCombinedSourceCeilingsAndAppliesResultLimitAfterOrdering() {
         val notifications = List(200) { index ->
             notification(

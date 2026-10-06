@@ -35,6 +35,9 @@ class MonitorSessionStore private constructor(
         require(baseFile.canonicalPath == access.canonicalPath)
     }
 
+    /** Same platform backend, with an isolated path for Android storage-recovery tests. */
+    internal constructor(baseFile: File) : this(AndroidMonitorSessionFileAccess(baseFile))
+
     private val lock = lockFor(access.canonicalPath)
 
     fun load(): MonitorSessionLoadResult = synchronized(lock) { loadLocked() }

@@ -1,15 +1,17 @@
 package io.github.originosfcmguardian.autostart
 
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import io.github.originosfcmguardian.core.GuardianAutostartRead
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import io.github.originosfcmguardian.core.isUserZeroTargetAppUid
 import java.security.MessageDigest
 
-const val MAX_SELECTED_TARGETS = 10
+internal const val MAX_TARGET_SELECTION_BYTES = 256 * 1024
 
 data class SelectedTargetIdentity(
     val packageName: String,
@@ -55,6 +57,7 @@ data class SelectedTargetUiState(
     val status: TargetAutostartStatus = TargetAutostartStatus.NOT_CHECKED,
     val evidence: GuardianAutostartRead? = null,
     val detail: String = "尚未检查自启动权限",
+    val stoppedSnapshot: TargetStoppedSnapshot = TargetStoppedSnapshot(),
 )
 
 data class TargetSelectionUiState(
@@ -66,9 +69,8 @@ data class TargetSelectionUiState(
 
 internal object TargetSelectionCodec {
     fun encode(values: List<SelectedTargetIdentity>): String {
-        require(values.size <= MAX_SELECTED_TARGETS)
         require(values.map { it.packageName }.distinct().size == values.size)
-        return values.sortedBy { it.packageName }.joinToString("\n") { value ->
+        val encoded = values.sortedBy { it.packageName }.joinToString("\n") { value ->
             listOf(
                 value.packageName,
                 value.uid.toString(),
@@ -76,12 +78,18 @@ internal object TargetSelectionCodec {
                 value.signerSha256.joinToString(","),
             ).joinToString("|")
         }
+        require(encoded.toByteArray(Charsets.UTF_8).size <= MAX_TARGET_SELECTION_BYTES) {
+            "Target selection exceeds storage safety bound"
+        }
+        return encoded
     }
 
     fun decode(raw: String): TargetSelectionDecodeResult {
+        if (raw.toByteArray(Charsets.UTF_8).size > MAX_TARGET_SELECTION_BYTES) {
+            return TargetSelectionDecodeResult.Corrupt
+        }
         if (raw.isBlank()) return TargetSelectionDecodeResult.Valid(emptyList())
         val lines = raw.lineSequence().toList()
-        if (lines.size !in 1..MAX_SELECTED_TARGETS) return TargetSelectionDecodeResult.Corrupt
         val decoded = runCatching {
             lines.map { line ->
                 val fields = line.split('|')
@@ -156,8 +164,12 @@ class TargetSelectionStore internal constructor(
     @Synchronized
     fun replace(identity: SelectedTargetIdentity): Boolean {
         val current = load().filterNot { it.packageName == identity.packageName }
-        if (current.size >= MAX_SELECTED_TARGETS) return false
-        return preferences.write(TargetSelectionCodec.encode(current + identity))
+        val encoded = try {
+            TargetSelectionCodec.encode(current + identity)
+        } catch (_: IllegalArgumentException) {
+            return false
+        }
+        return preferences.write(encoded)
     }
 
     @Synchronized
@@ -181,6 +193,29 @@ class TargetSelectionStore internal constructor(
 }
 
 class TargetPackageProbe(private val context: Context) {
+    @Suppress("DEPRECATION")
+    fun isRecoveryCandidate(expected: SelectedTargetIdentity): Boolean = runCatching {
+        if (!isRecoveryTargetPackage(expected.packageName)) return@runCatching false
+        val info = context.packageManager.getPackageInfo(expected.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        val app = requireNotNull(info.applicationInfo)
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(expected.packageName)
+        val launchable = context.packageManager.queryIntentActivities(launcher, 0).any { resolved ->
+            val activity = resolved.activityInfo
+            activity != null && qualifiedRecoveryLauncher(expected.packageName, expected.uid, activity.packageName,
+                activity.applicationInfo?.uid, activity.enabled, activity.exported, activity.applicationInfo?.enabled) {
+                context.packageManager.getComponentEnabledSetting(ComponentName(activity.packageName, activity.name))
+            }
+        }
+        val qualifications = RecoveryTargetQualifications(
+            app.flags and ApplicationInfo.FLAG_INSTALLED != 0, app.enabled,
+            app.flags and ApplicationInfo.FLAG_SYSTEM != 0,
+            app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
+            app.flags and ApplicationInfo.FLAG_PERSISTENT != 0, launchable,
+        )
+        qualifications.eligible && identity(expected.packageName) == expected &&
+            context.packageManager.getPackagesForUid(expected.uid)?.toList() == listOf(expected.packageName)
+    }.getOrDefault(false)
+
     @Suppress("DEPRECATION")
     fun launcherCandidates(selectedPackages: Set<String>): List<LauncherAppCandidate> {
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -208,13 +243,23 @@ class TargetPackageProbe(private val context: Context) {
 
     @Suppress("DEPRECATION")
     fun identity(packageName: String): SelectedTargetIdentity? {
+        return packageSnapshot(packageName)?.identity
+    }
+
+    fun stoppedSnapshot(expected: SelectedTargetIdentity): TargetStoppedSnapshot =
+        readTargetStoppedSnapshot(expected, { packageSnapshot(expected.packageName) })
+
+    @Suppress("DEPRECATION")
+    internal fun packageSnapshot(packageName: String): TargetPackageSnapshot? {
         if (!isSafeAndroidPackageName(packageName)) return null
         return runCatching {
             val info = context.packageManager.getPackageInfo(
                 packageName,
                 PackageManager.GET_SIGNING_CERTIFICATES,
             )
-            val uid = requireNotNull(info.applicationInfo).uid
+            val applicationInfo = requireNotNull(info.applicationInfo)
+            require(info.packageName == packageName && applicationInfo.packageName == packageName)
+            val uid = applicationInfo.uid
             if (!isUserZeroTargetAppUid(uid) || info.firstInstallTime <= 0) return null
             val signingInfo = info.signingInfo ?: return null
             val signers = signingInfo.apkContentsSigners.orEmpty()
@@ -223,7 +268,10 @@ class TargetPackageProbe(private val context: Context) {
                     .digest(signature.toByteArray())
                     .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
             }.distinct().sorted()
-            SelectedTargetIdentity(packageName, uid, info.firstInstallTime, digests)
+            TargetPackageSnapshot(
+                SelectedTargetIdentity(packageName, uid, info.firstInstallTime, digests),
+                applicationInfo.flags and ApplicationInfo.FLAG_STOPPED != 0,
+            )
         }.getOrNull()
     }
 

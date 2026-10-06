@@ -6,18 +6,11 @@ import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.TargetIdentityStatus
 import io.github.originosfcmguardian.autostart.TargetPackageProbe
 import io.github.originosfcmguardian.autostart.TargetSelectionStore
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
 import io.github.originosfcmguardian.autostart.identityStatus
-import io.github.originosfcmguardian.core.AutostartReadStatus
 import io.github.originosfcmguardian.core.DetectionReport
-import io.github.originosfcmguardian.core.EnabledState
 import io.github.originosfcmguardian.core.EvidenceStatus
-import io.github.originosfcmguardian.core.GuardianAutostartRead
-import io.github.originosfcmguardian.core.Presence
 import io.github.originosfcmguardian.core.PrivilegedAccessState
 import io.github.originosfcmguardian.core.ReadOnlyDetector
-import io.github.originosfcmguardian.core.SafeCommand
-import io.github.originosfcmguardian.core.TargetAutostartParser
 import io.github.originosfcmguardian.device.NormalDeviceProbe
 import io.github.originosfcmguardian.privileged.ShizukuRuntime
 
@@ -29,11 +22,6 @@ internal class ShizukuProtectionReadPort(context: Context) : ProtectionReadPort 
     }
 
     override suspend fun detectCore(): DetectionReport = ReadOnlyDetector(runtime.executor).detect()
-
-    override suspend fun readTarget(identity: SelectedTargetIdentity): GuardianAutostartRead {
-        val result = runtime.executor.exec(SafeCommand.GetTargetAutostartRow(identity.packageName))
-        return TargetAutostartParser.parse(result, identity.packageName, identity.uid)
-    }
 
     override fun close() = runtime.close()
 }
@@ -57,7 +45,7 @@ class DailyProtectionChecker(private val context: Context) {
             ).also(store::save)
         }
 
-        val selected = targetStore.load().take(DailyProtectionReport.MAX_TARGETS)
+        val selected = targetStore.load()
         return ReadSessionCoordinator.withSession {
             val port = ShizukuProtectionReadPort(context)
             runProtectionSession(port) {
@@ -69,7 +57,7 @@ class DailyProtectionChecker(private val context: Context) {
 }
 
 internal fun isVerifiedProtectionBuild(fingerprint: String): Boolean =
-    fingerprint == VERIFIED_AUTOSTART_FINGERPRINT
+    fingerprint == "vivo/PD2609/PD2609:17/CP2A.260605.016_V000L1/260923024147:user/release-keys"
 
 internal suspend fun <T> runProtectionSession(
     port: ProtectionReadPort,
@@ -90,23 +78,11 @@ internal suspend fun executeCheck(
     port: ProtectionReadPort,
 ): DailyProtectionReport {
     val core = port.detectCore()
-    val targetResults = selected.take(DailyProtectionReport.MAX_TARGETS).map { stored ->
+    val targetResults = selected.map { stored ->
         when (identityStatus(stored, identityProbe(stored.packageName))) {
             TargetIdentityStatus.MISSING -> TargetCheckResult(stored.packageName, TargetCheckStatus.MISSING)
             TargetIdentityStatus.CHANGED -> TargetCheckResult(stored.packageName, TargetCheckStatus.IDENTITY_CHANGED)
-            TargetIdentityStatus.MATCH -> {
-                if (core.privilegedAccess != PrivilegedAccessState.READY_SHELL) {
-                    TargetCheckResult(stored.packageName, TargetCheckStatus.UNAVAILABLE)
-                } else {
-                    val read = port.readTarget(stored)
-                    val postStatus = identityStatus(stored, identityProbe(stored.packageName))
-                    if (postStatus != TargetIdentityStatus.MATCH) {
-                        TargetCheckResult(stored.packageName, TargetCheckStatus.IDENTITY_CHANGED)
-                    } else {
-                        TargetCheckResult(stored.packageName, read.toTargetStatus())
-                    }
-                }
-            }
+            TargetIdentityStatus.MATCH -> TargetCheckResult(stored.packageName, TargetCheckStatus.IDENTITY_MATCH)
         }
     }
     val status = classify(core, targetResults, fingerprint)
@@ -141,27 +117,16 @@ private fun userSummary(
     if (targets.isNotEmpty()) {
         val actionCount = targets.count {
             it.status in setOf(
-                TargetCheckStatus.NEEDS_USER_ACTION,
                 TargetCheckStatus.IDENTITY_CHANGED,
                 TargetCheckStatus.MISSING,
             )
         }
-        val unknownCount = targets.count {
-            it.status in setOf(TargetCheckStatus.UNKNOWN, TargetCheckStatus.UNAVAILABLE)
-        }
-        add("目标应用：${targets.size} 项已检查，${actionCount} 项需手动处理，${unknownCount} 项未知")
+        add("目标应用身份：${targets.size} 项已检查，${actionCount} 项需手动处理")
     }
     if (status == ProtectionCheckStatus.HEALTHY_READ_ONLY) {
         add("已检查的关键设置符合预期；这不代表 FCM 已连接或消息已送达")
     }
 }.joinToString("；").take(DailyProtectionReport.MAX_SUMMARY_CHARS)
-
-private fun GuardianAutostartRead.toTargetStatus(): TargetCheckStatus = when {
-    status != AutostartReadStatus.READ_ONLY_VALUE_PRESENT -> TargetCheckStatus.UNKNOWN
-    currentState == 0 -> TargetCheckStatus.ALLOWED
-    currentState == 1 -> TargetCheckStatus.NEEDS_USER_ACTION
-    else -> TargetCheckStatus.UNKNOWN
-}
 
 private fun classify(
     core: DetectionReport,
@@ -173,15 +138,13 @@ private fun classify(
         core.gms.status == EvidenceStatus.UNKNOWN ||
         core.appOps.keys != io.github.originosfcmguardian.core.AppOp.entries.toSet() ||
         core.appOps.values.any { it.status == EvidenceStatus.UNKNOWN } ||
-        core.doze.status == EvidenceStatus.UNKNOWN ||
-        targets.any { it.status in setOf(TargetCheckStatus.UNKNOWN, TargetCheckStatus.UNAVAILABLE) }
+        core.doze.status == EvidenceStatus.UNKNOWN
     ) return ProtectionCheckStatus.UNKNOWN
     if (core.gms.status == EvidenceStatus.ANOMALOUS ||
         core.appOps.values.any { it.status == EvidenceStatus.ANOMALOUS } ||
         core.doze.status == EvidenceStatus.ANOMALOUS ||
         targets.any {
             it.status in setOf(
-                TargetCheckStatus.NEEDS_USER_ACTION,
                 TargetCheckStatus.IDENTITY_CHANGED,
                 TargetCheckStatus.MISSING,
             )

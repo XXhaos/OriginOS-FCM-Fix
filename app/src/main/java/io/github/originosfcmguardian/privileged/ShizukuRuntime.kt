@@ -27,10 +27,16 @@ class ShizukuRuntime(
     }
     private val permissionResultListener =
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
-            if (requestCode == PERMISSION_REQUEST_CODE && grantResult != PackageManager.PERMISSION_GRANTED) {
+            if (requestCode != PERMISSION_REQUEST_CODE) return@OnRequestPermissionResultListener
+            if (grantResult != PackageManager.PERMISSION_GRANTED) {
                 executor.cleanupBestEffort()
             }
             refresh()
+            if (grantResult != PackageManager.PERMISSION_GRANTED && _status.value.status == ShizukuStatus.PERMISSION_REQUIRED) {
+                _status.value = _status.value.copy(detail = if (_status.value.authorizationBlocked)
+                    "Shizuku 授权被拒绝，请打开 Shizuku 管理 Guardian 的授权。"
+                    else "Shizuku 授权未获允许；需要时可再次点击 Shizuku 授权。")
+            }
         }
 
     fun start() {
@@ -50,25 +56,36 @@ class ShizukuRuntime(
             val granted = binderAlive &&
                 Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
             val state = classifyShizukuStatus(installed, binderAlive, serverUid, granted)
-            ShizukuStatusSnapshot(state, state.detail(serverUid))
-        }.getOrElse { error ->
+            val blocked = state == ShizukuStatus.PERMISSION_REQUIRED && Shizuku.shouldShowRequestPermissionRationale()
+            ShizukuStatusSnapshot(state, if (blocked) "请打开 Shizuku 管理 Guardian 的授权。" else state.detail(serverUid), blocked)
+        }.getOrElse {
             ShizukuStatusSnapshot(
                 ShizukuStatus.ERROR,
-                "Shizuku 状态读取失败：${error.message?.take(120) ?: error.javaClass.simpleName}",
+                "Shizuku 状态读取失败，请刷新状态或打开 Shizuku。",
             )
         }
         _status.value = snapshot
     }
 
     fun requestOrOpen() {
-        when (_status.value.status) {
-            ShizukuStatus.PERMISSION_REQUIRED -> runCatching {
+        refresh() // Use live binder/permission/rationale, not the last rendered state.
+        when (shizukuUserAction(_status.value)) {
+            ShizukuUserAction.REQUEST_PERMISSION -> runCatching {
                 Shizuku.requestPermission(PERMISSION_REQUEST_CODE)
-            }.onFailure { refresh() }
+            }.onFailure {
+                _status.value = ShizukuStatusSnapshot(ShizukuStatus.ERROR,
+                    "Shizuku 授权请求未完成，请刷新状态或打开 Shizuku。")
+            }
+            ShizukuUserAction.OPEN_MANAGER -> openManager()
+            ShizukuUserAction.DOWNLOAD -> openShizukuDownloadPage()
+            ShizukuUserAction.REFRESH -> Unit
+        }
+    }
 
-            ShizukuStatus.NOT_RUNNING -> openShizukuManager()
-            ShizukuStatus.NOT_INSTALLED -> openShizukuDownloadPage()
-            else -> refresh()
+    fun openManager() {
+        if (!isManagerInstalled()) { openShizukuDownloadPage(); return }
+        runCatching { openShizukuManager() }.onFailure {
+            _status.value = ShizukuStatusSnapshot(ShizukuStatus.ERROR, "无法打开 Shizuku，请从系统桌面打开。")
         }
     }
 
@@ -90,7 +107,7 @@ class ShizukuRuntime(
         if (intent != null) {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
-        }
+        } else _status.value = ShizukuStatusSnapshot(ShizukuStatus.ERROR, "无法打开 Shizuku，请从系统桌面打开。")
     }
 
     private fun openShizukuDownloadPage() {

@@ -55,7 +55,8 @@ class SafeCommandTest {
         assertEquals(
             listOf(
                 "logcat", "-b", "events", "-d", "-t", "256", "-v", "epoch",
-                "am_proc_start:I", "am_uid_active:I", "am_uid_idle:I", "*:S",
+                "am_proc_start:I", "am_uid_active:I", "am_uid_idle:I",
+                "am_uid_running:I", "am_uid_stopped:I", "*:S",
             ),
             SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger").argv(),
         )
@@ -68,17 +69,6 @@ class SafeCommandTest {
         assertEquals(
             SafeCommand.GetDeviceIdleWhitelist,
             SafeCommandFactory.fromIpc(SafeCommand.GetDeviceIdleWhitelist.operationId),
-        )
-        assertEquals(
-            SafeCommand.GetTargetAutostartRow("org.telegram.messenger"),
-            SafeCommandFactory.fromIpc(
-                SafeCommand.GetTargetAutostartRow("example.valid").operationId,
-                packageName = "org.telegram.messenger",
-            ),
-        )
-        assertEquals(
-            SafeCommand.GetGuardianAutostartRow,
-            SafeCommandFactory.fromIpc(SafeCommand.GetGuardianAutostartRow.operationId),
         )
         assertEquals(
             SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger"),
@@ -124,6 +114,17 @@ class SafeCommandTest {
         assertNull(
             SafeCommandFactory.fromIpc(
                 SafeCommand.GetCurrentUser.operationId,
+                packageName = "org.telegram.messenger",
+            ),
+        )
+    }
+
+    @Test
+    fun `retired OEM autostart read operations cannot be dispatched over IPC`() {
+        assertNull(SafeCommandFactory.fromIpc(SafeCommand.GetGuardianAutostartRow.operationId))
+        assertNull(
+            SafeCommandFactory.fromIpc(
+                SafeCommand.GetTargetAutostartRow("example.valid").operationId,
                 packageName = "org.telegram.messenger",
             ),
         )

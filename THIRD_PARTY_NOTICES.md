@@ -1,5 +1,22 @@
 # Third-Party Notices
 
+## GcmService observation research (2026-10-05)
+
+HyperOS-Millet-Guard, MIT, commit `8a700eb33f0572b58c74e44a9138e163459fe47c`:
+https://github.com/E3N-glotm/HyperOS-Millet-Guard/tree/8a700eb33f0572b58c74e44a9138e163459fe47c .
+Research identified the GMS self-reported connection field. Guardian independently implements
+bounded parsing, process lifetime, identity checks and sanitized IPC; no upstream scripts/assets
+copied or incorporated. Root-only recovery/network modifications are outside this integration.
+
+## Shizuku notification pairing UX reference (2026-10-03)
+
+Official guide and `manager/src/main/java/moe/shizuku/manager/adb/AdbPairingService.kt`, commit
+`2650830c5b099ae0dd34fedf614d4f592ca05d65`, were inspected for the temporary notification / Android
+RemoteInput interaction. Guardian independently implements bounded sessions, its own PrivKit keys,
+fixed privacy-safe diagnostics and lifecycle ownership. No upstream source/assets copied or vendored;
+the upstream raw exception logging and intent-redelivery behavior are intentionally not incorporated.
+See docs/NOTIFICATION_PAIRING_V16.md for authoritative links and behavioral differences.
+
 ## Gradle Wrapper 9.3.1
 
 - Source: https://github.com/gradle/gradle/tree/v9.3.1
@@ -25,6 +42,51 @@ their implementation was not copied or adapted into this codebase.
 
 ## Maintenance
 
+Research-only GKD reference (2026-10-01):
+https://github.com/gkd-kit/gkd/tree/e732da05811f7cd73276ff0fd10a11873299ca32 (GPL-3.0-only).
+Status-service responsibilities and the standard Android AppTask exclusion API were inspected;
+no upstream implementation/assets/tests were copied or adapted. Guardian implements its own
+bounded authorization/recovery service and reversible task presentation. See docs/AUTOMATIC_PROTECTION.md.
+Any future incorporation of GKD implementation or overlay infrastructure needs separate license review.
+
+Additional installed-version research: GKD v1.12.1,
+https://github.com/gkd-kit/gkd/tree/5a00f844989471458e4cf4601acb3f4710438f9a .
+AuthA11yPage/A11yService were inspected to distinguish the phone's accessibility mode from
+new-main PrivKit integration. No GPL source/assets copied or adapted.
+
+## Priv Kit 0.16.1 integration and compatibility evaluation (2026-10-01)
+
+v18 update2026-10-03: user cancelled the internal runtime. PrivKit dependency, patched class, launcher,
+ASM build logic and dedicated attribution asset are withdrawn from production APKs; prior sources/tests
+and attribution are retained under archive/internal-privkit-v17. The integration and v17 modification
+description below is historical, not a current packaged dependency claim. Official Shizuku API/provider
+remain the sole active privilege integration. GKD authorization interaction was researched again at
+0f57af62e5e1ba76ee15f8996265b8f4ab27aa9a; no GPL implementation source copied.
+
+- Upstream: https://github.com/priv-kit/priv-kit , researched commit
+  `30196351b6489e1d8c7663203eafe9ad13084371`.
+- Source pin clarified2026-10-02: that research commit is v0.17.0; the exact v0.16.1 source is
+  `a11d5898dd7fa0cedc49a2b76b5b0e8898b2febc`. No priv-core changes between these tags;
+  published dependencies below remain0.16.1. This clarification does not upgrade any artifact.
+- Published artifact `io.github.priv-kit:priv-core:0.16.1` is now a main app dependency, with
+  `priv-adb-crypto:0.16.1` and `priv-shared:0.16.1` transitively. The standalone
+  `tools/privilege-compat-probe` remains separate from app settings.
+- Published POM declares Apache License2.0; license text at `licenses/Apache-2.0.txt`.
+  Repository root lacks a LICENSE file and the inspected sources archive has no LICENSE/NOTICE
+  entry; do not invent an upstream copyright/NOTICE or relicense all transitive dependencies.
+  Main APK assets include the full Apache2.0 license and `priv-kit-attribution.txt`.
+  Recheck distribution attribution when dependencies change; do not invent a missing NOTICE.
+- Developer in POM: lisonge. No upstream implementation source vendored/copied.
+  Guardian implements its own fixed identity UserService and recovery adapter; current status is in PROJECT_STATE.
+  Native launcher is packaged for four ABIs. Since v10 WSS is intentionally declared for reviewed activation.
+- Guardian modification2026-10-03/v17: build-time ASM changes exactly one static exporter call inside
+  `priv.kit.core.adb.PrivilegeAdbPairingClient.setupTlsConnection`, from hidden platform
+  `Conscrypt.exportKeyingMaterial` to Guardian's API31+ public `SSLSockets` bridge.
+  Socket/label/context/length, TLS provider and pairing protocol remain unchanged. API30 pairing fails closed.
+  Published artifact cache stays unchanged; the packaged class is modified. Pinned input SHA and exact
+  match-count checks guard the transformation; debug/release final DEX checks guard packaging.
+  Modification attribution ships in `assets/priv-kit-attribution.txt` alongside Apache2.0 license.
+
 When third-party code is directly copied, modified, vendored, or materially incorporated, record:
 
 - Project name
@@ -40,10 +102,23 @@ Architecture ideas and API behavior studied from reference projects should still
 
 ## Research-only GPL reference: HyperOS FCM Fix
 
+2026-10-05: user-supplied screenshots additionally guide v50 native Home/Apps/sheet layout.
+Guardian retains its own implementation, identity, engine and platform capability boundaries;
+no reference implementation or branded screenshot assets are included in the APK. Installed-app
+icons are loaded from Android. Private comparison captures are not public redistribution artifacts.
+
 Source: https://github.com/dingwen07/hyperos-fcm-fix/tree/f3b0a0179e4ca7aeadf547ffbc9f51b2c2c4656b
 (v0.2.1, GPLv3). No source, tests, assets or APK incorporated. Factual observations
 and independently described architecture/experiment ideas are attributed in
 `docs/HYPEROS_REFERENCE_REVIEW.md`; future incorporation requires license review.
+
+2026-10-01 additional research: main / prerelease v0.2.3, commit
+`4cd193f9b2ed4d23f2aa070d94d806dede3810b9` (GPLv3).
+Source: https://github.com/dingwen07/hyperos-fcm-fix/tree/4cd193f9b2ed4d23f2aa070d94d806dede3810b9 .
+Home/Apps separation, selection, daemon/scheduler and recovery boundaries were inspected as
+product references. Guardian's plan is independently described; no implementation, assets,
+tests or supplied personal screenshots were copied into the product or public repository.
+Screenshot version is unknown. Xiaomi-specific commands are not adopted as vivo mechanisms.
 
 ## Firebase Android messaging and Google Services plugin (Phase3)
 

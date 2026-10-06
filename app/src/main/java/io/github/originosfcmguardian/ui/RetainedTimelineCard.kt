@@ -251,6 +251,8 @@ private fun RetainedTimelineKind.source(): RetainedTimelineSource = when (this) 
     RetainedTimelineKind.PROCESS_START,
     RetainedTimelineKind.UID_ACTIVE,
     RetainedTimelineKind.UID_IDLE,
+    RetainedTimelineKind.UID_RUNNING,
+    RetainedTimelineKind.UID_STOPPED,
     -> RetainedTimelineSource.PROCESS_SESSION
 }
 
@@ -260,6 +262,8 @@ private fun RetainedTimelineKind.label(): String = when (this) {
     RetainedTimelineKind.PROCESS_START -> "进程启动"
     RetainedTimelineKind.UID_ACTIVE -> "UID 活跃"
     RetainedTimelineKind.UID_IDLE -> "UID 空闲"
+    RetainedTimelineKind.UID_RUNNING -> "UID 开始运行"
+    RetainedTimelineKind.UID_STOPPED -> "UID 停止运行"
 }
 
 private fun RetainedTimelineSource.label(): String = when (this) {

@@ -10,7 +10,7 @@ data class ProcessTraceTarget(val packageName: String, val uid: Int) {
     }
 }
 
-enum class ProcessTraceKind { PROCESS_START, UID_ACTIVE, UID_IDLE }
+enum class ProcessTraceKind { PROCESS_START, UID_ACTIVE, UID_IDLE, UID_RUNNING, UID_STOPPED }
 
 data class ProcessTraceEvent(
     val timestampEpochMillis: Long,

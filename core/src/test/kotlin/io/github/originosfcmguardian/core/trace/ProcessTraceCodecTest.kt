@@ -28,6 +28,15 @@ class ProcessTraceCodecTest {
     }
 
     @Test
+    fun `uid lifecycle round trips without changing legacy wire format`() {
+        val events = listOf(ProcessTraceKind.UID_RUNNING, ProcessTraceKind.UID_STOPPED).map {
+            ProcessTraceEvent(1_790_590_802_356, target, it)
+        }
+        assertEquals(events, ProcessTraceCodec.decode(ProcessTraceCodec.encode(events)))
+        assertNull(ProcessTraceCodec.decode("PT1\n1\tcom.example.target\t10123\tUID_STOPPED\t9"))
+    }
+
+    @Test
     fun `malformed and oversized payloads fail closed`() {
         assertNull(ProcessTraceCodec.decode("not-a-trace\nprivate raw log"))
         assertNull(ProcessTraceCodec.decode("PT1\n1\tcom.example.target\t10123\tUID_ACTIVE\t9"))

@@ -1,0 +1,16 @@
+Priv Kit 0.16.1
+Published artifacts: io.github.priv-kit:priv-core, priv-adb-crypto, priv-shared
+Project: https://github.com/priv-kit/priv-kit
+Publisher/developer recorded in the Maven POM: lisonge
+Published artifact license: Apache License, Version 2.0
+Full license text: Apache-2.0.txt in these APK assets.
+
+Guardian resolves the published artifacts; no upstream source is vendored.
+Guardian modification (2026-10-03): at build time, the pinned priv-core 0.16.1
+PrivilegeAdbPairingClient.setupTlsConnection single Conscrypt.exportKeyingMaterial
+call is redirected to Guardian's API 31+ public SSLSockets exporter bridge.
+Socket, label, context, length, TLS provider and pairing protocol are unchanged.
+Input artifact SHA-256 and exactly-one-call matching are checked before transformation.
+The published dependency cache is not modified; the packaged class is modified.
+The inspected artifacts did not include a separate upstream NOTICE file.
+This attribution describes these artifacts only; other dependencies retain their licenses.

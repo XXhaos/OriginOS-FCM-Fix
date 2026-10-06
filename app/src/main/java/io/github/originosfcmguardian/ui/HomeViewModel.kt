@@ -8,11 +8,16 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.originosfcmguardian.BuildConfig
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleProductController
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleUiState
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleOnTarget
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleRestoreTarget
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleAutomaticRuntime
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleAutomaticUiState
+import io.github.originosfcmguardian.doze.cyclebroker.GmsDozeCycleAutomaticConfirmationTarget
 import io.github.originosfcmguardian.core.DetectionReport
-import io.github.originosfcmguardian.core.AutostartReadStatus
-import io.github.originosfcmguardian.core.GuardianAutostartParser
 import io.github.originosfcmguardian.core.SafeCommand
-import io.github.originosfcmguardian.core.TargetAutostartParser
 import io.github.originosfcmguardian.core.ReadOnlyDetector
 import io.github.originosfcmguardian.core.RepairPlan
 import io.github.originosfcmguardian.core.RepairPlanner
@@ -29,28 +34,36 @@ import io.github.originosfcmguardian.data.journal.OriginalRecordStatus
 import io.github.originosfcmguardian.data.journal.applyInitialRecordIfStillLoading
 import io.github.originosfcmguardian.device.GmsPackageSnapshot
 import io.github.originosfcmguardian.device.NormalDeviceProbe
-import io.github.originosfcmguardian.autostart.AutostartReturnTracker
 import io.github.originosfcmguardian.autostart.AutostartSettingsLaunchResult
-import io.github.originosfcmguardian.autostart.AutostartUiStatus
-import io.github.originosfcmguardian.autostart.GuardianAutostartUiState
 import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
-import io.github.originosfcmguardian.autostart.TargetAutostartReturnTracker
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
 import io.github.originosfcmguardian.autostart.TargetIdentityStatus
 import io.github.originosfcmguardian.autostart.TargetPackageProbe
 import io.github.originosfcmguardian.autostart.TargetSelectionStore
 import io.github.originosfcmguardian.autostart.TargetSelectionUiState
 import io.github.originosfcmguardian.autostart.identityStatus
+import io.github.originosfcmguardian.autostart.TargetStoppedSnapshot
+import io.github.originosfcmguardian.autostart.TargetStoppedStatus
+import io.github.originosfcmguardian.autostart.withStoppedSnapshot
 import io.github.originosfcmguardian.privileged.ShizukuRuntime
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatusSnapshot
+import io.github.originosfcmguardian.recovery.StoppedRecoveryController
+import io.github.originosfcmguardian.recovery.StoppedRecoveryResult
+import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
+import io.github.originosfcmguardian.recovery.RecoveryCountsUiState
+import io.github.originosfcmguardian.recovery.AndroidRecoveryCounts
+import io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime
+import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
+import io.github.originosfcmguardian.autoprotection.ProtectionNotificationVisibility
 import io.github.originosfcmguardian.protection.ReadSessionCoordinator
 import io.github.originosfcmguardian.protection.DailyProtectionEvents
 import io.github.originosfcmguardian.protection.DailyProtectionReport
 import io.github.originosfcmguardian.protection.DailyProtectionScheduler
 import io.github.originosfcmguardian.protection.DailyProtectionStore
+import io.github.originosfcmguardian.protection.submitManualProtection
 import io.github.originosfcmguardian.fcm.FcmConfigurationStatus
 import io.github.originosfcmguardian.fcm.FcmEvidenceSnapshot
 import io.github.originosfcmguardian.fcm.FcmEvidenceStore
@@ -75,6 +88,12 @@ import io.github.originosfcmguardian.monitoring.MonitorSessionQuery
 import io.github.originosfcmguardian.monitoring.PreparedMonitorSessionExport
 import io.github.originosfcmguardian.monitoring.MonitorExportResult
 import io.github.originosfcmguardian.monitoring.encodeMonitorSessionExport
+import io.github.originosfcmguardian.diagnostics.CombinedDiagnosticExportResult
+import io.github.originosfcmguardian.diagnostics.DiagnosticEnvironment
+import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
+import io.github.originosfcmguardian.diagnostics.PreparedCombinedDiagnosticExport
+import io.github.originosfcmguardian.diagnostics.buildCombinedDiagnosticReport
+import io.github.originosfcmguardian.diagnostics.encodeDiagnosticReport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -94,7 +113,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 data class HomeUiState(
+    val gmsConfigSnapshot: io.github.originosfcmguardian.gmsconfig.GmsConfigSnapshot? = null,
+    val gmsConfigContext: io.github.originosfcmguardian.gmsconfig.GmsConfigContext? = null,
+    val gmsConfigLoadFailed: Boolean = false,
+    val gmsConfigContextFailed: Boolean = false,
+    val gmsConfigCheckFailed: Boolean = false,
+    val gmsConfigChecking: Boolean = false,
     val gms: GmsPackageSnapshot? = null,
+    val normalGmsLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val shizuku: ShizukuStatusSnapshot = ShizukuStatusSnapshot(
         ShizukuStatus.ERROR,
         "正在读取 Shizuku 状态",
@@ -104,15 +130,32 @@ data class HomeUiState(
     val plan: RepairPlan? = null,
     val detectionMessage: String = "尚未执行特权只读检测",
     val originalRecord: OriginalRecordState = OriginalRecordState(),
-    val autostart: GuardianAutostartUiState = GuardianAutostartUiState(),
-    val autostartCheckAttemptCount: Long = 0,
+    val autostartSettingsMessage: String? = null,
     val selectedTargets: List<SelectedTargetUiState> = emptyList(),
+    val targetSelectionLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val targetSelection: TargetSelectionUiState = TargetSelectionUiState(),
     val targetReadAttemptCount: Long = 0,
+    val targetReadInFlight: Set<SelectedTargetIdentity> = emptySet(),
+    val selectedAppsRecheckRunning: Boolean = false,
     val targetSelectionStoreCorrupt: Boolean = false,
+    val stoppedRecovery: StoppedRecoveryUiState = StoppedRecoveryUiState(),
+    val recoveryCounts: RecoveryCountsUiState = RecoveryCountsUiState(),
+    val recoveryFirmwareSupported: Boolean = false,
+    val automaticProtection: AutomaticProtectionState = AutomaticProtectionState(),
+    val protectionNotificationVisibility: ProtectionNotificationVisibility = ProtectionNotificationVisibility.UNKNOWN,
+    val automaticConfirmationIdentity: SelectedTargetIdentity? = null,
+    val visibleApps: List<VisibleProtectionApp> = emptyList(),
+    val visibleAppsLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
+    val appsMessage: String? = null,
+    val automaticPreparationPackage: String? = null,
+    val hiddenFromRecents: Boolean = false,
+    val recentsMessage: String? = null,
     val dailyProtectionReport: DailyProtectionReport? = null,
-    val dailyProtectionQueued: Boolean = false,
+    val dailyProtectionLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
+    val dailyProtectionSubmitting: Boolean = false,
+    val dailyProtectionSubmissionMessage: String? = null,
     val fcm: FcmUiState = FcmUiState(),
+    val fcmEvidenceLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val notificationFacts: NotificationFactsUiState = NotificationFactsUiState(
         enabled = false,
         accessGranted = false,
@@ -123,25 +166,68 @@ data class HomeUiState(
         droppedEvents = 0,
     ),
     val notificationFactsMessage: String? = null,
+    val notificationFactsLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val notificationFactsExportFeedback: String? = null,
     val deepMonitoring: DeepMonitoringUiState = DeepMonitoringUiState(),
+    val deepMonitoringLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val deepMonitoringActionMessage: String? = null,
     val deepMonitoringExportFeedback: String? = null,
     val deepMonitoringExportBusy: Boolean = false,
+    val diagnosticReportExportFeedback: String? = null,
+    val diagnosticReportExportBusy: Boolean = false,
+    val gmsConnection: GmsConnectionUiState = GmsConnectionUiState(),
+    val gmsAutoHeartbeat: io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatUiState =
+        io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatUiState(),
+    val gmsAutoHeartbeatConfirmation: Boolean = false,
+    val gmsDoze: GmsDozeCycleUiState = GmsDozeCycleUiState(),
+    val gmsDozeOnConfirmation: GmsDozeCycleOnTarget? = null,
+    val gmsDozeRestoreConfirmation: GmsDozeCycleRestoreTarget? = null,
+    val gmsDozeAutomatic: GmsDozeCycleAutomaticUiState = GmsDozeCycleAutomaticUiState(),
+    val gmsDozeAutomaticConfirmation: GmsDozeCycleAutomaticConfirmationTarget? = null,
 )
+
+enum class HomeSourceLoadState {
+    LOADING,
+    LOADED,
+    FAILED,
+}
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val normalProbe = NormalDeviceProbe(application)
+    private val gmsConfigStore = io.github.originosfcmguardian.gmsconfig.GmsConfigurationStore(application)
+    private var gmsConfigSubscription: AutoCloseable? = null
+    private val gmsConfigChecker by lazy { io.github.originosfcmguardian.gmsconfig.GmsConfigurationChecker(application) }
+    private var gmsConfigJob: Job? = null
+    private val gmsConfigLoader by lazy {
+        io.github.originosfcmguardian.gmsconfig.GmsConfigurationLoader(
+            viewModelScope,
+            invalidateContext = { _uiState.update { it.copy(gmsConfigContext = null) } },
+            read = { withContext(Dispatchers.IO) {
+                io.github.originosfcmguardian.gmsconfig.readGmsConfiguration(gmsConfigStore::load, gmsConfigChecker::readContext)
+            } },
+            publish = { result -> _uiState.update { it.copy(
+                gmsConfigSnapshot = result.snapshot, gmsConfigContext = result.context,
+                gmsConfigLoadFailed = result.storeFailed, gmsConfigContextFailed = result.contextFailed,
+            ) } },
+        )
+    }
     private val shizukuRuntime = ShizukuRuntime(application)
     private val originalRecordController = OriginalRecordController(AtomicFileJournalStore(application))
     private val originalRecordMutex = Mutex()
     private val detectionGate = SingleFlightGate()
-    private val autostartGate = SingleFlightGate()
-    private val autostartReturnTracker = AutostartReturnTracker()
-    private val targetReadGate = SingleFlightGate()
-    private val targetReturnTracker = TargetAutostartReturnTracker()
+    private val dailyProtectionSubmissionGate = SingleFlightGate()
     private val targetStore = TargetSelectionStore(application)
     private val targetProbe = TargetPackageProbe(application)
+    private val appProtectionRequestGate = AppProtectionRequestGate()
+    private var appProtectionRequestToken: Long? = null
+    private var visibleAppsGeneration = 0L
+    private var visibleAppsRefreshJob: Job? = null
+    private val stoppedRecoveryController = StoppedRecoveryController(application)
+    private var stoppedRecoveryJob: Job? = null
+    private var recoveryUiActive = false
+    private var stoppedRecoveryRecordGeneration = 0L
+    private var recoverySuccessJob: Job? = null
+    private var recoveryCountsGeneration = 0L
     private val dailyProtectionEvents = DailyProtectionEvents(application)
     private val dailyProtectionStore = DailyProtectionStore(application)
     private val fcmRegistrationClient = FcmRegistrationClient(application)
@@ -151,6 +237,166 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val notificationFactsController = NotificationFactsController(application)
     private val deepMonitoringController = DeepMonitoringController(application)
     private val monitorPreparedExport = PreparedMonitorSessionExport()
+    private val diagnosticPreparedExport = PreparedCombinedDiagnosticExport()
+    private var gmsConnectionJob: Job? = null
+    private var gmsConnectionGeneration = 0L
+    private var gmsNetworkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private val gmsDozeController by lazy { GmsDozeCycleProductController.get(getApplication<Application>()) }
+
+    fun requestGmsDozeEnable() {
+        val value = gmsDozeController.state.value
+        if (!value.canEnable || _uiState.value.shizuku.status != ShizukuStatus.READY_SHELL) return
+        val target = value.onTarget ?: return
+        _uiState.update { it.copy(gmsDozeOnConfirmation = target, gmsDozeRestoreConfirmation = null,
+            gmsDozeAutomaticConfirmation = null) }
+    }
+
+    fun confirmGmsDozeEnable() {
+        val target = _uiState.value.gmsDozeOnConfirmation ?: return
+        dismissGmsDozeConfirmation()
+        gmsDozeController.confirmOn(target)
+    }
+
+    fun runGmsDozeOnce() {
+        if (!gmsDozeController.state.value.canApplyOnce ||
+            _uiState.value.shizuku.status != ShizukuStatus.READY_SHELL) return
+        gmsDozeController.runOnce()
+    }
+
+    fun stopGmsDoze() {
+        dismissGmsDozeConfirmation()
+        GmsDozeCycleAutomaticRuntime.gmsOffNow()
+        gmsDozeController.off() // Closes ADD synchronously; durable work belongs to the App owner.
+    }
+
+    fun requestGmsDozeAutomatic() {
+        val value = GmsDozeCycleAutomaticRuntime.state.value
+        if (value.busy || _uiState.value.shizuku.status != ShizukuStatus.READY_SHELL) return
+        val target = value.confirmationTarget ?: return
+        _uiState.update { it.copy(gmsDozeAutomaticConfirmation = target,
+            gmsDozeOnConfirmation = null, gmsDozeRestoreConfirmation = null) }
+    }
+
+    fun confirmGmsDozeAutomatic() {
+        val target = _uiState.value.gmsDozeAutomaticConfirmation ?: return
+        dismissGmsDozeConfirmation()
+        GmsDozeCycleAutomaticRuntime.confirm(getApplication<Application>(), target)
+    }
+
+    fun requestGmsDozeRestore() {
+        val value = gmsDozeController.state.value
+        if (!value.canRestore || _uiState.value.shizuku.status != ShizukuStatus.READY_SHELL) return
+        val target = value.restoreTarget ?: return
+        _uiState.update { it.copy(gmsDozeRestoreConfirmation = target, gmsDozeOnConfirmation = null,
+            gmsDozeAutomaticConfirmation = null) }
+    }
+
+    fun confirmGmsDozeRestore() {
+        val target = _uiState.value.gmsDozeRestoreConfirmation ?: return
+        dismissGmsDozeConfirmation()
+        gmsDozeController.confirmRestore(target)
+    }
+
+    fun dismissGmsDozeConfirmation() {
+        _uiState.update { it.copy(gmsDozeOnConfirmation = null, gmsDozeRestoreConfirmation = null,
+            gmsDozeAutomaticConfirmation = null) }
+    }
+
+    fun openGmsConnection() {
+        _uiState.update { it.copy(gmsConnection = GmsConnectionUiState(visible = true)) }
+        val cm = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
+        if (gmsNetworkCallback == null) {
+            val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+                private fun changed(network: android.net.Network, force: Boolean) {
+                    _uiState.update { current ->
+                        val value = current.gmsConnection
+                        if (value.visible && value.networkKey != null &&
+                            (force || value.networkKey.substringBefore(':') != network.networkHandle.toString()))
+                            current.copy(gmsConnection = value.copy(networkChanged = true)) else current
+                    }
+                }
+                override fun onAvailable(network: android.net.Network) = changed(network, false)
+                override fun onLost(network: android.net.Network) = changed(network, true)
+                override fun onCapabilitiesChanged(network: android.net.Network, capabilities: android.net.NetworkCapabilities) = changed(network, true)
+            }
+            runCatching { cm.registerDefaultNetworkCallback(callback); gmsNetworkCallback = callback }
+        }
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(networkTrackingAvailable = gmsNetworkCallback != null)) }
+    }
+
+    fun dismissGmsConnection() {
+        gmsConnectionGeneration++
+        gmsConnectionJob?.cancel(); gmsConnectionJob = null
+        gmsNetworkCallback?.let { callback -> runCatching {
+            getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java).unregisterNetworkCallback(callback)
+        } }
+        gmsNetworkCallback = null
+        _uiState.update { it.copy(gmsConnection = GmsConnectionUiState()) }
+    }
+
+    fun requestAutomaticGmsHeartbeat() {
+        if (_uiState.value.gmsAutoHeartbeat.busy || _uiState.value.gmsAutoHeartbeat.stopPending) return
+        _uiState.update { it.copy(gmsAutoHeartbeatConfirmation = true) }
+    }
+
+    fun dismissAutomaticGmsHeartbeat() {
+        _uiState.update { it.copy(gmsAutoHeartbeatConfirmation = false) }
+    }
+
+    fun confirmAutomaticGmsHeartbeat() {
+        if (!_uiState.value.gmsAutoHeartbeatConfirmation) return
+        dismissAutomaticGmsHeartbeat()
+        viewModelScope.launch {
+            io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.confirmDurable(getApplication())
+        }
+    }
+
+    fun disableAutomaticGmsHeartbeat() {
+        dismissAutomaticGmsHeartbeat()
+        io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.disable(getApplication())
+    }
+
+    fun readGmsConnection() {
+        if (!_uiState.value.gmsConnection.visible || _uiState.value.gmsConnection.busy) return
+        val generation = ++gmsConnectionGeneration
+        val network = gmsNetworkContext(getApplication())
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true, observation = null,
+            heartbeatBusy = false, heartbeatStatus = null,
+            networkBackground = network.summary, networkKey = network.key, networkChanged = false)) }
+        gmsConnectionJob = viewModelScope.launch {
+            val observation = shizukuRuntime.executor.readGmsConnection()
+            coroutineContext.ensureActive()
+            val changed = network != gmsNetworkContext(getApplication())
+            if (generation == gmsConnectionGeneration) _uiState.update {
+                it.copy(gmsConnection = it.gmsConnection.copy(busy = false, observation = observation,
+                    networkChanged = it.gmsConnection.networkChanged || changed))
+            }
+        }
+    }
+
+    fun requestGmsHeartbeat() {
+        if (_uiState.value.gmsAutoHeartbeat.manualBlocked || !_uiState.value.gmsConnection.visible || _uiState.value.gmsConnection.busy) return
+        val generation = ++gmsConnectionGeneration
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true,
+            heartbeatBusy = true, heartbeatStatus = null, observation = null)) }
+        // Only this explicit callback dispatches. No restore/rebind/lifecycle path replays it.
+        gmsConnectionJob = viewModelScope.launch {
+            var status = io.github.originosfcmguardian.core.gms.GmsHeartbeatStatus.UNKNOWN
+            try {
+                status = shizukuRuntime.executor.requestGmsHeartbeat().status
+                coroutineContext.ensureActive()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A bridge exception cannot establish that a possible dispatch never happened.
+            } finally {
+                if (generation == gmsConnectionGeneration) _uiState.update {
+                    it.copy(gmsConnection = it.gmsConnection.copy(busy = false,
+                        heartbeatBusy = false, heartbeatStatus = status))
+                }
+            }
+        }
+    }
     private var dailyProtectionSubscription: AutoCloseable? = null
     private var fcmEvidenceSubscription: AutoCloseable? = null
     private var notificationFactsSubscription: AutoCloseable? = null
@@ -168,6 +414,38 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     init {
+        gmsDozeController.initialize()
+        GmsDozeCycleAutomaticRuntime.initialize(application)
+        viewModelScope.launch {
+            gmsDozeController.state.collectLatest { snapshot ->
+                _uiState.update { it.copy(gmsDoze = snapshot) }
+                GmsDozeCycleAutomaticRuntime.refresh(application)
+            }
+        }
+        viewModelScope.launch {
+            GmsDozeCycleAutomaticRuntime.state.collectLatest { snapshot ->
+                _uiState.update { it.copy(gmsDozeAutomatic = snapshot) }
+            }
+        }
+        io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.initialize(application)
+        viewModelScope.launch {
+            io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.state.collectLatest { snapshot ->
+                _uiState.update { it.copy(gmsAutoHeartbeat = snapshot) }
+            }
+        }
+        gmsConfigSubscription = gmsConfigStore.registerListener { loadGmsConfiguration() }
+        loadGmsConfiguration()
+        _uiState.update { it.copy(hiddenFromRecents = RecentsVisibility.hidden(application)) }
+        viewModelScope.launch {
+            AndroidRecoveryCounts.changes.collectLatest { refreshRecoveryCounts() }
+        }
+        viewModelScope.launch {
+            AutomaticProtectionRuntime.state.collectLatest { snapshot ->
+                val previous = _uiState.value.automaticProtection
+                _uiState.update { it.copy(automaticProtection = snapshot) }
+                if (previous.busy && !snapshot.busy && recoveryUiActive) refreshStoppedRecoveryRecord()
+            }
+        }
         viewModelScope.launch {
             DeepMonitoringRuntime.state.collectLatest { snapshot ->
                 if (snapshot.historyCorrupt || snapshot.session?.id != _uiState.value.deepMonitoring.session?.id) {
@@ -176,7 +454,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(deepMonitoring = snapshot) }
             }
         }
-        viewModelScope.launch { deepMonitoringController.refresh() }
+        viewModelScope.launch {
+            try {
+                deepMonitoringController.refresh()
+                _uiState.update {
+                    it.copy(
+                        deepMonitoring = DeepMonitoringRuntime.state.value,
+                        deepMonitoringLoadState = HomeSourceLoadState.LOADED,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _uiState.update { it.copy(deepMonitoringLoadState = HomeSourceLoadState.FAILED) }
+            }
+        }
         shizukuRuntime.start()
         dailyProtectionSubscription = dailyProtectionStore.registerReportListener {
             loadDailyProtectionReport()
@@ -201,12 +493,30 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         refreshNormalState()
         loadOriginalRecord()
         loadSelectedTargets()
+        refreshStoppedRecoveryRecord()
         loadDailyProtectionReport()
         refreshFcmStatus()
         refreshNotificationFacts()
     }
 
     fun refreshShizuku() = shizukuRuntime.refresh()
+
+    fun checkGmsConfiguration() {
+        if (gmsConfigJob?.isCompleted == false) return
+        _uiState.update { it.copy(gmsConfigChecking = true) }
+        gmsConfigJob = viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { gmsConfigChecker.check {
+                    runCatching { stoppedRecoveryController.loadLatest()?.requiresReconcile != true }.getOrDefault(false)
+                } }
+                coroutineContext.ensureActive()
+                _uiState.update { it.copy(gmsConfigCheckFailed = false) }
+                loadGmsConfiguration()
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { _uiState.update { it.copy(gmsConfigContext = null, gmsConfigCheckFailed = true) } }
+            finally { _uiState.update { it.copy(gmsConfigChecking = false) } }
+        }
+    }
 
     suspend fun startDeepMonitoring(packageName: String, isVisible: () -> Boolean) {
         if (_uiState.value.deepMonitoringExportBusy) return
@@ -295,7 +605,90 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun prepareCombinedDiagnosticReportExport(
+        format: DiagnosticReportFormat = DiagnosticReportFormat.JSON,
+        openPicker: () -> Boolean,
+    ) {
+        if (_uiState.value.diagnosticReportExportBusy) return
+        val capturedAt = System.currentTimeMillis()
+        val report = buildCombinedDiagnosticReport(
+            state = _uiState.value.copy(shizuku = shizukuRuntime.status.value),
+            environment = DiagnosticEnvironment(
+                sdkInt = Build.VERSION.SDK_INT,
+                androidRelease = Build.VERSION.RELEASE.orEmpty(),
+                manufacturer = Build.MANUFACTURER.orEmpty(),
+                model = Build.MODEL.orEmpty(),
+                guardianVersionName = BuildConfig.VERSION_NAME,
+                guardianVersionCode = BuildConfig.VERSION_CODE.toLong(),
+            ),
+            capturedAtEpochMillis = capturedAt,
+        )
+        _uiState.update {
+            it.copy(diagnosticReportExportBusy = true, diagnosticReportExportFeedback = null)
+        }
+        viewModelScope.launch {
+            var pickerOpened = false
+            try {
+                val bytes = withContext(Dispatchers.Default) { encodeDiagnosticReport(report, format) }
+                diagnosticPreparedExport.prepare(bytes)
+                pickerOpened = openPicker()
+                check(pickerOpened)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _uiState.update {
+                    it.copy(diagnosticReportExportFeedback = "无法生成诊断报告或打开保存位置，请重试")
+                }
+            } finally {
+                if (!pickerOpened) {
+                    diagnosticPreparedExport.invalidate()
+                    _uiState.update { it.copy(diagnosticReportExportBusy = false) }
+                }
+            }
+        }
+    }
+
+    fun saveCombinedDiagnosticReportExport(uri: Uri?) {
+        when (val result = diagnosticPreparedExport.consume(uri != null)) {
+            CombinedDiagnosticExportResult.Cancelled -> {
+                _uiState.update { it.copy(diagnosticReportExportBusy = false) }
+            }
+            CombinedDiagnosticExportResult.Missing -> {
+                _uiState.update {
+                    it.copy(
+                        diagnosticReportExportBusy = false,
+                        diagnosticReportExportFeedback = "诊断报告快照已失效，未写入文件；请重新点击导出",
+                    )
+                }
+            }
+            is CombinedDiagnosticExportResult.Ready -> {
+                checkNotNull(uri)
+                viewModelScope.launch {
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching {
+                            getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
+                                ?.use { it.write(result.bytes) }
+                                ?: error("Document provider did not open output")
+                        }.isSuccess
+                    }
+                    _uiState.update {
+                        it.copy(
+                            diagnosticReportExportBusy = false,
+                            diagnosticReportExportFeedback = if (saved) {
+                                "已导出点击时的脱敏综合诊断快照"
+                            } else {
+                                "导出写入失败，文件可能不完整；请重试"
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     fun requestShizukuAccess() = shizukuRuntime.requestOrOpen()
+
+    fun openShizuku() = shizukuRuntime.openManager()
 
     fun requestFcmToken() {
         val requestGeneration = fcmRegistrationRequests.tryStart() ?: return
@@ -403,6 +796,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onAppBackgrounded() {
+        dismissGmsDozeConfirmation() // Unsubmitted dialog only; never cancel the App-owned operation.
+        dismissGmsConnection()
+        recoveryUiActive = false
+        dismissAutomaticProtection()
+        cancelStoppedRecovery()
         notificationFactsUiActive = false
         notificationFactsRefreshJob?.cancel()
         cancelFcmRegistration()
@@ -420,6 +818,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
             current.copy(fcm = fcm)
         }
+    }
+
+    fun refreshProtectionNotificationVisibility() {
+        val visibility = AutomaticProtectionRuntime.notificationVisibility(getApplication<Application>())
+        _uiState.update { it.copy(protectionNotificationVisibility = visibility) }
     }
 
     fun refreshFcmStatus() {
@@ -460,11 +863,22 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 val snapshot = withContext(Dispatchers.IO) {
                     runCatching { notificationFactsController.snapshot() }
                 }
+                if (snapshot.exceptionOrNull() is CancellationException) {
+                    throw snapshot.exceptionOrNull() as CancellationException
+                }
                 _uiState.update { current ->
                     snapshot.fold(
-                        onSuccess = { current.copy(notificationFacts = it) },
+                        onSuccess = {
+                            current.copy(
+                                notificationFacts = it,
+                                notificationFactsLoadState = HomeSourceLoadState.LOADED,
+                            )
+                        },
                         onFailure = {
-                            current.copy(notificationFactsMessage = "通知记录状态读取失败；请稍后重试")
+                            current.copy(
+                                notificationFactsLoadState = HomeSourceLoadState.FAILED,
+                                notificationFactsMessage = "通知记录状态读取失败；请稍后重试",
+                            )
                         },
                     )
                 }
@@ -476,7 +890,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val current = _uiState.value
         if (enabled && (current.targetSelectionStoreCorrupt || current.notificationFacts.targetCount < 1)) {
             _uiState.update {
-                it.copy(notificationFactsMessage = "请先选择至少一个身份有效的即时通知应用")
+                it.copy(notificationFactsMessage = "请先在“关注应用”中选择至少一个身份有效的应用")
             }
             return
         }
@@ -572,47 +986,27 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun runDailyProtectionNow() {
-        _uiState.update { it.copy(dailyProtectionQueued = true) }
-        viewModelScope.launch(Dispatchers.IO) {
-            DailyProtectionScheduler.enqueueManual(getApplication())
+        if (!dailyProtectionSubmissionGate.tryEnter()) return
+        _uiState.update { it.copy(dailyProtectionSubmitting = true, dailyProtectionSubmissionMessage = null) }
+        val job = viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    submitManualProtection { DailyProtectionScheduler.enqueueManual(getApplication()).result }
+                }
+                _uiState.update { it.copy(dailyProtectionSubmissionMessage = result.message) }
+            } finally {
+                _uiState.update { it.copy(dailyProtectionSubmitting = false) }
+            }
         }
+        dailyProtectionSubmissionGate.releaseOnCompletion(job)
     }
 
-    fun checkGuardianAutostart() = checkGuardianAutostart(returnedFromSettings = false)
-
     fun onAutostartSettingsLaunchResult(result: AutostartSettingsLaunchResult) {
-        when (result) {
-            AutostartSettingsLaunchResult.Launched -> {
-                autostartReturnTracker.markSuccessfulLaunch()
-                _uiState.update {
-                    it.copy(
-                        autostart = it.autostart.copy(
-                            detail = "已打开系统自启动页面；返回 Guardian 后将自动只读复检一次",
-                        ),
-                    )
-                }
-            }
-            AutostartSettingsLaunchResult.Unavailable -> {
-                autostartReturnTracker.clear()
-                _uiState.update {
-                    it.copy(
-                        autostart = it.autostart.copy(
-                            detail = "当前系统未提供已验证的 vivo 自启动设置入口",
-                        ),
-                    )
-                }
-            }
-            is AutostartSettingsLaunchResult.Failed -> {
-                autostartReturnTracker.clear()
-                _uiState.update {
-                    it.copy(
-                        autostart = it.autostart.copy(
-                            detail = "打开系统自启动页面失败：${result.detail}",
-                        ),
-                    )
-                }
-            }
-        }
+        _uiState.update { it.copy(autostartSettingsMessage = when (result) {
+            AutostartSettingsLaunchResult.Launched -> null
+            AutostartSettingsLaunchResult.Unavailable -> "请在系统设置中手动搜索“自启动”。"
+            is AutostartSettingsLaunchResult.Failed -> "无法打开设置，请在系统设置中手动搜索“自启动”。"
+        }) }
     }
 
     fun showTargetSelection() {
@@ -642,16 +1036,29 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val cleared = withContext(Dispatchers.IO) { targetStore.clearCorruptSelection() }
             if (cleared) {
                 loadSelectedTargetsNow()
-                showTargetSelection()
+                refreshVisibleApps()
             }
         }
     }
 
     fun setTargetSelected(packageName: String, selected: Boolean) {
+        dismissAutomaticProtection()
         val candidates = _uiState.value.targetSelection.candidates
         val isCandidate = candidates.any { it.packageName == packageName }
         val isStoredTarget = _uiState.value.selectedTargets.any { it.identity.packageName == packageName }
         if ((selected && !isCandidate) || (!selected && !isCandidate && !isStoredTarget)) return
+        cancelStoppedRecovery()
+        val removedIdentity = _uiState.value.selectedTargets.firstOrNull { it.identity.packageName == packageName }?.identity
+        if (!selected && removedIdentity != null && removedIdentity in _uiState.value.automaticProtection.authorizedIdentities) {
+            AutomaticProtectionRuntime.stopTarget(getApplication(), removedIdentity) {
+                persistTargetSelection(packageName, false)
+            }
+            return
+        }
+        persistTargetSelection(packageName, selected)
+    }
+
+    private fun persistTargetSelection(packageName: String, selected: Boolean) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -677,7 +1084,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         targetSelection = it.targetSelection.copy(
-                            message = "无法保存选择；最多选择 10 个应用，且应用身份必须可验证",
+                            message = "无法保存选择；请确认应用身份有效且选择记录可保存",
                         ),
                     )
                 }
@@ -701,68 +1108,219 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun checkSelectedTarget(packageName: String) =
-        checkSelectedTarget(packageName, expectedReturnIdentity = null)
+    fun checkSelectedTarget(packageName: String) {
+        val identity = _uiState.value.visibleApps.singleOrNull { it.packageName == packageName }?.identity ?: return
+        checkVisibleApp(identity)
+    }
 
-    fun prepareTargetSettingsLaunch(packageName: String): SelectedTargetIdentity? {
-        val stored = _uiState.value.selectedTargets
-            .singleOrNull { it.identity.packageName == packageName }
-            ?.identity ?: return null
-        val current = targetProbe.identity(packageName)
-        if (identityStatus(stored, current) != TargetIdentityStatus.MATCH) {
-            updateTarget(packageName) {
-                it.copy(
-                    status = TargetAutostartStatus.IDENTITY_CHANGED,
-                    evidence = null,
-                    detail = "应用身份已变化或应用已卸载；请移除后重新选择",
+    /** Current visible apps may read the standard flag without enrolling or granting protection. */
+    fun checkVisibleApp(identity: SelectedTargetIdentity) {
+        if (_uiState.value.selectedAppsRecheckRunning) return
+        viewModelScope.launch { checkVisibleAppNow(identity) }
+    }
+
+    fun checkSelectedApps() {
+        if (!canRecheckSelectedApps(_uiState.value)) return
+        val targets = selectedAppsRecheckTargets(_uiState.value)
+        val generation = visibleAppsGeneration
+        _uiState.update { it.copy(selectedAppsRecheckRunning = true) }
+        viewModelScope.launch {
+            try {
+                recheckSelectedAppsInChunks(targets) { identity ->
+                    if (generation == visibleAppsGeneration &&
+                        _uiState.value.automaticProtection.configurationAvailable &&
+                        identity in _uiState.value.automaticProtection.configuredIdentities) {
+                        checkVisibleAppNow(identity)
+                    }
+                }
+            } finally {
+                _uiState.update { it.copy(selectedAppsRecheckRunning = false) }
+            }
+        }
+    }
+
+    private suspend fun checkVisibleAppNow(identity: SelectedTargetIdentity) {
+        if (!canRecheckVisibleApp(_uiState.value, identity)) return
+        val generation = visibleAppsGeneration
+        _uiState.update { state ->
+            applyVisibleAppStoppedSnapshot(state, identity, generation, visibleAppsGeneration, TargetStoppedSnapshot())
+                .copy(targetReadInFlight = state.targetReadInFlight + identity)
+        }
+            readAndPublishVisibleAppRecheck(
+                read = { AppRecheckReader.read { targetProbe.stoppedSnapshot(identity) } },
+                publish = { snapshot ->
+                    _uiState.update { state ->
+                        applyVisibleAppStoppedSnapshot(state, identity, generation, visibleAppsGeneration, snapshot)
+                    }
+                },
+                finish = { _uiState.update { it.copy(targetReadInFlight = it.targetReadInFlight - identity) } },
+            )
+    }
+
+    private fun recoveryEligible(target: SelectedTargetUiState): Boolean {
+        val current = _uiState.value
+        return recoveryUiActive && !current.automaticProtection.enabled && !current.automaticProtection.busy && canOfferStoppedRecovery(
+            target, current.stoppedRecovery,
+            current.targetSelectionLoadState == HomeSourceLoadState.LOADED && !current.targetSelectionStoreCorrupt,
+            Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT,
+            shizukuRuntime.status.value.status == ShizukuStatus.READY_SHELL,
+            current.detecting || target.identity in current.targetReadInFlight,
+        )
+    }
+
+    fun requestStoppedRecovery(identity: SelectedTargetIdentity) {
+        val target = _uiState.value.selectedTargets.singleOrNull { it.identity == identity } ?: return
+        if (!recoveryEligible(target)) return
+        _uiState.update { it.copy(stoppedRecovery = it.stoppedRecovery.copy(confirmationIdentity = identity)) }
+    }
+
+    fun dismissStoppedRecovery() {
+        _uiState.update { it.copy(stoppedRecovery = it.stoppedRecovery.copy(confirmationIdentity = null)) }
+    }
+
+    fun confirmStoppedRecovery() {
+        val identity = _uiState.value.stoppedRecovery.confirmationIdentity ?: return
+        val valid = recoveryConfirmationStillValid(identity, _uiState.value.selectedTargets, ::recoveryEligible)
+        dismissStoppedRecovery()
+        if (!valid) return
+        runStoppedRecovery(identity) { stoppedRecoveryController.recover(identity, confirmed = true) }
+    }
+
+    fun reconcileStoppedRecovery() {
+        if (recoveryUiActive && AutomaticProtectionRuntime.requestReconciliationRefresh()) return
+        val recovery = _uiState.value.stoppedRecovery
+        if (_uiState.value.automaticProtection.enabled || _uiState.value.automaticProtection.busy) return
+        if (!recoveryUiActive || !recovery.loaded || recovery.busy || recovery.storageBlocked || !recovery.needsReconcile) return
+        if (recovery.recordIdentity in _uiState.value.targetReadInFlight) return
+        runStoppedRecovery(recovery.recordIdentity) { stoppedRecoveryController.reconcile() }
+    }
+
+    private fun runStoppedRecovery(identity: SelectedTargetIdentity?, operation: suspend () -> StoppedRecoveryResult) {
+        if (_uiState.value.stoppedRecovery.busy || stoppedRecoveryJob?.isActive == true) return
+        stoppedRecoveryRecordGeneration++
+        recoverySuccessJob?.cancel()
+        _uiState.update { it.copy(stoppedRecovery = it.stoppedRecovery.copy(busy = true, confirmationIdentity = null,
+            activeIdentity = identity, phase = StoppedRecoveryPhase.RECOVERING, showSuccessButton = false,
+            message = "正在恢复并核对状态…")) }
+        stoppedRecoveryJob = viewModelScope.launch {
+            var result: StoppedRecoveryResult? = null
+            var fallback: String? = null
+            try {
+                result = withContext(Dispatchers.IO) { operation() }
+            } catch (cancelled: CancellationException) {
+                fallback = "操作已中断；已发出的操作不能撤销。请先核对上次结果，勿假定尚未生效。"
+                throw cancelled
+            } catch (_: Exception) {
+                fallback = "操作未能完成；请核对保存的结果，不会自动重复执行。"
+            } finally {
+                withContext(NonCancellable) {
+                    loadStoppedRecoveryRecord(result, fallback, finishOperation = true)
+                    AutomaticProtectionRuntime.notifyRecoveryJournalChanged()
+                }
+                if (recoveryUiActive && _uiState.value.stoppedRecovery.showSuccessButton) {
+                    recoverySuccessJob = viewModelScope.launch {
+                        delay(3_000)
+                        _uiState.update { it.copy(stoppedRecovery = it.stoppedRecovery.copy(showSuccessButton = false)) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun cancelStoppedRecovery() {
+        recoverySuccessJob?.cancel()
+        _uiState.update { it.copy(stoppedRecovery = it.stoppedRecovery.copy(showSuccessButton = false)) }
+        dismissStoppedRecovery()
+        stoppedRecoveryController.cancel()
+        stoppedRecoveryJob?.cancel()
+    }
+
+    private fun refreshStoppedRecoveryRecord() {
+        if (_uiState.value.stoppedRecovery.busy) return
+        viewModelScope.launch { loadStoppedRecoveryRecord() }
+    }
+
+    private fun refreshRecoveryCounts() {
+        val generation = ++recoveryCountsGeneration
+        val identities = _uiState.value.selectedTargets.map { it.identity }
+        val requestedIdentities = identities.toSet()
+        _uiState.update { current ->
+            if (current.recoveryCounts.byIdentity.keys != requestedIdentities)
+                current.copy(recoveryCounts = RecoveryCountsUiState()) else current
+        }
+        viewModelScope.launch {
+            val counts = withContext(Dispatchers.IO) {
+                runCatching { AndroidRecoveryCounts.snapshot(getApplication(), identities) }
+                    .getOrElse { RecoveryCountsUiState(detail = "统计记录不可用或不完整；恢复操作不受影响") }
+            }
+            if (generation == recoveryCountsGeneration) _uiState.update { it.copy(recoveryCounts = counts) }
+        }
+    }
+
+    private suspend fun loadStoppedRecoveryRecord(
+        result: StoppedRecoveryResult? = null,
+        fallback: String? = null,
+        finishOperation: Boolean = false,
+    ) {
+        val generation = ++stoppedRecoveryRecordGeneration
+        val loaded = withContext(Dispatchers.IO) {
+            runCatching { stoppedRecoveryController.loadLatest() to stoppedRecoveryController.storageHealthy() }
+        }
+        val record = loaded.getOrNull()?.first
+        val healthy = loaded.getOrNull()?.second == true
+        _uiState.update { current ->
+            if (generation != stoppedRecoveryRecordGeneration || (current.stoppedRecovery.busy && !finishOperation)) current else {
+                val historical = record != null && current.selectedTargets.none { it.identity == record.identity }
+                val outcome = result?.outcome ?: record?.outcome
+                val pending = record?.requiresReconcile == true
+                val operationIdentity = if (finishOperation) current.stoppedRecovery.activeIdentity else record?.identity
+                val matched = operationIdentity != null && current.selectedTargets.any { it.identity == operationIdentity }
+                val success = healthy && !pending && outcome in setOf(StoppedRecoveryOutcome.FLAG_CLEARED, StoppedRecoveryOutcome.NO_WRITE_NEEDED)
+                val phase = when {
+                    !healthy || pending || fallback != null || outcome == StoppedRecoveryOutcome.UNCONFIRMED -> StoppedRecoveryPhase.UNCONFIRMED
+                    !finishOperation || record?.stage == io.github.originosfcmguardian.recovery.StoppedRecoveryStage.RECONCILED -> StoppedRecoveryPhase.IDLE
+                    success -> StoppedRecoveryPhase.SUCCESS
+                    outcome != null -> StoppedRecoveryPhase.FAILED
+                    else -> StoppedRecoveryPhase.IDLE
+                }
+                val detail = if (!healthy) "恢复操作记录不可用；为避免重复执行，已禁止恢复操作。请保留记录排查。"
+                    else result?.detail ?: fallback ?: record?.detail
+                current.copy(
+                    recoveryFirmwareSupported = Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT,
+                    stoppedRecovery = StoppedRecoveryUiState(
+                        loaded = true, busy = false, storageBlocked = !healthy,
+                        needsReconcile = pending,
+                        recordIdentity = record?.identity, recordedAtMillis = record?.createdAtMillis,
+                        recordSource = record?.source,
+                        recordStage = record?.stage,
+                        recordOutcome = record?.outcome,
+                        phase = phase, activeIdentity = operationIdentity, receiptOutcome = if (healthy && !pending) outcome else null,
+                        showSuccessButton = finishOperation && recoveryUiActive && success && matched && fallback == null &&
+                            record?.stage != io.github.originosfcmguardian.recovery.StoppedRecoveryStage.RECONCILED && outcome == StoppedRecoveryOutcome.FLAG_CLEARED,
+                        message = if (historical && detail != null) "历史安装操作记录（不归属当前选择）：$detail" else detail,
+                    ),
+                    selectedTargets = if (finishOperation && matched) current.selectedTargets.withStoppedSnapshot(
+                        operationIdentity, TargetStoppedSnapshot(when {
+                            success && fallback == null -> TargetStoppedStatus.NOT_STOPPED
+                            healthy && !pending && outcome == StoppedRecoveryOutcome.STILL_STOPPED && fallback == null -> TargetStoppedStatus.STOPPED
+                            else -> TargetStoppedStatus.UNKNOWN
+                        }, System.currentTimeMillis()),
+                    ) else current.selectedTargets,
                 )
             }
-            return null
         }
-        return stored
-    }
-
-    fun onTargetSettingsLaunchResult(
-        identity: SelectedTargetIdentity,
-        result: AutostartSettingsLaunchResult,
-    ) {
-        when (result) {
-            AutostartSettingsLaunchResult.Launched -> {
-                targetReturnTracker.markSuccessfulLaunch(identity)
-                updateTarget(identity.packageName) {
-                    it.copy(detail = "已打开系统自启动页面；返回后将自动只读复检此应用一次")
-                }
-            }
-            AutostartSettingsLaunchResult.Unavailable -> {
-                targetReturnTracker.clear()
-                updateTarget(identity.packageName) {
-                    it.copy(detail = "当前系统未提供已验证的 vivo 自启动设置入口")
-                }
-            }
-            is AutostartSettingsLaunchResult.Failed -> {
-                targetReturnTracker.clear()
-                updateTarget(identity.packageName) {
-                    it.copy(detail = "打开系统自启动页面失败：${result.detail}")
-                }
-            }
-        }
-    }
-
-    fun onActivityPausedAfterAutostartLaunch() {
-        autostartReturnTracker.markDeparture()
-        targetReturnTracker.markDeparture()
     }
 
     fun onActivityResumed() {
+        loadGmsConfiguration()
+        AutomaticProtectionRuntime.inspectSavedAuthorization(getApplication())
+        recoveryUiActive = true
+        refreshVisibleApps(preserveRechecks = true)
+        refreshRecoveryCounts()
+        refreshStoppedRecoveryRecord()
         notificationFactsUiActive = true
         _uiState.update { it.copy(notificationFactsMessage = null) }
         refreshNotificationFacts()
-        if (autostartReturnTracker.consumeReturn()) {
-            checkGuardianAutostart(returnedFromSettings = true)
-        }
-        targetReturnTracker.consumeReturn()?.let { identity ->
-            checkSelectedTarget(identity.packageName, expectedReturnIdentity = identity)
-        }
     }
 
     fun detect() {
@@ -859,9 +1417,28 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         detectionGate.releaseOnCompletion(job)
     }
 
-    fun closeForActivityExit() = shizukuRuntime.close()
+    fun closeForActivityExit() {
+        dismissGmsDozeConfirmation()
+        gmsConfigJob?.cancel()
+        gmsConfigLoader.close()
+        runCatching { gmsConfigChecker.close() }
+        dismissGmsConnection()
+        recoveryUiActive = false
+        cancelStoppedRecovery()
+        stoppedRecoveryController.close()
+        shizukuRuntime.close()
+    }
 
     override fun onCleared() {
+        dismissGmsDozeConfirmation()
+        gmsConfigJob?.cancel()
+        gmsConfigLoader.close()
+        runCatching { gmsConfigChecker.close() }
+        gmsConfigSubscription?.close()
+        dismissGmsConnection()
+        recoveryUiActive = false
+        cancelStoppedRecovery()
+        stoppedRecoveryController.close()
         notificationFactsUiActive = false
         notificationFactsRefreshJob?.cancel()
         dailyProtectionSubscription?.close()
@@ -888,20 +1465,167 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         lastCopiedFcmToken = null
     }
 
+    private fun loadGmsConfiguration() {
+        gmsConfigLoader.refresh()
+    }
+
     private fun refreshNormalState() {
         viewModelScope.launch {
-            val gms = withContext(Dispatchers.IO) { normalProbe.readGmsPackage() }
-            _uiState.update { it.copy(gms = gms) }
+            val result = runCatching { withContext(Dispatchers.IO) { normalProbe.readGmsPackage() } }
+            if (result.exceptionOrNull() is CancellationException) {
+                throw result.exceptionOrNull() as CancellationException
+            }
+            _uiState.update { current ->
+                result.fold(
+                    onSuccess = {
+                        current.copy(gms = it, normalGmsLoadState = HomeSourceLoadState.LOADED)
+                    },
+                    onFailure = {
+                        current.copy(normalGmsLoadState = HomeSourceLoadState.FAILED)
+                    },
+                )
+            }
         }
+    }
+
+    fun requestAutomaticProtection() {
+        dismissAutomaticProtection()
+        if (recoveryUiActive && canEnableAutomaticProtection(_uiState.value)) {
+            cancelStoppedRecovery()
+            AutomaticProtectionRuntime.enableMaster(getApplication())
+        }
+    }
+
+    fun requestTargetAutomaticProtection(identity: SelectedTargetIdentity) {
+        requestAppAutomaticProtection(identity.packageName, identity)
+    }
+
+    fun requestAppAutomaticProtection(packageName: String) = requestAppAutomaticProtection(packageName, null)
+
+    private fun requestAppAutomaticProtection(packageName: String, expected: SelectedTargetIdentity?) {
+        val app = _uiState.value.visibleApps.singleOrNull { it.packageName == packageName } ?: return
+        if (!recoveryUiActive || (expected != null && app.identity != expected) || !canPrepareAppProtection(_uiState.value, app)) return
+        val token = appProtectionRequestGate.begin() ?: return
+        appProtectionRequestToken = token
+        _uiState.update { it.copy(automaticPreparationPackage = packageName, appsMessage = null) }
+        viewModelScope.launch {
+            val expectedIdentity = app.identity ?: return@launch
+            val identity = probeAppProtectionConfirmation(expectedIdentity,
+                identity = { withContext(Dispatchers.IO) { targetProbe.identity(packageName) } },
+                qualified = { withContext(Dispatchers.IO) { targetProbe.isRecoveryCandidate(it) } },
+                current = { appProtectionRequestGate.current(token) && recoveryUiActive })
+            if (!appProtectionRequestGate.current(token) || !recoveryUiActive) return@launch
+            _uiState.update { it.copy(automaticPreparationPackage = null) }
+            if (identity == null || !appProtectionPrerequisites(_uiState.value, app)) {
+                dismissAutomaticProtection()
+                _uiState.update { it.copy(appsMessage = "应用身份或支持条件已变化，请刷新后重试") }
+                return@launch
+            }
+            // No internal selection or authority is written until the user confirms this identity.
+            _uiState.update { it.copy(automaticConfirmationIdentity = identity) }
+        }
+    }
+
+    fun dismissAutomaticProtection() {
+        appProtectionRequestGate.cancel()
+        appProtectionRequestToken = null
+        _uiState.update { it.copy(automaticConfirmationIdentity = null, automaticPreparationPackage = null) }
+    }
+
+    fun confirmAutomaticProtection() {
+        val identity = _uiState.value.automaticConfirmationIdentity ?: return
+        val token = appProtectionRequestToken ?: return
+        val app = _uiState.value.visibleApps.singleOrNull { it.identity == identity } ?: return
+        if (!recoveryUiActive || !appProtectionPrerequisites(_uiState.value, app)) { dismissAutomaticProtection(); return }
+        _uiState.update { it.copy(automaticConfirmationIdentity = null, automaticPreparationPackage = identity.packageName) }
+        viewModelScope.launch {
+            val prepared = runCatching {
+                prepareAppProtectionIdentity(identity.packageName, identity,
+                    identity = { withContext(Dispatchers.IO) { targetProbe.identity(identity.packageName) } },
+                    qualified = { withContext(Dispatchers.IO) { targetProbe.isRecoveryCandidate(it) } },
+                    selected = { withContext(Dispatchers.IO) { targetStore.load() } },
+                    authorized = { _uiState.value.automaticProtection.configuredIdentities },
+                    enroll = { withContext(Dispatchers.IO) { targetStore.replace(it) } },
+                    current = { recoveryUiActive && appProtectionRequestGate.current(token) &&
+                        appProtectionPrerequisites(_uiState.value, app) })
+            }
+            if (prepared.exceptionOrNull() is CancellationException) throw prepared.exceptionOrNull() as CancellationException
+            if (!appProtectionRequestGate.current(token)) return@launch
+            loadSelectedTargetsNow()
+            if (!appProtectionRequestGate.current(token)) return@launch
+            val ready = prepared.getOrNull() == identity && recoveryUiActive &&
+                canEnableTargetAutomaticProtection(_uiState.value, identity) &&
+                withContext(Dispatchers.IO) { targetProbe.identity(identity.packageName) == identity && targetProbe.isRecoveryCandidate(identity) }
+            if (!appProtectionRequestGate.current(token)) return@launch
+            dismissAutomaticProtection()
+            if (ready && recoveryUiActive && canEnableTargetAutomaticProtection(_uiState.value, identity)) {
+                cancelStoppedRecovery()
+                AutomaticProtectionRuntime.start(getApplication(), identity)
+            } else _uiState.update { it.copy(appsMessage = "未开启保护：应用身份、支持条件或记录已变化，请刷新后重试") }
+        }
+    }
+
+    fun refreshVisibleApps() = refreshVisibleApps(preserveRechecks = false)
+
+    private fun refreshVisibleApps(preserveRechecks: Boolean) {
+        if (preserveRechecks && visibleAppsRefreshJob?.isActive == true) return
+        dismissAutomaticProtection()
+        val preserve = preserveRechecks && _uiState.value.visibleAppsLoadState == HomeSourceLoadState.LOADED
+        val generation = if (preserve) visibleAppsGeneration else ++visibleAppsGeneration
+        if (!preserve) _uiState.update(::beginVisibleAppsRefresh)
+        visibleAppsRefreshJob = viewModelScope.launch {
+            loadSelectedTargetsNow()
+            val result = runCatching { withContext(Dispatchers.IO) {
+                targetProbe.launcherCandidates(emptySet()).map { candidate ->
+                    val identity = targetProbe.identity(candidate.packageName)
+                    VisibleProtectionApp(candidate.packageName, candidate.label, identity,
+                        identity != null && targetProbe.isRecoveryCandidate(identity))
+                }
+            } }
+            if (result.exceptionOrNull() is CancellationException) throw result.exceptionOrNull() as CancellationException
+            if (generation != visibleAppsGeneration) return@launch
+            _uiState.update { state -> result.fold(
+                onSuccess = { state.copy(visibleApps = if (preserve) retainRechecksForUnchangedInstallations(state, it) else it,
+                    visibleAppsLoadState = HomeSourceLoadState.LOADED) },
+                onFailure = { state.copy(visibleAppsLoadState = HomeSourceLoadState.FAILED,
+                    appsMessage = "应用列表读取失败，请重试；旧列表可能已变化") }) }
+        }
+    }
+
+    fun stopTargetAutomaticProtection(identity: SelectedTargetIdentity) {
+        dismissAutomaticProtection()
+        AutomaticProtectionRuntime.stopTarget(getApplication(), identity)
+    }
+
+    fun stopAutomaticProtection() {
+        dismissAutomaticProtection()
+        AutomaticProtectionRuntime.stop(getApplication())
+    }
+
+    fun refreshRecentsPreference(applied: Boolean) {
+        _uiState.update { it.copy(hiddenFromRecents = RecentsVisibility.hidden(getApplication()),
+            recentsMessage = if (applied) null else "最近任务显示设置未能完整应用，请重试；后台保护状态不受此设置保证。") }
     }
 
     private fun loadDailyProtectionReport() {
         viewModelScope.launch {
-            val report = withContext(Dispatchers.IO) { dailyProtectionStore.load() }
-            _uiState.update {
-                it.copy(
-                    dailyProtectionReport = report,
-                    dailyProtectionQueued = false,
+            val result = runCatching { withContext(Dispatchers.IO) { dailyProtectionStore.load() } }
+            if (result.exceptionOrNull() is CancellationException) {
+                throw result.exceptionOrNull() as CancellationException
+            }
+            _uiState.update { current ->
+                result.fold(
+                    onSuccess = {
+                        current.copy(
+                            dailyProtectionReport = it,
+                            dailyProtectionLoadState = HomeSourceLoadState.LOADED,
+                        )
+                    },
+                    onFailure = {
+                        current.copy(
+                            dailyProtectionLoadState = HomeSourceLoadState.FAILED,
+                        )
+                    },
                 )
             }
         }
@@ -909,104 +1633,27 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadFcmEvidence() {
         viewModelScope.launch {
-            val snapshot = withContext(Dispatchers.IO) { fcmEvidenceStore.load() }
+            val result = runCatching { withContext(Dispatchers.IO) { fcmEvidenceStore.load() } }
+            if (result.exceptionOrNull() is CancellationException) {
+                throw result.exceptionOrNull() as CancellationException
+            }
             _uiState.update { current ->
-                current.copy(
-                    fcm = current.fcm.copy(
-                        latestReceipt = (snapshot as? FcmEvidenceSnapshot.Available)?.receipts?.firstOrNull(),
-                        evidenceCorrupt = snapshot == FcmEvidenceSnapshot.Corrupt,
-                    ),
+                result.fold(
+                    onSuccess = { snapshot ->
+                        current.copy(
+                            fcm = current.fcm.copy(
+                                latestReceipt = (snapshot as? FcmEvidenceSnapshot.Available)?.receipts?.firstOrNull(),
+                                evidenceCorrupt = snapshot == FcmEvidenceSnapshot.Corrupt,
+                            ),
+                            fcmEvidenceLoadState = HomeSourceLoadState.LOADED,
+                        )
+                    },
+                    onFailure = {
+                        current.copy(fcmEvidenceLoadState = HomeSourceLoadState.FAILED)
+                    },
                 )
             }
         }
-    }
-
-    private fun checkGuardianAutostart(returnedFromSettings: Boolean) {
-        if (!autostartGate.tryEnter()) return
-        val job = viewModelScope.launch {
-            if (Build.FINGERPRINT != VERIFIED_AUTOSTART_FINGERPRINT) {
-                _uiState.update {
-                    it.copy(
-                        autostart = GuardianAutostartUiState(
-                            status = AutostartUiStatus.UNKNOWN,
-                            detail = "当前系统构建未验证；不解释 vivo 私有自启动字段",
-                        ),
-                        autostartCheckAttemptCount = it.autostartCheckAttemptCount + 1,
-                    )
-                }
-                return@launch
-            }
-            if (shizukuRuntime.status.value.status != ShizukuStatus.READY_SHELL) {
-                _uiState.update {
-                    it.copy(
-                        autostart = GuardianAutostartUiState(
-                            status = AutostartUiStatus.UNAVAILABLE,
-                            detail = "需要已授权的 Shizuku shell 才能读取自启动状态",
-                        ),
-                        autostartCheckAttemptCount = it.autostartCheckAttemptCount + 1,
-                    )
-                }
-                return@launch
-            }
-
-            _uiState.update {
-                it.copy(
-                    autostart = GuardianAutostartUiState(
-                        status = AutostartUiStatus.CHECKING,
-                        detail = if (returnedFromSettings) "已返回 Guardian，正在只读复检…" else "正在只读检查…",
-                    ),
-                )
-            }
-            try {
-                val result = ReadSessionCoordinator.withSession {
-                    try {
-                        withContext(Dispatchers.IO) {
-                            shizukuRuntime.executor.exec(SafeCommand.GetGuardianAutostartRow)
-                        }
-                    } finally {
-                        withContext(NonCancellable) { shizukuRuntime.executor.cleanup() }
-                    }
-                }
-                coroutineContext.ensureActive()
-                val parsed = GuardianAutostartParser.parse(
-                    result = result,
-                    expectedGuardianUid = getApplication<Application>().applicationInfo.uid,
-                )
-                val status = when {
-                    parsed.status != AutostartReadStatus.READ_ONLY_VALUE_PRESENT ->
-                        AutostartUiStatus.UNKNOWN
-                    parsed.currentState == 0 -> AutostartUiStatus.ALLOWED
-                    parsed.currentState == 1 -> AutostartUiStatus.NEEDS_USER_ACTION
-                    else -> AutostartUiStatus.UNKNOWN
-                }
-                val detail = when (status) {
-                    AutostartUiStatus.ALLOWED ->
-                        "系统自启动已允许（当前构建只读验证）；这不代表 FCM 已连接或消息已送达"
-                    AutostartUiStatus.NEEDS_USER_ACTION ->
-                        "系统自启动未允许；可打开系统页面手动设置，Guardian 不会自动修改"
-                    else -> "无法得到唯一、完整且 UID 匹配的 Guardian 自启动行"
-                }
-                _uiState.update {
-                    it.copy(
-                        autostart = GuardianAutostartUiState(status, parsed, detail),
-                        autostartCheckAttemptCount = it.autostartCheckAttemptCount + 1,
-                    )
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                _uiState.update {
-                    it.copy(
-                        autostart = GuardianAutostartUiState(
-                            status = AutostartUiStatus.UNKNOWN,
-                            detail = "自启动读取失败：${error.message?.take(120) ?: error.javaClass.simpleName}",
-                        ),
-                        autostartCheckAttemptCount = it.autostartCheckAttemptCount + 1,
-                    )
-                }
-            }
-        }
-        autostartGate.releaseOnCompletion(job)
     }
 
     private fun loadSelectedTargets() {
@@ -1021,10 +1668,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        if (loadedResult.exceptionOrNull() is CancellationException) {
+            throw loadedResult.exceptionOrNull() as CancellationException
+        }
         val loaded = loadedResult.getOrElse {
             _uiState.update { current ->
                 current.copy(
                     selectedTargets = emptyList(),
+                    targetSelectionLoadState = HomeSourceLoadState.LOADED,
                     targetSelectionStoreCorrupt = true,
                     targetSelection = current.targetSelection.copy(
                         message = "已保存的应用选择记录损坏；为避免覆盖，需先明确清除记录",
@@ -1032,6 +1683,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             refreshNotificationFacts()
+            refreshRecoveryCounts()
             return
         }
         _uiState.update { current ->
@@ -1051,121 +1703,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 }.sortedBy { it.label.lowercase() },
+                targetSelectionLoadState = HomeSourceLoadState.LOADED,
                 targetSelectionStoreCorrupt = false,
             )
         }
         refreshNotificationFacts()
-    }
-
-    private fun checkSelectedTarget(
-        packageName: String,
-        expectedReturnIdentity: SelectedTargetIdentity?,
-    ) {
-        if (!targetReadGate.tryEnter()) return
-        val job = viewModelScope.launch {
-            val stored = _uiState.value.selectedTargets
-                .singleOrNull { it.identity.packageName == packageName }
-                ?.identity
-            if (stored == null || (expectedReturnIdentity != null && expectedReturnIdentity != stored)) {
-                _uiState.update { it.copy(targetReadAttemptCount = it.targetReadAttemptCount + 1) }
-                return@launch
-            }
-            if (Build.FINGERPRINT != VERIFIED_AUTOSTART_FINGERPRINT) {
-                finishTargetAttempt(
-                    packageName,
-                    TargetAutostartStatus.UNKNOWN,
-                    "当前系统构建未验证；不解释 vivo 私有自启动字段",
-                )
-                return@launch
-            }
-            if (shizukuRuntime.status.value.status != ShizukuStatus.READY_SHELL) {
-                finishTargetAttempt(
-                    packageName,
-                    TargetAutostartStatus.UNAVAILABLE,
-                    "需要已授权的 Shizuku shell 才能读取自启动状态",
-                )
-                return@launch
-            }
-            val currentIdentity = withContext(Dispatchers.IO) { targetProbe.identity(packageName) }
-            if (identityStatus(stored, currentIdentity) != TargetIdentityStatus.MATCH) {
-                finishTargetAttempt(
-                    packageName,
-                    TargetAutostartStatus.IDENTITY_CHANGED,
-                    "应用身份已变化或应用已卸载；请移除后重新选择",
-                )
-                return@launch
-            }
-
-            updateTarget(packageName) {
-                it.copy(status = TargetAutostartStatus.CHECKING, evidence = null, detail = "正在只读检查…")
-            }
-            try {
-                val result = ReadSessionCoordinator.withSession {
-                    try {
-                        withContext(Dispatchers.IO) {
-                            shizukuRuntime.executor.exec(SafeCommand.GetTargetAutostartRow(packageName))
-                        }
-                    } finally {
-                        withContext(NonCancellable) { shizukuRuntime.executor.cleanup() }
-                    }
-                }
-                coroutineContext.ensureActive()
-                val postReadIdentity = withContext(Dispatchers.IO) { targetProbe.identity(packageName) }
-                if (identityStatus(stored, postReadIdentity) != TargetIdentityStatus.MATCH) {
-                    finishTargetAttempt(
-                        packageName,
-                        TargetAutostartStatus.IDENTITY_CHANGED,
-                        "读取期间应用身份发生变化；结果已丢弃，请重新选择",
-                    )
-                    return@launch
-                }
-                val parsed = TargetAutostartParser.parse(result, packageName, stored.uid)
-                val status = when {
-                    parsed.status != AutostartReadStatus.READ_ONLY_VALUE_PRESENT ->
-                        TargetAutostartStatus.UNKNOWN
-                    parsed.currentState == 0 -> TargetAutostartStatus.ALLOWED
-                    parsed.currentState == 1 -> TargetAutostartStatus.NEEDS_USER_ACTION
-                    else -> TargetAutostartStatus.UNKNOWN
-                }
-                val detail = when (status) {
-                    TargetAutostartStatus.ALLOWED ->
-                        "系统自启动已允许；这不代表 FCM 已连接或消息已送达"
-                    TargetAutostartStatus.NEEDS_USER_ACTION ->
-                        "系统自启动未允许；请在系统页面手动设置"
-                    else -> "系统没有返回唯一、完整且身份匹配的自启动状态"
-                }
-                finishTargetAttempt(packageName, status, detail, parsed)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                finishTargetAttempt(
-                    packageName,
-                    TargetAutostartStatus.UNKNOWN,
-                    "自启动读取失败：${error.message?.take(120) ?: error.javaClass.simpleName}",
-                )
-            }
-        }
-        targetReadGate.releaseOnCompletion(job)
-    }
-
-    private fun finishTargetAttempt(
-        packageName: String,
-        status: TargetAutostartStatus,
-        detail: String,
-        evidence: io.github.originosfcmguardian.core.GuardianAutostartRead? = null,
-    ) {
-        _uiState.update { current ->
-            current.copy(
-                selectedTargets = current.selectedTargets.map { target ->
-                    if (target.identity.packageName == packageName) {
-                        target.copy(status = status, evidence = evidence, detail = detail)
-                    } else {
-                        target
-                    }
-                },
-                targetReadAttemptCount = current.targetReadAttemptCount + 1,
-            )
-        }
+        refreshRecoveryCounts()
     }
 
     private fun updateTarget(

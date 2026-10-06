@@ -1,8 +1,7 @@
 package io.github.originosfcmguardian.protection
 
-import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.core.DetectionReport
-import io.github.originosfcmguardian.core.GuardianAutostartRead
+import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 
 enum class ProtectionCheckReason {
     MANUAL,
@@ -22,6 +21,9 @@ enum class ProtectionCheckStatus {
 }
 
 enum class TargetCheckStatus {
+    /** Current package identity only; conveys no OEM permission state. */
+    IDENTITY_MATCH,
+    // Retained solely to decode historical daily_protection_report_v1 records.
     ALLOWED,
     NEEDS_USER_ACTION,
     UNKNOWN,
@@ -35,7 +37,7 @@ data class TargetCheckResult(
     val status: TargetCheckStatus,
 ) {
     init {
-        require(packageName.length <= 255)
+        require(isSafeAndroidPackageName(packageName))
     }
 }
 
@@ -47,21 +49,29 @@ data class DailyProtectionReport(
     val summary: String,
     val targets: List<TargetCheckResult> = emptyList(),
 ) {
+    /** Immutable history remains readable but must not supply current permission conclusions. */
+    val containsRetiredAutostartEvidence: Boolean
+        get() = summary.contains("自启动") || targets.any {
+            it.status in setOf(
+                TargetCheckStatus.ALLOWED,
+                TargetCheckStatus.NEEDS_USER_ACTION,
+                TargetCheckStatus.UNKNOWN,
+                TargetCheckStatus.UNAVAILABLE,
+            )
+        }
+
     init {
         require(checkedAtEpochMillis >= 0)
         require(fingerprint.length <= 512)
         require(summary.length <= MAX_SUMMARY_CHARS)
-        require(targets.size <= MAX_TARGETS)
     }
 
     companion object {
         const val MAX_SUMMARY_CHARS = 800
-        const val MAX_TARGETS = 10
     }
 }
 
 internal interface ProtectionReadPort : AutoCloseable {
     suspend fun detectCore(): DetectionReport
-    suspend fun readTarget(identity: SelectedTargetIdentity): GuardianAutostartRead
     override fun close()
 }
