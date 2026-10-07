@@ -118,6 +118,22 @@ class GmsConnectionObservationTest {
         assertEquals(GmsConnectionObservation.Unknown(7, GmsUnknown.MALFORMED_RESPONSE),
             GmsObservationCodec.decode(current.replace("|600|0", "|600|10"), 7))
     }
+    @Test fun `optional duration uses v3 without upgrading old v2 evidence or safety bindings`() {
+        val base = sample(parse(header())).copy(gcmService = GcmServiceSource(
+            GcmConnectionState.REPORTED_CONNECTED, SourceCompleteness.COMPLETE, 1100, 600, 0))
+        val value = base.copy(gcmService = base.gcmService.copy(connectedDurationMillis = 3_287_000))
+        val wire = GmsObservationCodec.encode(value)
+        assertTrue(wire.startsWith("3|7|S|"))
+        assertEquals(value, GmsObservationCodec.decode(wire, 7))
+        assertEquals(gmsHeartbeatBindingDigest(base), gmsHeartbeatBindingDigest(value))
+        assertEquals(GmsHeartbeatPolicy.rejection(base, 600), GmsHeartbeatPolicy.rejection(value, 600))
+        val old = wire.substringBeforeLast('|').replaceFirst("3|", "2|")
+        assertEquals(base, GmsObservationCodec.decode(old, 7))
+        for (bad in listOf(wire.substringBeforeLast('|') + "|-1", wire.substringBeforeLast('|') + "|overflow",
+            wire.replace("|REPORTED_CONNECTED|", "|REPORTED_DISCONNECTED|"))) {
+            assertEquals(GmsConnectionObservation.Unknown(7, GmsUnknown.MALFORMED_RESPONSE), GmsObservationCodec.decode(bad, 7))
+        }
+    }
 
     @Test fun `sample freshness is bounded and cannot survive backward elapsed clock`() {
         val observation = sample(parse(header()))

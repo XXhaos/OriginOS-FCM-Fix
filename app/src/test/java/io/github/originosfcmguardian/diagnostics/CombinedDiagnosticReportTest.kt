@@ -186,7 +186,7 @@ class CombinedDiagnosticReportTest {
         val report = buildCombinedDiagnosticReport(state, environment(), 9_000)
         val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
 
-        assertTrue(json.contains("guardian.combined-diagnostic.v7"))
+        assertTrue(json.contains("guardian.combined-diagnostic.v8"))
         assertFalse(json.contains("guardianAutostartStatus"))
         assertFalse(json.contains("autostartStatus"))
         assertFalse(json.contains("ALLOWED"))

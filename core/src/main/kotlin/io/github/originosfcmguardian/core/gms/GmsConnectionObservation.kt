@@ -11,6 +11,8 @@ enum class GcmConnectionState { REPORTED_CONNECTED, REPORTED_DISCONNECTED, UNKNO
 data class GcmServiceSource(
     val state: GcmConnectionState, val completeness: SourceCompleteness,
     val observedAtMillis: Long? = null, val elapsedRealtimeMillis: Long? = null, val userId: Int? = null,
+    /** GMS Diagnostics' current-session duration at sampling, not a monotonic start timestamp. */
+    val connectedDurationMillis: Long? = null,
 ) {
     init {
         require((observedAtMillis == null) == (elapsedRealtimeMillis == null))
@@ -19,6 +21,8 @@ data class GcmServiceSource(
         require(elapsedRealtimeMillis == null || elapsedRealtimeMillis >= 0)
         require(userId == null || userId == 0)
         require(state == GcmConnectionState.UNKNOWN || completeness == SourceCompleteness.COMPLETE)
+        require(connectedDurationMillis == null || connectedDurationMillis >= 0 &&
+            state == GcmConnectionState.REPORTED_CONNECTED && completeness == SourceCompleteness.COMPLETE)
     }
     companion object {
         fun unavailable() = GcmServiceSource(GcmConnectionState.UNKNOWN, SourceCompleteness.UNAVAILABLE)
@@ -133,22 +137,23 @@ object GmsObservationCodec {
     const val BUNDLE_KEY = "gms_connection_observation_v1"
     fun encode(value: GmsConnectionObservation): String = when (value) {
         is GmsConnectionObservation.Unknown -> "2|${value.requestId}|U|${value.reason}"
-        is GmsConnectionObservation.Sample -> listOf("2", value.requestId, "S", value.uid, value.versionCode,
+        is GmsConnectionObservation.Sample -> (listOf(if (value.gcmService.connectedDurationMillis == null) "2" else "3", value.requestId, "S", value.uid, value.versionCode,
             value.firstInstallTime, value.lastUpdateTime, value.signerSha256, value.bootId, value.observedAtMillis,
             value.elapsedRealtimeMillis, value.tcp.completeness, flag(value.tcp.matched), value.tcp6.completeness,
             flag(value.tcp6.matched), flag(value.receiverInspectionComplete), value.receivers.joinToString(";") {
                 "${it.name},${flag(it.exported)},${flag(it.enabled)},${it.permission ?: ""}"
             }, value.gcmService.state, value.gcmService.completeness, value.gcmService.observedAtMillis ?: "",
-            value.gcmService.elapsedRealtimeMillis ?: "", value.gcmService.userId ?: "").joinToString("|")
+            value.gcmService.elapsedRealtimeMillis ?: "", value.gcmService.userId ?: "") +
+            if (value.gcmService.connectedDurationMillis == null) emptyList() else listOf(value.gcmService.connectedDurationMillis)).joinToString("|")
     }
     fun decode(raw: String?, expectedRequestId: Long): GmsConnectionObservation = runCatching {
         require(expectedRequestId > 0 && raw != null && raw.length <= 12_000)
         val f = raw.split('|')
-        require(f.size >= 4 && f[0] in setOf("1", "2") && f[1] == expectedRequestId.toString())
+        require(f.size >= 4 && f[0] in setOf("1", "2", "3") && f[1] == expectedRequestId.toString())
         if (f[2] == "U") {
             require(f.size == 4); GmsConnectionObservation.Unknown(expectedRequestId, GmsUnknown.valueOf(f[3]))
         } else {
-            require(f.size == (if (f[0] == "1") 17 else 22) && f[2] == "S")
+            require(f.size == (when (f[0]) { "1" -> 17; "2" -> 22; else -> 23 }) && f[2] == "S")
             val receivers = if (f[16].isEmpty()) emptyList() else f[16].split(';').map {
                 val r = it.split(','); require(r.size == 4)
                 ReconnectReceiver(r[0], boolean(r[1]), boolean(r[2]), r[3].ifEmpty { null })
@@ -158,7 +163,8 @@ object GmsObservationCodec {
                 SocketSource(SourceCompleteness.valueOf(f[13]), boolean(f[14])), boolean(f[15]), receivers,
                 if (f[0] == "1") GcmServiceSource.unavailable() else GcmServiceSource(
                     GcmConnectionState.valueOf(f[17]), SourceCompleteness.valueOf(f[18]),
-                    f[19].ifEmpty { null }?.toLong(), f[20].ifEmpty { null }?.toLong(), f[21].ifEmpty { null }?.toInt()))
+                    f[19].ifEmpty { null }?.toLong(), f[20].ifEmpty { null }?.toLong(), f[21].ifEmpty { null }?.toInt(),
+                    if (f[0] == "3") f[22].toLong() else null))
         }
     }.getOrElse { GmsConnectionObservation.Unknown(expectedRequestId, GmsUnknown.MALFORMED_RESPONSE) }
     private fun flag(value: Boolean) = if (value) "1" else "0"

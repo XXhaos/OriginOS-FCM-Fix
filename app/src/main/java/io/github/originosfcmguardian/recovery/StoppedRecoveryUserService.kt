@@ -31,7 +31,7 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
     private val running = AtomicReference<Process?>()
     private val gate = Any()
     private val executor = recoveryWorker("guardian-recovery-server")
-    private val callbacks = recoveryWorker("guardian-recovery-callback")
+    private val callbacks = recoveryCallbackWorker("guardian-recovery-callback")
     private val reader = StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort, 4_000)
     private val expiry = ShellServiceExpiry(Os.getuid(), {
         cancel(); executor.shutdownNow(); callbacks.shutdownNow(); reader.close(); System.exit(0)
@@ -45,10 +45,10 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
         Unit
     }
 
-    override fun observe(requestId: Long, journal: IStoppedRecoveryJournal?): String = execute(requestId, journal) { read, _, _ ->
+    override fun observe(requestId: Long, journal: IStoppedRecoveryJournal?): String = execute(requestId, journal) { read, _, _, _ ->
         StoppedObservationCodec.encode(read(requestId))
     }
-    override fun observeTarget(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?): String = execute(requestId, journal) { _, readTarget, _ ->
+    override fun observeTarget(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?): String = execute(requestId, journal) { _, readTarget, _, _ ->
         StoppedObservationCodec.encode(readTarget(requestId, decodeRecoveryTarget(expectedIdentity, true)))
     }
     override fun recover(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?): String =
@@ -57,10 +57,10 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
     override fun recoverTarget(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?): String =
         recoverOperation(requestId, expectedIdentity, journal, true)
 
-    private fun recoverOperation(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?, targetAware: Boolean): String = execute(requestId, journal) { read, readTarget, active ->
+    private fun recoverOperation(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?, targetAware: Boolean): String = execute(requestId, journal) { read, readTarget, active, localActive ->
         val identity = decodeRecoveryTarget(expectedIdentity, targetAware)
         val engine = StoppedRecoveryEngine({ id -> if (targetAware) readTarget(id, identity) else read(id) },
-            { id -> callback(active) { requireNotNull(journal).claim(id) } }, active) {
+            { id -> callback(localActive) { requireNotNull(journal).claim(id) } }, active, unstop = {
             // Linearizes process creation with service cancellation/death. No arbitrary argv exposed.
             val process = synchronized(gate) {
                 check(active())
@@ -70,19 +70,19 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
             try {
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
                 while (!process.waitFor(50, TimeUnit.MILLISECONDS)) {
-                    check(active() && System.nanoTime() < deadline)
+                    check(localActive() && System.nanoTime() < deadline)
                 }
                 check(active())
                 process.exitValue()
             } finally {
                 synchronized(gate) { if (process.isAlive) process.destroyForcibly(); running.compareAndSet(process, null) }
             }
-        }
-        RecoveryResultCodec.encode(engine.recover(requestId, identity))
+        })
+        RecoveryResultCodec.encode(engine.recover(requestId, identity) { readRecoveryCapability(localActive, active) })
     }
 
     private fun execute(id: Long, journal: IStoppedRecoveryJournal?, body: ((Long) -> StoppedTargetObservation,
-        (Long, SelectedTargetIdentity) -> StoppedTargetObservation, () -> Boolean) -> String): String {
+        (Long, SelectedTargetIdentity) -> StoppedTargetObservation, () -> Boolean, () -> Boolean) -> String): String {
         val caller = Binder.getCallingUid()
         val callback = requireNotNull(journal)
         val binder = callback.asBinder()
@@ -102,7 +102,7 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
                 val sessionActive = { active() && callback(active) { callback.isSessionActive } }
                 body({ request -> reader.read(request) { !active() } },
                     { request, expected -> readTargetRecoveryObservation(reader, request, expected, active, sessionActive) },
-                    sessionActive)
+                    sessionActive, active)
             }
             while (active()) {
                 try { return future.get(50, TimeUnit.MILLISECONDS) }
@@ -119,13 +119,8 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
         }
     }
 
-    private fun <T> callback(active: () -> Boolean, block: () -> T): T {
-        check(active())
-        val future = callbacks.submit<T>(block)
-        return try { future.get(2_000, TimeUnit.MILLISECONDS).also { check(active()) } }
-        catch (failure: Throwable) { cancel(); throw failure }
-        finally { future.cancel(true) }
-    }
+    private fun <T> callback(localActive: () -> Boolean, block: () -> T): T =
+        boundedRecoveryCallback(callbacks, localActive, ::cancel, block = block)
     private companion object {
         const val GUARDIAN_PACKAGE = "io.github.originosfcmguardian"
     }

@@ -18,7 +18,7 @@ internal fun DailyProtectionDetails(
     onShowTargetSelection: () -> Unit,
 ) {
     Text(
-        "这是上次巡检的历史快照，不代表当前状态或推送已修复。不检测自启动权限。",
+        "上次巡检快照，不代表当前状态或修复结果。不检测自启动权限。",
         style = MaterialTheme.typography.bodySmall,
     )
     protectionTargetIssues(report, selectedTargets, selectionReady).forEach { issue ->
@@ -35,7 +35,7 @@ internal fun DailyProtectionDetails(
                     enabled = !busy,
                 ) { Text("检查应用选择") }
                 ProtectionTargetAction.NONE -> Text(
-                    "关注应用列表尚不可用；暂不提供该记录的操作入口",
+                    "应用选择暂不可用，无法操作这条记录。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

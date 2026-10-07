@@ -69,6 +69,14 @@ foreach ($variant in @('debug', 'release')) {
             throw 'Debug heartbeat continuity driver must retain its DUMP boundary and fixed action.'
         }
     } elseif ($null -ne $heartbeatDriver) { throw 'Release must not contain the heartbeat acceptance driver.' }
+    $lifecycleDriver = $manifest.SelectSingleNode('/manifest/application/receiver[@android:name="io.github.originosfcmguardian.autoprotection.DebugProtectionLifecycleReceiver"]', $namespaces)
+    if ($variant -eq 'debug') {
+        if ($null -eq $lifecycleDriver -or $lifecycleDriver.GetAttribute('permission', $androidNamespace) -ne 'android.permission.DUMP' -or
+            $lifecycleDriver.GetAttribute('exported', $androidNamespace) -ne 'true' -or
+            $lifecycleDriver.SelectNodes('intent-filter/action[@android:name="io.github.originosfcmguardian.DEBUG_STOP_PROTECTION_SERVICE"]', $namespaces).Count -ne 1) {
+            throw 'Debug lifecycle driver must retain DUMP and one fixed action.'
+        }
+    } elseif ($null -ne $lifecycleDriver) { throw 'Release must not contain the lifecycle acceptance driver.' }
     $apkName = if ($variant -eq 'debug') { 'app-debug.apk' } else { 'app-release-unsigned.apk' }
     $apkPath = Join-Path $Repository "app/build/outputs/apk/$variant/$apkName"
     $archive = [System.IO.Compression.ZipFile]::OpenRead($apkPath)
@@ -86,7 +94,7 @@ foreach ($variant in @('debug', 'release')) {
     if ($defined -match 'priv\.kit|io\.github\.originosfcmguardian\.(activation|privilegebridge)|AppOwnedRecovery|PrivKitRecovery') {
         throw "$variant contains cancelled internal DEX classes."
     }
-    if ($variant -eq 'release' -and $defined -match 'DebugHeartbeatContinuityReceiver') {
+    if ($variant -eq 'release' -and $defined -match 'DebugHeartbeatContinuityReceiver|DebugProtectionLifecycleReceiver') {
         throw 'Release DEX must not contain the heartbeat acceptance driver.'
     }
     if ($defined -match 'io\.github\.originosfcmguardian\.(doze|gmsconfig|data\.journal)|io\.github\.originosfcmguardian\.core\.(doze|journal)|ReadOnlyDetector|RepairPlanner') {
@@ -99,6 +107,7 @@ foreach ($variant in @('debug', 'release')) {
         preservedPrivateProtectionAndTile = 'PASS'
         tileLongPressMainActivity = 'PASS'
         heartbeatDriverDebugOnlyDumpBoundary = 'PASS'
+        lifecycleDriverDebugOnlyDumpBoundary = 'PASS'
         noStandaloneGmsProtectionOrNative = 'PASS'
         apkSha256 = (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }

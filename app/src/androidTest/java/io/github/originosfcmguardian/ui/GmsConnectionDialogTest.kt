@@ -4,6 +4,7 @@ import android.os.SystemClock
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -25,7 +26,8 @@ class GmsConnectionDialogTest {
         var reads = 0
         compose.setContent { MaterialTheme { GmsConnectionDialog(GmsConnectionUiState(visible = true), { reads++ }, {}, {}) } }
         compose.runOnIdle { assertEquals(0, reads) }
-        compose.onNodeWithText("尚未取样；需要已授权的 Shizuku shell。").assertExists()
+        compose.onNodeWithText("FCM 连接").assertExists()
+        assertStatus("FCM 尚未读取")
         compose.onNodeWithText("读取一次").performClick()
         compose.runOnIdle { assertEquals(1, reads) }
     }
@@ -43,23 +45,22 @@ class GmsConnectionDialogTest {
         compose.onNodeWithText("触发一次心跳").assertIsNotEnabled()
         compose.onNodeWithText("取消并关闭").performClick()
         compose.runOnIdle { assertEquals(0, reads); assertEquals(1, dismisses) }
-        compose.onNodeWithText("GMS 连接").assertDoesNotExist()
+        compose.onNodeWithText("FCM 连接").assertDoesNotExist()
     }
 
-    @Test fun samplePartialAndUnknownShowCoverageWithoutDeliveryClaim() {
+    @Test fun samplePartialAndUnknownKeepStatusCompactWithoutExposingDebugData() {
         val state = mutableStateOf(GmsConnectionUiState(visible = true, observation = sample(),
             networkBackground = "合成网络背景", networkTrackingAvailable = true))
         compose.setContent { MaterialTheme { GmsConnectionDialog(state.value, {}, {}, {}) } }
-        compose.onNodeWithText("本次观察到匹配 TCP 迹象").assertExists()
-        compose.onNodeWithText("shell /proc/net/tcp：COMPLETE；tcp6：COMPLETE").assertExists()
-        compose.onNodeWithText("未查询到 manifest 接收者；不排除动态注册。").assertExists()
-        compose.onNodeWithText("接收者元数据不证明 shell 可分发，也不证明重连有效。").assertExists()
+        assertStatus("FCM 状态未知，取样更新于")
+        compose.onNodeWithText("状态仅供参考，不代表消息送达。").assertExists()
+        assertDebugDataHidden()
         compose.runOnIdle { state.value = state.value.copy(observation = sample(partial = true)) }
-        compose.onNodeWithText("本次来源覆盖不足，无法判断").assertExists()
-        compose.onNodeWithText("shell /proc/net/tcp：PARTIAL；tcp6：DENIED").assertExists()
-        compose.onNodeWithText("GCM_RECONNECT manifest 接收者查询不可用。").assertExists()
+        assertStatus("FCM 状态未知，取样更新于")
+        assertDebugDataHidden()
         compose.runOnIdle { state.value = state.value.copy(observation = GmsConnectionObservation.Unknown(1, GmsUnknown.CAPABILITY_UNAVAILABLE)) }
-        compose.onNodeWithText("无法判断：CAPABILITY_UNAVAILABLE").assertExists()
+        assertStatus("FCM 当前状态无法读取")
+        assertDebugDataHidden()
     }
 
     @Test fun expiredAndNetworkChangedSamplesAreHistorical() {
@@ -69,9 +70,11 @@ class GmsConnectionDialogTest {
         val state = mutableStateOf(GmsConnectionUiState(visible = true,
             observation = sample(elapsed = now - 31_000), networkTrackingAvailable = true))
         compose.setContent { MaterialTheme { GmsConnectionDialog(state.value, {}, {}, {}) } }
-        compose.onNodeWithText("历史样本已超过30秒；当前连接未知").assertExists()
+        assertStatus("FCM 状态已过期，取样更新于")
         compose.runOnIdle { state.value = state.value.copy(observation = sample(), networkChanged = true) }
-        compose.onNodeWithText("网络背景已变化；该历史样本无法判断当前连接").assertExists()
+        assertStatus("FCM 网络已变化，取样更新于")
+        compose.runOnIdle { state.value = state.value.copy(networkChanged = false, networkTrackingAvailable = false) }
+        assertStatus("FCM 网络待确认，取样更新于")
     }
 
     @Test fun onlyExplicitHeartbeatClickRequestsAndRecompositionNeverReplays() {
@@ -83,6 +86,17 @@ class GmsConnectionDialogTest {
         compose.runOnIdle { state.value = state.value.copy(heartbeatStatus = GmsHeartbeatStatus.REQUESTED) }
         compose.onNodeWithText("已请求心跳；不代表连接已修复或通知送达。").assertExists()
         compose.runOnIdle { assertEquals(1, heartbeats) }
+    }
+
+    private fun assertStatus(description: String) {
+        compose.onNode(hasContentDescription(description, substring = true)).assertExists()
+    }
+
+    private fun assertDebugDataHidden() {
+        listOf("TCP", "/proc/", "tcp6", "manifest", "GCM_RECONNECT", "COMPLETE",
+            "PARTIAL", "DENIED", "CAPABILITY_UNAVAILABLE", "合成网络背景").forEach {
+            compose.onNodeWithText(it, substring = true).assertDoesNotExist()
+        }
     }
 
     private fun sample(partial: Boolean = false, elapsed: Long = SystemClock.elapsedRealtime()) = GmsConnectionObservation.Sample(

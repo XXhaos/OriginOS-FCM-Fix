@@ -35,12 +35,17 @@ class StoppedRecoveryPolicyTest {
     }
 
     @Test fun unknownBuildAndUserBlockEvenIfFlagIsTrue() {
-        for (fingerprint in listOf(null, "new firmware")) {
+        for (fingerprint in listOf(null, "", "new firmware", "bad|wire")) {
             assertBlocked(RecoveryBlockReason.UNSUPPORTED_BUILD, valid.copy(fingerprint = fingerprint))
         }
         for (user in listOf(null, 10, 666, 999)) {
             assertBlocked(RecoveryBlockReason.WRONG_USER, valid.copy(currentUser = user))
         }
+    }
+
+    @Test fun anotherRuntimeFirmwareIsNotADeviceAllowlistFailure() {
+        assertEquals(StoppedRecoveryPreflight.ReadyForServerRecheck,
+            preflightStoppedRecovery(request, valid.copy(fingerprint = "vivo/other/device:16/build/id:user/release-keys")))
     }
 
     @Test fun unprivilegedRootAndUnknownServicesNeverPassShellGate() {
@@ -62,6 +67,15 @@ class StoppedRecoveryPolicyTest {
         assertBlocked(RecoveryBlockReason.UID_OWNERSHIP_UNKNOWN, valid.copy(exclusiveUidOwner = null))
         assertBlocked(RecoveryBlockReason.UID_NOT_EXCLUSIVE, valid.copy(exclusiveUidOwner = false))
         assertBlocked(RecoveryBlockReason.STOPPED_UNKNOWN, valid.copy(stopped = null))
+    }
+
+    @Test fun onlyQualifiedFreshRecipientCanUseSharedOwnershipAndNullStillBlocks() {
+        assertEquals(StoppedRecoveryPreflight.ReadyForServerRecheck,
+            preflightStoppedRecovery(request, valid.copy(exclusiveUidOwner = false, qualifiedRecipient = true)))
+        assertEquals(StoppedRecoveryPreflight.NoWriteNeeded,
+            preflightStoppedRecovery(request, valid.copy(exclusiveUidOwner = false, qualifiedRecipient = true, stopped = false)))
+        assertBlocked(RecoveryBlockReason.UID_OWNERSHIP_UNKNOWN,
+            valid.copy(exclusiveUidOwner = null, qualifiedRecipient = true))
     }
 
     @Test fun invalidRequestAndUnverifiedTargetCannotProceed() {

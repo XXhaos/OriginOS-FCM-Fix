@@ -13,16 +13,23 @@ class FcmRecoveryRunnerTest {
         var state = GcmConnectionState.SERVICE_ABSENT
         var qualified = true
         var uid = 10208
+        var version = FcmRecoveryPolicy.VERSION
+        var signer = FcmRecoveryPolicy.SIGNER
+        var senderReads = 0
+        var loseSenderOnSecondRead = false
         override fun environment() = GmsProbeEnvironment(0, 2000, "12345678-1234-1234-1234-123456789abc")
         override fun gmsPackage() = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-            uid, FcmRecoveryPolicy.VERSION, 100, 900, FcmRecoveryPolicy.SIGNER)
+            uid, version, 100, 900, signer)
         override fun packagesForUid(uid: Int) = listOf(if (uid == 10333) "io.github.originosfcmguardian" else GMS_OBSERVATION_PACKAGE)
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(SourceCompleteness.COMPLETE, false)
         override fun gcmService(interrupted: () -> Boolean) = GcmServiceSource(state,
             if (state == GcmConnectionState.UNKNOWN) SourceCompleteness.MALFORMED else SourceCompleteness.COMPLETE)
         override fun reconnectReceivers() = GmsReceiverInspection(true, emptyList())
         override fun elapsedRealtime() = 100L
-        override fun recoverySenderQualified() = qualified
+        override fun recoverySenderQualified(): Boolean {
+            senderReads++
+            return qualified && !(loseSenderOnSecondRead && senderReads >= 2)
+        }
     }
     private class Child : Process() {
         private val out = ByteArrayInputStream(("Broadcasting: Intent { act=com.google.android.gcm.intent.SEND flg=0x400000 cmp=com.google.android.gms/.gcm.GcmSenderProxy }\nBroadcast completed: result=0\n").toByteArray())
@@ -96,10 +103,30 @@ class FcmRecoveryRunnerTest {
         assertNull(after.dispatch({ false }, { after.cancel(); false }, { error("no launch") }))
         assertTrue(after.entered()); assertTrue(after.cancelled())
     }
-    @Test fun `package flags require both stopped fields and complete exact current user block`() {
+    @Test fun `new GMS version requires fresh binding and two current sender capability checks`() {
+        val port = Port(); val oldBinding = binding(port); port.version++
+        var launches = 0
+        fun request(digest: String): FcmRecoveryResult {
+            val runner = FcmRecoveryRunner({ port }, { launches++; Child() })
+            return try { runner.request(1, 10333, digest, { true }, { false }) }
+            finally { runner.close() }
+        }
+        assertEquals(FcmRecoveryReason.IDENTITY_CHANGED, request(oldBinding).reason)
+        assertEquals(FcmRecoveryStatus.REQUESTED, request(binding(port)).status)
+        assertEquals(2, port.senderReads)
+        port.senderReads = 0; port.loseSenderOnSecondRead = true
+        assertEquals(FcmRecoveryReason.TARGET_UNQUALIFIED, request(binding(port)).reason)
+        assertEquals(1, launches)
+        port.signer = "a".repeat(64)
+        assertEquals(FcmRecoveryStatus.NOT_SENT, request(binding(port)).status)
+        assertEquals(1, launches)
+    }
+    @Test fun `package flags allow absent OEM extension but reject true or malformed extension`() {
         val text = "Packages:\n  Package [com.google.android.gms] (abcdef):\n    User 0: installed=true hidden=false suspended=false stopped=false vStopped=false enabled=1\n"
         assertTrue(FcmPackageStateReader.parse(text.toByteArray()))
-        listOf(text.replace("vStopped=false", ""), text.replace("vStopped=false", "vStopped=true"),
+        assertTrue(FcmPackageStateReader.parse(text.replace("vStopped=false", "").toByteArray()))
+        listOf(text.replace("vStopped=false", "vStopped=unknown"), text.replace("vStopped=false", "vStopped=true"),
+            text.replace("vStopped=false", "vStopped"), text.replace("vStopped=false", "vStopped="),
             text.replace("stopped=false", "stopped=true"), text.replace("User 0:", "User 10:"),
             text.replace("    User 0:", "  Package [other] (def):\n    User 0:"),
             text + "    User 0: installed=true hidden=false suspended=false stopped=false vStopped=false enabled=1\n",

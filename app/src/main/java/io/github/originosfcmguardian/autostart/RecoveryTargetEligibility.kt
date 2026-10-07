@@ -25,8 +25,10 @@ internal fun qualifiedRecoveryLauncher(expectedPackage: String, expectedUid: Int
 
 internal data class RecoveryTargetQualifications(
     val installed: Boolean?, val enabled: Boolean?, val system: Boolean?,
-    val updatedSystem: Boolean?, val persistent: Boolean?, val enabledExportedLauncher: Boolean?,
+    val updatedSystem: Boolean?, val persistent: Boolean?,
+    /** Legacy observation only. Clearing a stopped flag does not launch an activity. */
+    val enabledExportedLauncher: Boolean? = null,
 ) {
     val eligible: Boolean get() = installed == true && enabled == true && system == false &&
-        updatedSystem == false && persistent == false && enabledExportedLauncher == true
+        updatedSystem == false && persistent == false
 }

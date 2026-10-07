@@ -52,8 +52,18 @@ class ProtectionConsentStoreTest {
         assertThrows(IllegalArgumentException::class.java) {
             store.grantExplicit(identity.copy(packageName = "org.telegram.messenger.web"), VERIFIED_AUTOSTART_FINGERPRINT, clock(0))
         }
-        assertThrows(IllegalArgumentException::class.java) { store.grantExplicit(identity, "unsupported", clock(0)) }
+        assertThrows(IllegalArgumentException::class.java) { store.grantExplicit(identity, "invalid|fingerprint", clock(0)) }
         assertEquals(token, store.readDesired())
+    }
+
+    @Test fun `other runtime firmware preserves consent through durable roundtrip`() {
+        val storage = Storage()
+        val store = ProtectionConsentStore(storage)
+        val firmware = "other/device/product:17/BUILD/123:user/release-keys"
+        val token = store.grantExplicit(identity, firmware, clock(0))
+        assertEquals(firmware, token.fingerprint)
+        assertEquals(token, ProtectionConsentStore(storage).readDesired())
+        assertTrue(ProtectionConsentStore(storage).verifyAuthorized(token))
     }
 
     @Test fun `global stop after process loss durably invalidates consent`() {

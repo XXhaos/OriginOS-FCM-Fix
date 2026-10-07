@@ -5,7 +5,7 @@ import android.util.AtomicFile
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.TargetSelectionCodec
 import io.github.originosfcmguardian.autostart.TargetSelectionDecodeResult
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
 import io.github.originosfcmguardian.privileged.StoppedTargetObservation
 import java.io.ByteArrayInputStream
@@ -75,7 +75,7 @@ internal class StoppedRecoveryJournal(private val storage: RecoveryJournalStorag
         consent: AutomaticRecoveryConsent?): StoppedRecoveryRecord {
         val state = read()
         check(state.latest?.requiresReconcile != true) { "先只读复检上次待确认操作" }
-        check(baseline.identity == identity && baseline.stopped && baseline.exclusiveUidOwner)
+        check(baseline.identity == identity && baseline.stopped && baseline.hasVerifiedPackageUid)
         check(if (consent?.version == 4 || identity.packageName != "org.telegram.messenger") baseline.qualifiedRecipient else true)
         check(consent == null || consent.version == 4 || identity.packageName == "org.telegram.messenger")
         val id = Math.addExact(maxOf(state.claimedHighWater, state.latest?.requestId ?: 0), 1)
@@ -156,7 +156,7 @@ internal object RecoveryJournalCodec {
                 require(r.requestId > 0 && r.createdAtMillis > 0 && r.baselineAtMillis > 0)
                 require(r.identity.signerSha256.size <= 16)
                 require(if (schema < 3) r.identity.packageName == "org.telegram.messenger" else isRecoveryTargetPackage(r.identity.packageName))
-                require(r.fingerprint == VERIFIED_AUTOSTART_FINGERPRINT && r.currentUser == 0 && r.baselineStopped && r.acknowledgedRuntimeRisk)
+                require(validRuntimeFingerprint(r.fingerprint) && r.currentUser == 0 && r.baselineStopped && r.acknowledgedRuntimeRisk)
                 when (r.source) {
                     StoppedRecoverySource.MANUAL -> require(r.confirmedManualAction && r.consentId == null && r.consentedAtMillis == null && r.consentVersion == null)
                     StoppedRecoverySource.AUTOMATIC -> {

@@ -15,7 +15,7 @@ import android.provider.Settings
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.TargetPackageProbe
 import io.github.originosfcmguardian.autostart.TargetSelectionStore
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.recovery.AndroidRecoveryJournal
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -124,6 +124,22 @@ internal class AutomaticProtectionGrant(
     var reconciliationRefresh: ((Boolean) -> Unit)? = null
 }
 
+/** Unexpected host loss retires every live capability without modifying persistent intent. */
+internal fun interruptAutomaticProtectionGrant(current: AutomaticProtectionGrant,
+    gate: AutomaticSessionGate, previous: AutomaticProtectionState, detail: String): AutomaticProtectionState {
+    current.writes.block()
+    current.live.set(false)
+    gate.revoke(current.id)
+    return previous.copy(enabled = false, busy = false, waitingForPrivilege = false,
+        waitingForReconciliation = false, detail = detail,
+        targets = previous.targets.map { it.copy(enabled = false, busy = false,
+            waitingForPrivilege = false, detail = detail) })
+}
+
+/** A tile observation cannot cross an intervening OFF, pause or replacement operation. */
+internal fun recoveryRevisionMatches(expected: Long?, current: Long): Boolean =
+    expected == null || expected == current
+
 /** Called under the runtime lock: an old removal must never retire a replacement owner. */
 internal fun finishAutomaticIdleRetirement(expectedRevision: Long, currentRevision: Long,
     hasSession: Boolean, retire: () -> Unit): Boolean {
@@ -168,7 +184,7 @@ object AutomaticProtectionRuntime {
         val app = context.applicationContext
         synchronized(this) {
             if (pendingStart != null || mutable.value.busy || mutable.value.revocationSaveFailed) return false
-            if (Build.FINGERPRINT != VERIFIED_AUTOSTART_FINGERPRINT ||
+            if (!validRuntimeFingerprint(Build.FINGERPRINT) ||
                 android.os.Process.myUid() / 100_000 != 0) {
                 mutable.value = mutable.value.copy(detail = "未添加该应用：当前系统版本或用户不受支持")
                 return false
@@ -327,7 +343,8 @@ object AutomaticProtectionRuntime {
             app.startForegroundService(Intent(app, AutomaticProtectionService::class.java)
                 .setAction(AutomaticProtectionService.ACTION_START)
                 .putExtra(AutomaticProtectionService.EXTRA_SESSION, next.id))
-        } catch (_: RuntimeException) {
+        } catch (failure: RuntimeException) {
+            ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RESTORE_LAUNCH_FAILED, failure)
             pause(next.id, "保护不可用：系统未允许前台服务启动，请在应用内重新确认")
             return
         }
@@ -362,7 +379,7 @@ object AutomaticProtectionRuntime {
                     val expected = authority.readSnapshot()
                     precommitSnapshot = expected
                     check(expected?.storageBlocked != true)
-                    check(Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT && android.os.Process.myUid() / 100_000 == 0)
+                    check(validRuntimeFingerprint(Build.FINGERPRINT) && android.os.Process.myUid() / 100_000 == 0)
                     check(app.getSystemService(UserManager::class.java).isUserUnlocked)
                     // Unknown journal or selection cannot be acknowledged by the master switch.
                     AndroidRecoveryJournal.open(app).load()
@@ -436,7 +453,8 @@ object AutomaticProtectionRuntime {
         return true
     }
 
-    fun stop(context: Context) {
+    fun stop(context: Context, reason: ProtectionLifecycleReason = ProtectionLifecycleReason.HOME_MASTER_OFF) {
+        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.EXPLICIT_MASTER_OFF, reason)
         io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.masterOff()
         val app = context.applicationContext
         val cancel = synchronized(this) {
@@ -507,15 +525,17 @@ object AutomaticProtectionRuntime {
     }
 
     /** Allowed boot/package-replaced, foreground or validated tile-listening trigger; never Binder callbacks. */
+    @Synchronized internal fun captureRecoveryRevision(): Long = revision
+
     internal fun launchSavedFromTrigger(context: Context, mayLaunch: () -> Boolean = { true },
-        finished: () -> Unit = {}) {
+        finished: () -> Unit = {}, expectedRevision: Long? = null) {
         val app = context.applicationContext
         synchronized(this) {
-            if (grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) {
+            if (!recoveryRevisionMatches(expectedRevision, revision) || grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) {
                 finished()
                 return
             }
-            val expectedRevision = revision
+            val launchRevision = revision
             authorityExecutor.execute {
                 val eligible = runCatching {
                     app.getSystemService(UserManager::class.java).isUserUnlocked &&
@@ -525,14 +545,16 @@ object AutomaticProtectionRuntime {
                     try {
                         if (!eligible || !mayLaunch()) return@post
                         synchronized(this) {
-                            if (revision != expectedRevision || grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) return@synchronized
+                            if (revision != launchRevision || !recoveryRevisionMatches(expectedRevision, revision) || grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) return@synchronized
                             ensureChannel(app)
+                            ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.RESTORE_START_REQUESTED)
                             app.startForegroundService(Intent(app, AutomaticProtectionService::class.java)
                                 .setAction(AutomaticProtectionService.ACTION_RESTORE))
                         }
-                    } catch (_: RuntimeException) {
+                    } catch (failure: RuntimeException) {
+                        ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RESTORE_LAUNCH_FAILED, failure)
                         synchronized(this) {
-                            if (revision == expectedRevision) mutable.value = mutable.value.copy(enabled = false,
+                            if (revision == launchRevision) mutable.value = mutable.value.copy(enabled = false,
                                 busy = false, savedAuthorization = true, waitingForPrivilege = false, waitingForReconciliation = false,
                                 detail = "系统未允许启动恢复，请打开 Guardian 后重试")
                         }
@@ -582,6 +604,7 @@ object AutomaticProtectionRuntime {
                             }
                         }
                     } else {
+                        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.RESTORE_REJECTED)
                         // Observed user stop/crash/unsafe state becomes durable, not an ephemeral UI flag.
                         val suspend = leases.isNotEmpty() && probe.status !in setOf(
                             StartupEligibilityStatus.OFF, StartupEligibilityStatus.NEEDS_EXPLICIT_CONSENT,
@@ -604,7 +627,8 @@ object AutomaticProtectionRuntime {
                             }
                         }
                     }
-                } catch (_: Exception) {
+                } catch (failure: Exception) {
+                    ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RESTORE_REJECTED, failure)
                     val saved = if (current()) runCatching {
                         authorityStore(app).suspendLease(null, ProtectionSuspensionReason.SERVICE_UNAVAILABLE)
                     }.getOrDefault(false) else true
@@ -803,6 +827,7 @@ object AutomaticProtectionRuntime {
         val pausedDetail = "全部自动保护已暂停：$detail"
         val cancel = synchronized(this) {
             val current = grant?.takeIf { it.id == id } ?: return
+            ProtectionLifecycleDiagnostics.recordPause(detail)
             restoreBlocked = true
             current.writes.block()
             current.live.set(false)
@@ -826,8 +851,26 @@ object AutomaticProtectionRuntime {
         cancel?.invoke()
     }
 
+    /** A later authorized lifecycle event must re-probe the unchanged durable root before recovery. */
+    internal fun interrupt(id: String) {
+        val interrupted = synchronized(this) {
+            val current = grant?.takeIf { it.id == id } ?: return
+            mutable.value = interruptAutomaticProtectionGrant(current, gate, mutable.value,
+                "保护服务意外中断，开启意图与应用选择已保留；等待下次启动事件完整核验，当前未执行保护")
+            grant = null
+            ++revision to current.cancel
+        }
+        try {
+            interrupted.second?.invoke()
+        } finally {
+            retireServiceWhenIdle(interrupted.first)
+        }
+    }
+
     internal fun stopSession(context: Context, id: String) {
-        synchronized(this) { if (pendingStart == id || grant?.id == id) stop(context) }
+        synchronized(this) {
+            if (pendingStart == id || grant?.id == id) stop(context, ProtectionLifecycleReason.NOTIFICATION_STOP)
+        }
     }
 
     /** Stop old RPC authority synchronously; callback runs only after durable exact-target removal. */

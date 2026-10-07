@@ -26,13 +26,15 @@ internal object FcmPackageStateReader {
             }
             if (Regex("[ \\t]+User 0:.*").matches(line)) {
                 if (packages != 1 || ++user != 1) return false
-                val fields = line.trim().removePrefix("User 0: ").split(Regex("\\s+"))
-                    .filter { '=' in it }.map { it.substringBefore('=') to it.substringAfter('=') }
+                val tokens = line.trim().removePrefix("User 0: ").split(Regex("\\s+"))
+                // Optional OEM extension: absence is portable; an unread/malformed present value is not.
+                if (tokens.any { it.startsWith("vStopped") && it != "vStopped=false" }) return false
+                val fields = tokens.filter { '=' in it }.map { it.substringBefore('=') to it.substringAfter('=') }
                 if (fields.map { it.first }.distinct().size != fields.size) return false
                 val values = fields.toMap()
                 qualified = values["installed"] == "true" && values["hidden"] == "false" &&
                     values["suspended"] == "false" && values["stopped"] == "false" &&
-                    values["vStopped"] == "false" && values["enabled"] in setOf("0", "1")
+                    ("vStopped" !in values || values["vStopped"] == "false") && values["enabled"] in setOf("0", "1")
             }
         }
         return packages == 1 && user == 1 && qualified

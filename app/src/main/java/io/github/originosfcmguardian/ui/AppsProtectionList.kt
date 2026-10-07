@@ -1,5 +1,7 @@
 package io.github.originosfcmguardian.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -15,10 +17,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -52,8 +59,13 @@ internal fun AppsProtectionList(
     val groups = protectionAppGroups(state, query)
     var selectedApp by remember { mutableStateOf<ProtectionAppRow?>(null) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        OutlinedTextField(query, onQuery, singleLine = true,
-            shape = RoundedCornerShape(10.dp), placeholder = { Text("搜索应用") },
+        TextField(query, onQuery, singleLine = true,
+            shape = MaterialTheme.shapes.medium, placeholder = { Text("搜索应用") },
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent),
             modifier = Modifier.fillMaxWidth().semantics { contentDescription = "搜索名称或包名" })
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically) {
@@ -73,7 +85,7 @@ internal fun AppsProtectionList(
             item {
                 ApplicationSectionTitle(if (state.automaticProtection.configurationAvailable) "已保护"
                     else "上次已知选择", groups.protected.size)
-                Text("保存的选择，并非当前健康状态；由首页总开关控制运行。",
+                Text("应用选择不代表当前状态；首页总开关控制运行。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 8.dp))
             }
@@ -113,7 +125,11 @@ private fun ApplicationSectionTitle(title: String, count: Int, modifier: Modifie
         .semantics(mergeDescendants = true) { contentDescription = "$title（$count）" },
         verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-        Text(count.toString(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Text(count.toString(), style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp))
+        }
     }
 }
 
@@ -122,17 +138,23 @@ private fun ProtectionApplicationRow(state: HomeUiState, row: ProtectionAppRow,
     onEnable: (String) -> Unit, onDisable: (SelectedTargetIdentity) -> Unit,
     onOpen: () -> Unit) {
     val app = row.app
+    val configured = app.identity in state.automaticProtection.configuredIdentities
+    val rowShape = RoundedCornerShape(18.dp)
     Row(Modifier.fillMaxWidth()
+        .padding(vertical = 2.dp)
+        .clip(rowShape)
+        .background(if (configured) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLow)
+        .then(if (configured) Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, rowShape) else Modifier)
         .clickable(role = Role.Button, onClickLabel = "查看应用详情", onClick = onOpen)
         .testTag("app-details:${app.packageName}:${row.currentInstallation}")
-        .padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        .padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         TargetAppIcon(app.packageName, app.label, app.identity, size = 44.dp)
         Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(app.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(app.packageName, style = MaterialTheme.typography.bodySmall, maxLines = 1,
                 overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        AppProtectionSelection(app.identity in state.automaticProtection.configuredIdentities,
+        AppProtectionSelection(configured,
             row.currentInstallation && canPrepareAppProtection(state, app),
             { onEnable(app.packageName) }, { app.identity?.let(onDisable) }, app.label)
     }
@@ -148,21 +170,28 @@ private fun ProtectionApplicationSheet(state: HomeUiState, row: ProtectionAppRow
         .verticalScroll(rememberScrollState()).navigationBarsPadding()
         .padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(app.label, style = MaterialTheme.typography.headlineMedium)
-            Text(app.packageName, style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            TargetAppIcon(app.packageName, app.label, app.identity, size = 52.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(app.label, style = MaterialTheme.typography.headlineMedium)
+                Text(app.packageName, style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("自动保护选择", style = MaterialTheme.typography.titleMedium)
-                Text("保存此应用的选择；首页总开关开启时才运行。",
+                Text("总开关开启时运行；关闭此开关移除选择。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             AppProtectionSelection(configured, row.currentInstallation && canPrepareAppProtection(state, app),
                 { onClose(); onEnable(app.packageName) }, { app.identity?.let(onDisable) }, "${app.label} 详情内")
         }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("当前状态", style = MaterialTheme.typography.titleSmall)
             Text(protectionAppStatus(state, row), style = MaterialTheme.typography.bodyMedium)
             if (app.identity != null) details(row)
@@ -172,12 +201,12 @@ private fun ProtectionApplicationSheet(state: HomeUiState, row: ProtectionAppRow
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(counts?.let { "今日 ${it.today} · 本周 ${it.week} 次确认解除" } ?: "确认次数暂不可用",
                     style = MaterialTheme.typography.bodyMedium)
-                Text("次数仅为确认解除限制，不代表消息送达，可能少计。",
+                Text("仅计解除限制，不代表消息送达。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (counts != null) Text(recoveryCountsSnapshotText(state.recoveryCounts.calculatedAtMillis, state.recoveryCounts.zoneId),
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Text("每轮检测后约 30 秒再检查；休眠可能延后，不保证通知送达。",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) { Text("关闭") }
     }
 }
@@ -187,5 +216,11 @@ internal fun AppProtectionSelection(configured: Boolean, canSelect: Boolean,
     onSelect: () -> Unit, onRemove: () -> Unit, label: String) {
     Switch(checked = configured, enabled = configured || canSelect,
         onCheckedChange = { if (it) onSelect() else onRemove() },
+        colors = SwitchDefaults.colors(
+            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+            checkedTrackColor = MaterialTheme.colorScheme.primary,
+            uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            uncheckedBorderColor = MaterialTheme.colorScheme.outline),
         modifier = Modifier.semantics { contentDescription = "$label 自动保护选择" })
 }

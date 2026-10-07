@@ -47,7 +47,7 @@ class AutomaticProtectionControlsTest {
                 { error("Unexpected enable") }, { error("Unexpected revoke") }, {},
                 onOpenNotificationSettings = { ++settingsOpened > 1 }, showProtectionControls = false)
         } }
-        val failure = "未能打开设置，请在系统通知管理中调整 Guardian 的保护通知。"
+        val failure = "无法打开设置，请在系统通知管理中调整 Guardian 保护通知。"
         compose.onNodeWithText("通知显示设置").performClick()
         compose.onNodeWithText(failure).assertExists()
         compose.onNodeWithText("通知显示设置").assertIsEnabled().performClick()

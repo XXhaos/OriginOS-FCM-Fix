@@ -55,7 +55,7 @@ class StoppedTargetObservationTest {
             environment.copy(serviceUid = 12345) to StoppedObservationUnknown.SHELL_UNAVAILABLE,
             environment.copy(currentUser = 1) to StoppedObservationUnknown.WRONG_USER,
             environment.copy(currentUser = null) to StoppedObservationUnknown.WRONG_USER,
-            environment.copy(fingerprint = "unknown-build") to StoppedObservationUnknown.UNSUPPORTED_BUILD,
+            environment.copy(fingerprint = null) to StoppedObservationUnknown.UNSUPPORTED_BUILD,
         )
         cases.forEach { (env, expected) ->
             val port = port().apply { this.env = env }
@@ -125,7 +125,7 @@ class StoppedTargetObservationTest {
         val port = port().apply { afterOwnership = { env = environment.copy(currentUser = 1) } }
         assertEquals(StoppedObservationUnknown.WRONG_USER, reason(probe(port)))
         val changedBuild = port().apply { afterOwnership = { env = environment.copy(fingerprint = "new-build") } }
-        assertEquals(StoppedObservationUnknown.UNSUPPORTED_BUILD, reason(probe(changedBuild)))
+        assertEquals(StoppedObservationUnknown.IDENTITY_CHANGED, reason(probe(changedBuild)))
     }
 
     @Test fun cancellationAfterOwnershipNeverReturnsIdentityOrStopped() {
@@ -181,7 +181,7 @@ class StoppedTargetObservationTest {
 
     @Test fun codecRejectsChangedTargetUidInstallSignerAndEnvironment() {
         val encoded = StoppedObservationCodec.encode(probe(port()))
-        val edits = listOf(7 to "other.app", 8 to "110234", 9 to "0", 10 to "xyz", 4 to "unknown-build", 5 to "1", 6 to "0", 3 to "0")
+        val edits = listOf(7 to "other.app", 8 to "110234", 9 to "0", 10 to "xyz", 4 to "invalid fingerprint", 5 to "1", 6 to "0", 3 to "0")
         edits.forEach { (index, value) ->
             val invalid = encoded.split('|').toMutableList().apply { set(index, value) }.joinToString("|")
             assertEquals(StoppedObservationUnknown.MALFORMED_RESPONSE, reason(StoppedObservationCodec.decode(invalid, 7)))

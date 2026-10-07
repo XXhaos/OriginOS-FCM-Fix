@@ -26,9 +26,9 @@ import org.junit.Test
 /** Synthetic Compose fixtures only; no service, installed-target, storage or recovery operations. */
 class AppsSharedGuidanceTest {
     @get:Rule val compose = createComposeRule()
-    private val polling = "约每 30 秒检查，休眠可能延后；不保持目标应用常驻。"
-    private val limits = "检测到停止限制时尝试恢复，无固定恢复次数或间隔限制。"
-    private val shared = "约每 30 秒检查，被停止时尝试恢复；无固定恢复次数或间隔限制。休眠可能延后，不保证通知送达。"
+    private val polling = "约每 30 秒检查，休眠可能延后；不让应用常驻。"
+    private val limits = "被停止时尝试恢复，无固定次数或间隔限制；不保证送达。"
+    private val shared = "约每 30 秒检查；休眠可能延后，不保证送达。"
 
     @Test fun twoExpandedAppsShareOneHintAndKeepTheirOwnEvidenceAndActions() {
         val first = SelectedTargetUiState(
@@ -59,7 +59,7 @@ class AppsSharedGuidanceTest {
                 onExportNotificationFacts = {})
         } }
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("已选择（2）").assertExists()
+        compose.onNodeWithText("已选 2 个应用 · 关闭总开关保留选择").assertExists()
         assertOneSharedHint()
         compose.onNodeWithTag("app-details:${first.identity.packageName}:true").performClick()
         compose.onNodeWithText("First fixture waiting reason").assertDoesNotExist()
@@ -85,7 +85,7 @@ class AppsSharedGuidanceTest {
         assertOneSharedHint()
     }
 
-    @Test fun standaloneCardDefaultKeepsBothOriginalExplanations() {
+    @Test fun standaloneCardKeepsConciseTimingAndRecoveryGuidance() {
         compose.setContent { MaterialTheme {
             AutomaticProtectionCard(AutomaticProtectionState(), false, false, null, {}, {}, {}, showPreferences = false)
         } }
@@ -94,12 +94,17 @@ class AppsSharedGuidanceTest {
         compose.onNodeWithText(shared).assertDoesNotExist()
     }
 
-    @Test fun consentConfirmationKeepsAllOriginalDisclosures() {
-        val disclosure = "应用选择会保存；首页总开关开启时才运行保护。关闭总开关会保留应用选择，取消此应用选择会移除它的授权。"
+    @Test fun consentConfirmationKeepsScopeSelectionTimingAndShutdownDisclosures() {
         compose.setContent { MaterialTheme {
             AutomaticProtectionConfirmation({}, {}, "Fixture", "example.guidance.consent")
         } }
-        compose.onNodeWithText(disclosure, substring = true).assertExists()
+        listOf(
+            "仅授权此应用的当前安装：被停止时尝试解除限制，不让应用常驻。",
+            "选择会保存。首页总开关控制运行；关闭总开关保留选择，关闭此应用开关移除授权。",
+            "约每 30 秒检查，休眠可能延后；无固定次数或间隔限制，不保证送达。",
+            "无法区分系统停止和主动强停。想保持停止，请先关总开关；已派发操作可能完成。",
+            "Shizuku 未就绪时等待，重启手机后需重新启动 Shizuku。",
+        ).forEach { compose.onNodeWithText(it).assertExists() }
         compose.onNodeWithText("授权并选择").assertIsEnabled()
         compose.onNodeWithText("取消").assertIsEnabled()
     }

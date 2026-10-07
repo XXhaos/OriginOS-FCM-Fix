@@ -24,7 +24,7 @@ internal fun awaitStoppedRecoveryReadback(
             if (nowNanos() > deadline) return initial
             val observation = read() as? StoppedTargetObservation.Known ?: return unknown()
             if (!active()) return unknown()
-            if (observation.identity != identity || !observation.exclusiveUidOwner) return unknown()
+            if (observation.identity != identity || !observation.hasVerifiedPackageUid) return unknown()
             if (nowNanos() > deadline) return unknown()
             if (!observation.stopped) return StoppedRecoveryResult(
                 StoppedRecoveryOutcome.FLAG_CLEARED, "操作成功：已解除停止限制，通知送达需另行确认",

@@ -145,7 +145,7 @@ object FcmRecoveryRuntime {
                     enabled.set(saved.configured)
                 }
                 record(event(FcmRecoveryEventAction.CONSENT_ON, sample, true))
-                publish(storage.read(), "试用已开启；仅完整确认服务缺失时尝试一次。手机重启需重新确认；GMS 更新需重新核验适配。")
+                publish(storage.read(), "试用已开启；完整确认服务缺失且当前恢复入口可用时尝试一次。手机重启或 GMS 更新后需重新确认。")
                 true
             } finally { remote.retireObservationSession() }
         } } catch (_: Throwable) { blocked(); false }
@@ -208,10 +208,10 @@ object FcmRecoveryRuntime {
                 if (sample == null || !allowed || !bundledAdmission(sample)) return@withSession
                 var saved = storage.read()
                 if (!saved.configured || saved.binding != FcmRecoveryPolicy.binding(sample)) {
-                    publish(saved, if (sample.versionCode != FcmRecoveryPolicy.VERSION || sample.signerSha256 != FcmRecoveryPolicy.SIGNER)
-                        "当前 GMS 版本或签名不适配，恢复试用已暂停。"
+                    publish(saved, if (sample.signerSha256 != FcmRecoveryPolicy.SIGNER)
+                        "当前 GMS 签名未通过核验，恢复试用已暂停。"
                         else "当前开机或 GMS 安装身份已变化；请重新确认 FCM 恢复试用。",
-                        sample.versionCode == FcmRecoveryPolicy.VERSION && sample.signerSha256 == FcmRecoveryPolicy.SIGNER)
+                        sample.signerSha256 == FcmRecoveryPolicy.SIGNER)
                     return@withSession
                 }
                 saved = storage.rearm(sample, SystemClock.elapsedRealtime(), network())

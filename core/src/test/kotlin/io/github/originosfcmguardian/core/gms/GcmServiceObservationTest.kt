@@ -39,6 +39,30 @@ class GcmServiceObservationTest {
         assertEquals(SourceCompleteness.COMPLETE, parse(dump("true")).completeness)
         assertFalse(parse(dump("true") + " account: private@example.invalid\n").toString().contains("private"))
     }
+    @Test fun `current diagnostics clock is left column and precision is seconds`() {
+        for ((text, millis) in listOf("54:47/00:00" to 3_287_000L,
+            "00:00/12:34" to 0L, "1:02:03/59:59" to 3_723_000L,
+            "49:01:01/2:03:04" to 176_461_000L)) {
+            val source = parse(dump("true") + "    connectTime=$text\n")
+            assertEquals(GcmConnectionState.REPORTED_CONNECTED, source.state)
+            assertEquals(millis, source.connectedDurationMillis)
+        }
+    }
+    @Test fun `optional duration cannot invent a session or invalidate existing connection qualification`() {
+        val duration = "    connectTime=54:47/00:00\n"
+        assertEquals(null, parse(dump("false") + duration).connectedDurationMillis)
+        assertEquals(null, parse(dump("true")).connectedDurationMillis)
+        for (bad in listOf("54:47/bad", "60:00/00:00", "12:60/00:00", "-1:00/00:00",
+            "0:01/00:00", "0:00:01/00:00", "1:60:00/00:00", "9999999999999999:00:00/00:00",
+            "54:47/60:00", "５４:４７/00:00", "54:47/00:00 extra")) {
+            val source = parse(dump("true") + "    connectTime=$bad\n")
+            assertEquals(GcmConnectionState.REPORTED_CONNECTED, source.state)
+            assertEquals(SourceCompleteness.COMPLETE, source.completeness)
+            assertEquals(null, source.connectedDurationMillis)
+        }
+        assertEquals(null, parse(dump("true") + duration + duration).connectedDurationMillis)
+        assertEquals(null, parse(duration + dump("true")).connectedDurationMillis)
+    }
     @Test fun `ambiguous duplicate conflicting malformed and absent fields fail closed`() {
         listOf(header, "", dump("true") + "    Is client connected: false\n",
             dump("true") + "    Is client connected: true\n", dump("true") + dump("false"),

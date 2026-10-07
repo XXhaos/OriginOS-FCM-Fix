@@ -1,31 +1,20 @@
 package io.github.originosfcmguardian.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
 import io.github.originosfcmguardian.core.gms.*
 import io.github.originosfcmguardian.fcmprotection.*
 
 internal fun fcmProtectionObservationText(state: FcmProtectionUiState, now: Long): String {
-    val sample = state.latestObservation as? GmsConnectionObservation.Sample ?: return "尚无完整连接观察"
-    if (!sample.isFresh(now)) return "上次连接观察已过期"
-    val service = when (sample.gcmService.state) {
-        GcmConnectionState.REPORTED_CONNECTED -> "服务报告已连接"
-        GcmConnectionState.REPORTED_DISCONNECTED -> "服务存在但报告未连接"
-        GcmConnectionState.SERVICE_ABSENT -> "完整确认服务缺失"
-        GcmConnectionState.UNKNOWN -> "服务状态未知"
-    }
-    val socket = when (sample.observation) {
-        SocketObservation.OBSERVED -> "有 TCP 连接迹象"
-        SocketObservation.NO_MATCH -> "未观察到 TCP 连接迹象"
-        SocketObservation.UNKNOWN -> "TCP 迹象未知"
-    }
-    val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(sample.observedAtMillis))
-    return "$service · $socket · $time"
+    return fcmConnectionStatus(state.latestObservation, now).text
 }
 internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
     state.storageBlocked -> "记录异常 · 已暂停"
@@ -49,17 +38,30 @@ internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
             enabled = state.configured || hostReady && !state.busy && !state.storageBlocked && state.maintenance != FcmMaintenanceState.STOP_PENDING,
             modifier = Modifier.semantics { contentDescription = "FCM 保护开关" })
     }
-    Text(state.detail, style = MaterialTheme.typography.bodySmall)
-    Text("连接时维护最短15分钟；仅精确服务缺失时单次恢复，未连接或未知不发送恢复请求。手机重启后恢复分支需重新确认；Guardian 不会启动 Shizuku。",
-        style = MaterialTheme.typography.bodySmall)
+    Text(fcmProtectionGuidance(state), style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (state.requiresConfirmation && hostReady && !state.busy && state.maintenance != FcmMaintenanceState.STOP_PENDING)
         TextButton(onClick = onEnable) { Text("重新确认 FCM 保护") }
     if (state.maintenance == FcmMaintenanceState.STOP_PENDING)
         TextButton(onClick = onDisable, enabled = !state.busy) { Text("重试确认停止") }
 }
+internal fun fcmProtectionGuidance(state: FcmProtectionUiState): String = when {
+    state.storageBlocked -> "记录无法确认，请关闭后重新检查。"
+    state.confirmationFailure != null -> state.confirmationFailure.detail
+    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "上次停止尚未确认，请重试；不会重复发送请求。"
+    state.requiresConfirmation -> "重启或权限变化后，请重新确认恢复授权。"
+    state.maintenance == FcmMaintenanceState.WAITING_HOST -> "请开启自动保护，并启动 Shizuku。"
+    else -> "低频维护连接；确认服务缺失时尝试恢复，不保证消息送达。"
+}
 @Composable internal fun FcmProtectionConfirmation(onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text("开启 FCM 保护试用？") },
-        text = { Text("保存新的统一授权：完整连接时进行最短15分钟的低频维护；实际保护、外置 Shizuku、可用网络和当前 GMS 版本身份均合格且完整确认服务缺失时，仅发送一次公开空请求。服务存在但未连接、未知、过期或读取不完整时不发送恢复请求。异常/超时/应用重启不重发，只有新的完整连接观察才重新准备。服务缺失时维护先等待连接。维护仅按原安全条件接续，结果不明和停止待确认阻断；手机重启后恢复分支需重新确认。保存少量无消息内容的事件和整机电量/主进程 CPU 参考，不代表本应用耗电量。旧分开授权不自动升级；Guardian 不会启动 Shizuku，不保证修复或通知送达。") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("保存统一授权：连接正常时，最短每 15 分钟尝试维护一次。")
+            Text("自动保护、Shizuku、网络和当前 Google Play 服务版本与安装身份核验通过后，仅在完整确认服务缺失时发送一次公开空请求尝试恢复。已断连、未知或过期状态不触发恢复。")
+            Text("异常、超时或应用重启不会重发；只有新的完整连接记录才允许下一次恢复。维护等待连接，结果不明或停止待确认时暂停。")
+            Text("手机重启后需重新确认恢复授权。旧授权不自动升级，Guardian 不会启动 Shizuku。")
+            Text("仅保存少量无消息内容的事件、整机电量和主进程 CPU 参考，不代表本应用耗电量，也不保证修复或消息送达。")
+        } },
         confirmButton = { TextButton(onClick = onConfirm) { Text("确认开启 FCM 保护") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }

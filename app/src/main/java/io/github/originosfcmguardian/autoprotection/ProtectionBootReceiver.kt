@@ -16,9 +16,9 @@ class ProtectionBootReceiver : BroadcastReceiver() {
         val main = Handler(Looper.getMainLooper())
         val finish = Runnable { if (live.compareAndSet(true, false)) pending.finish() }
         main.postDelayed(finish, 8_000)
-        AutomaticProtectionRuntime.launchSavedFromTrigger(context, { live.get() }) {
+        AutomaticProtectionRuntime.launchSavedFromTrigger(context, { live.get() }, finished = {
             main.removeCallbacks(finish)
             finish.run()
-        }
+        })
     }
 }

@@ -33,6 +33,10 @@ internal sealed interface StoppedRecoveryPreflight {
     data class Blocked(val reason: RecoveryBlockReason) : StoppedRecoveryPreflight
 }
 
+/** Qualified recipient evidence comes only from a fresh, target-bound package and UID-member read. */
+internal fun hasVerifiedPackageUid(exclusiveUidOwner: Boolean?, qualifiedRecipient: Boolean): Boolean =
+    exclusiveUidOwner != null && (exclusiveUidOwner || qualifiedRecipient)
+
 internal fun preflightStoppedRecovery(
     request: StoppedRecoveryRequest,
     probe: StoppedRecoveryProbe,
@@ -47,12 +51,12 @@ internal fun preflightStoppedRecovery(
         probe.qualifiedRecipient && !isRecoveryTargetPackage(request.expectedIdentity.packageName)) {
         return blocked(RecoveryBlockReason.UNSUPPORTED_TARGET)
     }
-    if (probe.fingerprint != VERIFIED_AUTOSTART_FINGERPRINT) return blocked(RecoveryBlockReason.UNSUPPORTED_BUILD)
+    if (!validRuntimeFingerprint(probe.fingerprint)) return blocked(RecoveryBlockReason.UNSUPPORTED_BUILD)
     if (probe.currentUser != 0) return blocked(RecoveryBlockReason.WRONG_USER)
     if (!probe.authorizedShell || probe.serviceUid != 2000) return blocked(RecoveryBlockReason.SHELL_UNAVAILABLE)
     if (probe.observedIdentity != request.expectedIdentity) return blocked(RecoveryBlockReason.IDENTITY_CHANGED)
     if (probe.exclusiveUidOwner == null) return blocked(RecoveryBlockReason.UID_OWNERSHIP_UNKNOWN)
-    if (!probe.exclusiveUidOwner) return blocked(RecoveryBlockReason.UID_NOT_EXCLUSIVE)
+    if (!hasVerifiedPackageUid(probe.exclusiveUidOwner, probe.qualifiedRecipient)) return blocked(RecoveryBlockReason.UID_NOT_EXCLUSIVE)
     return when (probe.stopped) {
         null -> blocked(RecoveryBlockReason.STOPPED_UNKNOWN)
         false -> StoppedRecoveryPreflight.NoWriteNeeded

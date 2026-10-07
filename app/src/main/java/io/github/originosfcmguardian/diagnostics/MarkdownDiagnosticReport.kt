@@ -78,6 +78,17 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             }
             append('\n')
         }
+        section("保护停止与进程记录")
+        row("记录可用性", report.protectionLifecycle.availability.name)
+        row("丢弃记录数", report.protectionLifecycle.droppedEvents)
+        row("系统退出记录可用", report.protectionLifecycle.exitHistoryAvailable)
+        append("\n仅保留最近64条生命周期事件。未记录干净结束不等于系统杀进程；记录异步写入，丢失或不可用时原因未知。系统退出时间为历史原始时间，不收集异常正文或堆栈。\n\n")
+        report.protectionLifecycle.events.takeLast(64).forEach { event ->
+            append("- ").append(event.atMillis).append(" / ").append(event.kind.name)
+                .append(" / ").append(event.reason.name).append(" / Guardian进程=").append(event.processId)
+            event.systemExitReason?.let { append(" / 系统退出类型=").append(it).append(" / 状态=").append(event.systemExitStatus) }
+            append('\n')
+        }
         section("通知观察摘要")
         val facts = report.notificationFacts
         if (facts == null) {

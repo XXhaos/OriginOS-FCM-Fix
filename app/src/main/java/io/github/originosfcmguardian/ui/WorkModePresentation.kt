@@ -6,7 +6,7 @@ import io.github.originosfcmguardian.privileged.ShizukuUserAction
 import io.github.originosfcmguardian.privileged.shizukuUserAction
 
 internal const val CURRENT_RECOVERY_BACKEND_LABEL = "工作方式：外置 Shizuku"
-internal const val SHIZUKU_REBOOT_NOTICE = "手机重启后，需要先重新启动外部 Shizuku；Guardian 会等待服务就绪。"
+internal const val SHIZUKU_REBOOT_NOTICE = "重启手机后需重新启动 Shizuku；Guardian 会等待就绪。"
 
 internal data class ShizukuWorkModePresentation(val statusLabel: String, val summary: String,
     val actionLabel: String?, val showOpenManager: Boolean)
@@ -24,12 +24,13 @@ internal fun shizukuWorkModePresentation(snapshot: ShizukuStatusSnapshot): Shizu
             ShizukuStatus.ERROR -> "状态异常"
         },
         summary = when (status) {
-            ShizukuStatus.NOT_INSTALLED -> "先安装外部 Shizuku，再启动并授权 Guardian。"
-            ShizukuStatus.NOT_RUNNING -> "请先在 Shizuku 中启动服务，再返回授权。"
-            ShizukuStatus.PERMISSION_REQUIRED -> snapshot.detail
-            ShizukuStatus.READY_SHELL -> "服务已连接且 Guardian 已获授权。保护仍需单独开启。"
-            ShizukuStatus.READY_ROOT -> "仅支持 ADB/shell 模式，不使用 Root。请在 Shizuku 中改用非 Root 启动。"
-            ShizukuStatus.ERROR -> "服务状态异常，请刷新或打开 Shizuku 检查。"
+            ShizukuStatus.NOT_INSTALLED -> "安装并启动 Shizuku，再授权 Guardian。"
+            ShizukuStatus.NOT_RUNNING -> "启动 Shizuku 后，返回授权 Guardian。"
+            ShizukuStatus.PERMISSION_REQUIRED -> if (action == ShizukuUserAction.OPEN_MANAGER)
+                "请在 Shizuku 中允许 Guardian。" else "请授权 Guardian 使用 Shizuku。"
+            ShizukuStatus.READY_SHELL -> "保护仍需单独开启。"
+            ShizukuStatus.READY_ROOT -> "仅支持 ADB/shell 模式，请在 Shizuku 中改用非 Root 启动。"
+            ShizukuStatus.ERROR -> "请刷新状态或打开 Shizuku 检查。"
         },
         actionLabel = if (status == ShizukuStatus.READY_SHELL) null else when (action) {
             ShizukuUserAction.DOWNLOAD -> "获取 Shizuku"

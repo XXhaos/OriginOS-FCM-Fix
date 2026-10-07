@@ -2,8 +2,9 @@ package io.github.originosfcmguardian.core.gms
 
 import java.security.MessageDigest
 
-/** This trial is qualified for one observed installation family, not every GMS version. */
+/** Runtime observation qualification. Sender capability is independently rechecked in shell. */
 object FcmRecoveryPolicy {
+    /** Historical device evidence/fixtures only; never an admission allowlist. */
     const val VERSION = 263635035L
     const val SIGNER = "5f2391277b1dbd489000467e4c2fa6af802430080457dce2f618992e9dfb5402"
     const val COMPONENT = "com.google.android.gms.gcm.GcmSenderProxy"
@@ -11,7 +12,7 @@ object FcmRecoveryPolicy {
     fun qualified(sample: GmsConnectionObservation.Sample, now: Long): Boolean {
         val s = sample.gcmService
         val elapsed = s.elapsedRealtimeMillis ?: return false
-        return sample.versionCode == VERSION && sample.signerSha256 == SIGNER && sample.isFresh(now) &&
+        return sample.signerSha256 == SIGNER && sample.isFresh(now) &&
             s.userId == 0 && s.completeness == SourceCompleteness.COMPLETE &&
             s.state != GcmConnectionState.UNKNOWN &&
             now >= elapsed && now - elapsed <= 30_000

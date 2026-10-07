@@ -1,12 +1,26 @@
 package io.github.originosfcmguardian.autostart
 
+import android.content.pm.ApplicationInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class TargetSelectionTest {
+    @Test
+    fun currentUidMembershipAllowsSharedTargetButRejectsIncompleteOrMalformedEvidence() {
+        val target = "com.google.android.calendar"
+        assertTrue(validTargetUidMembers(target, listOf(target)))
+        assertTrue(validTargetUidMembers(target, listOf(target, "com.google.android.syncadapters.calendar")))
+        assertTrue(validTargetUidMembers(target, listOf(target) + (1..63).map { "com.example.member$it" }))
+        listOf(null, emptyList(), listOf("com.example.other"), listOf(target, target),
+            listOf(target, "invalid;name"), listOf(target) + (1..64).map { "com.example.member$it" }).forEach {
+            assertFalse(validTargetUidMembers(target, it))
+        }
+    }
+
     private val identity = SelectedTargetIdentity(
         packageName = "org.telegram.messenger",
         uid = 10_434,
@@ -109,6 +123,27 @@ class TargetSelectionTest {
         firstInstallTime = 1_700_000_000_000 + index,
         signerSha256 = listOf("b".repeat(64)),
     )
+
+    @Test
+    fun preinstalledAndUpdatedSystemAppsAreHiddenEvenWhenInstalledInData() {
+        val installed = ApplicationInfo.FLAG_INSTALLED
+        assertTrue(isUserInstalledApplication(installed))
+        assertFalse(isPreinstalledApplication(installed))
+        for (preinstalled in listOf(ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.FLAG_UPDATED_SYSTEM_APP,
+            ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) {
+            assertTrue(isPreinstalledApplication(installed or preinstalled))
+            assertFalse(isUserInstalledApplication(installed or preinstalled))
+        }
+        assertFalse(isUserInstalledApplication(0))
+    }
+
+    @Test
+    fun visibilityDoesNotMistakeStoppedOrPersistentUserAppsForPreinstalledApps() {
+        for (otherFlags in listOf(ApplicationInfo.FLAG_STOPPED, ApplicationInfo.FLAG_PERSISTENT)) {
+            assertTrue(isUserInstalledApplication(ApplicationInfo.FLAG_INSTALLED or otherFlags))
+            assertFalse(isPreinstalledApplication(ApplicationInfo.FLAG_INSTALLED or otherFlags))
+        }
+    }
 
     private class FakeTargetSelectionPreferences(initial: String) : TargetSelectionPreferences {
         var raw: String = initial

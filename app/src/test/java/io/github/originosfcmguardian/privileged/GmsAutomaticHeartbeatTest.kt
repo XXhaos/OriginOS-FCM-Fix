@@ -6,6 +6,8 @@ import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Test
@@ -62,14 +64,32 @@ class GmsAutomaticHeartbeatTest {
     }
     @Test fun firstAutomaticAndEveryManualWaitFullProductionIntervalAndDuplicateCannotReplay() {
         var time = 0L; var launches = 0
-        val runner = GmsHeartbeatRunner({ Port() }, { launches++; Child(accepted) }, clock = { time })
+        val workerThread = AtomicReference<Thread>()
+        val runner = GmsHeartbeatRunner({ workerThread.set(Thread.currentThread()); Port() },
+            { launches++; Child(accepted) }, clock = { time })
+        // White-box fixture only: Future.get() does not prove the no-queue worker is ready.
+        // Let the core-zero worker terminate, then join it before the next single-shot call.
+        // No production admission, heartbeat retry, interval or policy is changed.
+        val field = GmsHeartbeatRunner::class.java.getDeclaredField("worker").apply { isAccessible = true }
+        val executor = field.get(runner) as ThreadPoolExecutor
+        assertEquals(0, executor.corePoolSize)
+        assertEquals(1, executor.maximumPoolSize)
+        assertTrue(executor.queue is SynchronousQueue<*>)
+        executor.setKeepAliveTime(1, TimeUnit.MILLISECONDS)
+        fun awaitWorkerExit() {
+            val thread = checkNotNull(workerThread.get())
+            thread.join(5_000)
+            assertFalse("Previous fixture worker must exit before the next submission", thread.isAlive)
+        }
         try {
             val session = runner.armAutomatic(1, caller, 1, gmsHeartbeatBindingDigest(sample), Lifetime()) { false }.session!!
+            awaitWorkerExit()
             val early = UUID.randomUUID().toString()
             assertEquals(GmsHeartbeatReason.INTERVAL_NOT_ELAPSED, runner.requestAutomatic(2, caller, session, early) { false }.reason)
             time = GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
             assertEquals(GmsHeartbeatReason.DUPLICATE_ATTEMPT, runner.requestAutomatic(3, caller, session, early) { false }.reason)
             assertEquals(GmsHeartbeatStatus.REQUESTED, runner.request(4) { false }.status)
+            awaitWorkerExit()
             time += GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS - 1
             assertEquals(GmsHeartbeatReason.INTERVAL_NOT_ELAPSED, runner.requestAutomatic(5, caller, session, UUID.randomUUID().toString()) { false }.reason)
             time++

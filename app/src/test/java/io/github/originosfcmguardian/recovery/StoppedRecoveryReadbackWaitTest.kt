@@ -16,6 +16,12 @@ class StoppedRecoveryReadbackWaitTest {
         assertEquals(5, reads)
         assertEquals(StoppedRecoveryOutcome.FLAG_CLEARED, result.outcome)
     }
+    @Test fun freshQualifiedSharedTargetCanConfirmDelayedPackageFlagClear() {
+        val shared = known(false).copy(exclusiveUidOwner = false, qualifiedRecipient = true)
+        assertFalse(shared.exclusiveUidOwner)
+        assertEquals(StoppedRecoveryOutcome.FLAG_CLEARED,
+            awaitStoppedRecoveryReadback(identity, initial, { shared }, { true }, {}, { 0 }).outcome)
+    }
     @Test fun delayedClearPreservesSuccessfulCommandProvenanceOnly() {
         listOf(false, true).forEach { succeeded ->
             val result = awaitStoppedRecoveryReadback(identity, initial.copy(commandSucceeded = succeeded),

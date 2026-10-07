@@ -18,7 +18,7 @@ internal data class FcmProtectionConsent(val configured: Boolean = false, val ep
     }
     // The heartbeat child's consent epoch is exactly this epoch, not an inferred legacy epoch.
     fun accepts(sample: GmsConnectionObservation.Sample, recovery: Boolean) = configured &&
-        sample.versionCode == FcmRecoveryPolicy.VERSION && sample.signerSha256 == FcmRecoveryPolicy.SIGNER &&
+        sample.signerSha256 == FcmRecoveryPolicy.SIGNER &&
         installationBinding == gmsHeartbeatBindingDigest(sample) &&
         (!recovery || recoveryBinding == FcmRecoveryPolicy.binding(sample))
     fun admits(sample: GmsConnectionObservation.Sample?, recovery: Boolean, childEpoch: String? = epoch) =

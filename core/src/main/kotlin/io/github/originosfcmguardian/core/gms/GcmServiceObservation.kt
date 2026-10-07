@@ -6,7 +6,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.concurrent.TimeUnit
 
-/** Raw dump bytes stay inside the reader/parser; only the enum result leaves this boundary. */
+/** Raw dump stays here; only status and an optional GMS-reported duration leave this boundary. */
 object GcmServiceParser {
     const val COMPONENT = "com.google.android.gms/.gcm.GcmService"
     const val MAX_BYTES = 64 * 1024
@@ -14,6 +14,9 @@ object GcmServiceParser {
     const val MAX_LINE_BYTES = 8192
     private val header = Regex("[ \\t]*SERVICE com\\.google\\.android\\.gms/\\.gcm\\.GcmService [a-fA-F0-9]+ pid=[1-9][0-9]* user=0[ \\t]*")
     private val connected = Regex("[ \\t]+Is client connected: (true|false)[ \\t]*")
+    // Pinned GMS263635035: left is the same current-session clock as Diagnostics Time connected.
+    // Right is the previous duration. Non-ASCII/localized or unfamiliar output stays unknown.
+    private val connectionTime = Regex("[ \\t]+connectTime=([0-9]{1,16}:[0-9]{2}(?::[0-9]{2})?)/([0-9]{1,16}:[0-9]{2}(?::[0-9]{2})?)[ \\t]*")
     private val failure = Regex("(?i)(permission denial|permission denied|securityexception|remoteexception|error dumping|timed out|timeout while|exception while)")
     private val failureBanner = Regex("(?i)^[ \\t]*(?:\\*{3}[ \\t]*)?(?:(?:SERVICE[ \\t]+)?DUMP[ \\t]+TIMEOUT\\b|ERROR\\b|FAILURE[ \\t]+DUMPING\\b)")
     fun unknown(status: SourceCompleteness) = GcmServiceSource(GcmConnectionState.UNKNOWN, status)
@@ -34,6 +37,8 @@ object GcmServiceParser {
         var headers = 0
         var fields = 0
         var state = GcmConnectionState.UNKNOWN
+        var durationFields = 0
+        var durationMillis: Long? = null
         var lines = 0
         for (line in text.lineSequence()) {
             if (++lines > MAX_LINES || line.toByteArray(Charsets.UTF_8).size > MAX_LINE_BYTES) return unknown(SourceCompleteness.TRUNCATED)
@@ -47,10 +52,28 @@ object GcmServiceParser {
                 if (headers != 1 || match == null || ++fields != 1) return unknown(SourceCompleteness.MALFORMED)
                 state = if (match.groupValues[1] == "true") GcmConnectionState.REPORTED_CONNECTED else GcmConnectionState.REPORTED_DISCONNECTED
             }
+            if (trimmed.startsWith("connectTime=")) {
+                durationFields++
+                val match = connectionTime.matchEntire(line)
+                durationMillis = if (headers == 1 && match != null && parseElapsedDuration(match.groupValues[2]) != null)
+                    parseElapsedDuration(match.groupValues[1]) else null
+            }
         }
-        return if (headers == 1 && fields == 1) GcmServiceSource(state, SourceCompleteness.COMPLETE)
+        return if (headers == 1 && fields == 1) GcmServiceSource(state, SourceCompleteness.COMPLETE,
+            connectedDurationMillis = durationMillis.takeIf { durationFields == 1 && state == GcmConnectionState.REPORTED_CONNECTED })
         else unknown(SourceCompleteness.MALFORMED)
     }
+
+    private fun parseElapsedDuration(text: String): Long? = runCatching {
+        val parts = text.split(':')
+        require(parts.size in 2..3)
+        val seconds = parts.last().toLong(); require(seconds in 0..59)
+        val minutes = parts[parts.size - 2].toLong()
+        require(parts[parts.size - 2].length == 2 && minutes in 0..59)
+        val hours = if (parts.size == 3) parts[0].toLong().also { require(it > 0) } else 0L
+        Math.multiplyExact(Math.addExact(Math.addExact(Math.multiplyExact(hours, 3600),
+            Math.multiplyExact(minutes, 60)), seconds), 1000)
+    }.getOrNull()
 }
 
 /** Poll pipe availability on the existing probe worker: no blocking reader or extra worker accumulates.

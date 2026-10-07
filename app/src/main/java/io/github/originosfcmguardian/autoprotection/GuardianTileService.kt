@@ -19,33 +19,33 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
-/** A normal, non-active tile: panel listening is an opportunity, never a residency guarantee. */
+/** A normal, non-active tile: panel listening is a bounded recovery opportunity, never a residency guarantee. */
 class GuardianTileService : TileService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val main = Handler(Looper.getMainLooper())
     private var observation: Job? = null
     private val controller by lazy {
-        GuardianTileController(throttle, SystemClock::elapsedRealtime,
+        GuardianTileController(opportunity, SystemClock::elapsedRealtime,
             AutomaticProtectionRuntime::hasSession,
+            AutomaticProtectionRuntime::captureRecoveryRevision,
             probe = { complete ->
                 val app = applicationContext
-                if (probeInFlight.compareAndSet(false, true)) probeExecutor.execute {
+                probeExecutor.execute {
                     // Existing readiness check reads current authority without changing retained records; never
                     // reserves an attempt, grants consent or writes to a target app/system setting.
-                    try {
-                        val result = runCatching {
-                            ProtectionStartupProbe(app, ProtectionConsentStore(AtomicProtectionAuthorityStorage(app))).read()
-                        }.getOrElse { StartupProbeResult(null, StartupEligibilityStatus.BLOCKED_STORAGE) }
-                        main.post { complete(result) }
-                    } finally { probeInFlight.set(false) }
+                    val result = runCatching {
+                        ProtectionStartupProbe(app, ProtectionConsentStore(AtomicProtectionAuthorityStorage(app))).read()
+                    }.getOrElse { StartupProbeResult(null, StartupEligibilityStatus.BLOCKED_STORAGE) }
+                    main.post { complete(result) }
                 }
             },
-            restore = { mayLaunch, finished ->
-                AutomaticProtectionRuntime.launchSavedFromTrigger(applicationContext, mayLaunch, finished)
+            restore = { expectedRevision, mayLaunch, finished ->
+                AutomaticProtectionRuntime.launchSavedFromTrigger(applicationContext, mayLaunch, finished,
+                    expectedRevision = expectedRevision)
             },
             publish = ::publish,
+            record = { ProtectionLifecycleDiagnostics.record(it) },
         )
     }
 
@@ -57,6 +57,7 @@ class GuardianTileService : TileService() {
     }
 
     override fun onStopListening() {
+        // Observation ends here; the process-wide qualified recovery keeps its original deadline/revision.
         controller.stopListening()
         observation?.cancel()
         observation = null
@@ -106,9 +107,8 @@ class GuardianTileService : TileService() {
     }
 
     companion object {
-        private val throttle = GuardianTileThrottle()
+        private val opportunity = GuardianTileRecoveryOpportunity()
         // A stuck Binder/read must not accumulate a queue on repeated panel openings.
-        private val probeInFlight = AtomicBoolean(false)
         private val probeExecutor = Executors.newSingleThreadExecutor { task ->
             Thread(task, "guardian-tile-probe").apply { isDaemon = true }
         }

@@ -1,8 +1,11 @@
 package io.github.originosfcmguardian.ui
 
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -11,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -23,7 +27,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import io.github.originosfcmguardian.monitoring.RetainedTimelineInstallationScope
 import io.github.originosfcmguardian.monitoring.RetainedTimelineKind
 import io.github.originosfcmguardian.monitoring.RetainedTimelineQuery
 import io.github.originosfcmguardian.monitoring.MAX_RETAINED_TIMELINE_SEARCH_LENGTH
@@ -37,6 +40,7 @@ import java.text.DateFormat
 import java.util.Date
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun RetainedTimelineCard(state: HomeUiState) {
     val currentLabels = state.selectedTargets.associate { it.identity.packageName to it.label }
     val snapshot = remember(
@@ -73,15 +77,17 @@ internal fun RetainedTimelineCard(state: HomeUiState) {
     )
     val filteredItems = remember(snapshot, query) { queryRetainedTimeline(snapshot, query) }
 
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("保留事件时间线", style = MaterialTheme.typography.titleMedium)
             Text(
-                "这是部分保留历史：通知最多 200 条，进程只含最近一次会话、最多 500 条。不同来源中相邻的记录不构成 FCM、唤醒或其他因果链。",
+                "部分历史：最多 200 条通知和最近会话的 500 条进程事件。",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
-                "空白、稀疏或缺少相邻事件都不能证明 FCM 是否送达、应用为何启动或长连接是否正常。列表只确认实际观察到的事件。",
+                "仅供观察，不证明消息送达、唤醒原因或连接状态；没有记录仍为未知。",
                 style = MaterialTheme.typography.bodySmall,
             )
 
@@ -89,9 +95,9 @@ internal fun RetainedTimelineCard(state: HomeUiState) {
                 Text(
                     when (warning) {
                         RetainedTimelineWarning.NOTIFICATION_SOURCE_OMITTED ->
-                            "通知历史损坏或超出边界，已只省略通知来源。"
+                            "通知历史损坏或超出范围，已省略该来源。"
                         RetainedTimelineWarning.PROCESS_SOURCE_OMITTED ->
-                            "进程会话历史损坏或超出边界，已只省略进程来源。"
+                            "进程历史损坏或超出范围，已省略该来源。"
                     },
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
@@ -106,7 +112,7 @@ internal fun RetainedTimelineCard(state: HomeUiState) {
                 label = { Text("搜索当前应用名称或包名") },
             )
             Text(
-                "应用名称只来自当前所选应用，不能证明旧记录的安装身份；旧的或已取消选择的记录仍可按包名搜索。",
+                "名称来自当前应用选择，不证明旧记录的安装身份；旧记录仍可按包名搜索。",
                 style = MaterialTheme.typography.bodySmall,
             )
 
@@ -130,7 +136,7 @@ internal fun RetainedTimelineCard(state: HomeUiState) {
             }
 
             Text("时间", fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 FilterChip(
                     selected = recentWindow == null,
                     onClick = { recentWindow = null },
@@ -146,7 +152,7 @@ internal fun RetainedTimelineCard(state: HomeUiState) {
             }
             recentWindow?.let { window ->
                 Text(
-                    "边界已固定：${formatTimelineTime(window.fromEpochMillis)} 至 ${formatTimelineTime(window.throughEpochMillis)}（含端点）。",
+                    "固定范围：${formatTimelineTime(window.fromEpochMillis)} 至 ${formatTimelineTime(window.throughEpochMillis)}（含端点）。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -209,21 +215,14 @@ internal fun RetainedTimelineCard(state: HomeUiState) {
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            "${formatTimelineTime(item.timestampEpochMillis)} · ${item.timestampMeaning.label()} · ${item.source.label()}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        item.sessionId?.let {
-                            Text("会话 $it", style = MaterialTheme.typography.bodySmall)
-                        }
-                        Text(
-                            "已确认观察事实 · ${item.installationScope.label()}",
+                            "${if (item.timestampMeaning == RetainedTimelineTimestampMeaning.NOTIFICATION_OBSERVED_AT) "观察于" else "事件于"} ${formatTimelineTime(item.timestampEpochMillis)}",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
             }
             Text(
-                "这里不提供合并导出；通知和进程会话仍使用各自已有的筛选导出。",
+                "导出请使用通知或进程会话各自的筛选入口；时间线不合并导出。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -260,25 +259,10 @@ private fun RetainedTimelineKind.label(): String = when (this) {
     RetainedTimelineKind.NOTIFICATION_POSTED_OR_UPDATED -> "通知发布/更新"
     RetainedTimelineKind.NOTIFICATION_REMOVED -> "通知移除"
     RetainedTimelineKind.PROCESS_START -> "进程启动"
-    RetainedTimelineKind.UID_ACTIVE -> "UID 活跃"
-    RetainedTimelineKind.UID_IDLE -> "UID 空闲"
-    RetainedTimelineKind.UID_RUNNING -> "UID 开始运行"
-    RetainedTimelineKind.UID_STOPPED -> "UID 停止运行"
-}
-
-private fun RetainedTimelineSource.label(): String = when (this) {
-    RetainedTimelineSource.NOTIFICATION -> "通知观察"
-    RetainedTimelineSource.PROCESS_SESSION -> "最近进程会话"
-}
-
-private fun RetainedTimelineTimestampMeaning.label(): String = when (this) {
-    RetainedTimelineTimestampMeaning.NOTIFICATION_OBSERVED_AT -> "通知观察时间"
-    RetainedTimelineTimestampMeaning.SYSTEM_EVENT_TIME -> "系统事件时间"
-}
-
-private fun RetainedTimelineInstallationScope.label(): String = when (this) {
-    RetainedTimelineInstallationScope.PACKAGE_ONLY_UNKNOWN -> "仅包名，安装连续性未知"
-    RetainedTimelineInstallationScope.PINNED_SESSION_CURRENT_UNKNOWN -> "会话固定安装，当前连续性未知"
+    RetainedTimelineKind.UID_ACTIVE -> "应用活跃"
+    RetainedTimelineKind.UID_IDLE -> "应用空闲"
+    RetainedTimelineKind.UID_RUNNING -> "应用开始运行"
+    RetainedTimelineKind.UID_STOPPED -> "应用停止运行"
 }
 
 private fun formatTimelineTime(epochMillis: Long): String =

@@ -207,7 +207,7 @@ class DiagnosticRecoveryReportTest {
             .forEach { key -> assertTrue(key, json.contains("\"$key\":")) }
         assertFalse(json.contains("\"gms\":"))
         assertFalse(json.contains("\"privilegedDetection\":"))
-        assertTrue(json.startsWith("{\"schema\":\"guardian.combined-diagnostic.v7\""))
+        assertTrue(json.startsWith("{\"schema\":\"guardian.combined-diagnostic.v8\""))
         assertTrue(ready.bytes.size <= MAX_REPORT_BYTES)
     }
 

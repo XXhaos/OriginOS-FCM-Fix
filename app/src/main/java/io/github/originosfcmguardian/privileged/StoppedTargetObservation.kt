@@ -2,8 +2,11 @@ package io.github.originosfcmguardian.privileged
 
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.autostart.RecoveryTargetQualifications
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
+import io.github.originosfcmguardian.autostart.validTargetUidMembers
+import io.github.originosfcmguardian.autostart.hasVerifiedPackageUid as verifiedRecoveryPackageUid
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import java.security.MessageDigest
 
@@ -31,12 +34,15 @@ internal sealed interface StoppedTargetObservation {
         val serviceUid: Int = 2000,
         val qualifiedRecipient: Boolean = false,
     ) : StoppedTargetObservation {
+        /** Qualification is trusted only from the fresh target read, never supplied by the UI. */
+        val hasVerifiedPackageUid: Boolean get() = verifiedRecoveryPackageUid(exclusiveUidOwner, qualifiedRecipient)
+
         init {
             require(requestId > 0 && observedAtMillis > 0)
             require(identity.packageName == STOPPED_TARGET_PACKAGE || qualifiedRecipient)
             require(!qualifiedRecipient || isRecoveryTargetPackage(identity.packageName))
             require(identity.signerSha256.size <= MAX_CURRENT_SIGNERS)
-            require(fingerprint == VERIFIED_AUTOSTART_FINGERPRINT && currentUser == 0 && serviceUid == 2000)
+            require(validRuntimeFingerprint(fingerprint) && currentUser == 0 && serviceUid == 2000)
         }
     }
 
@@ -94,14 +100,16 @@ internal fun observeStoppedTelegram(
     nowMillis: () -> Long = System::currentTimeMillis,
 ): StoppedTargetObservation {
     fun unknown(reason: StoppedObservationUnknown) = StoppedTargetObservation.Unknown(requestId, reason)
+    var observedEnvironment: StoppedProbeEnvironment? = null
     fun guard(): StoppedObservationUnknown? {
         interruption()?.let { return it }
         val environment = port.environment()
         return when {
             environment.serviceUid != 2000 -> StoppedObservationUnknown.SHELL_UNAVAILABLE
-            environment.fingerprint != VERIFIED_AUTOSTART_FINGERPRINT -> StoppedObservationUnknown.UNSUPPORTED_BUILD
+            !validRuntimeFingerprint(environment.fingerprint) -> StoppedObservationUnknown.UNSUPPORTED_BUILD
             environment.currentUser != 0 -> StoppedObservationUnknown.WRONG_USER
-            else -> interruption()
+            observedEnvironment != null && environment != observedEnvironment -> StoppedObservationUnknown.IDENTITY_CHANGED
+            else -> { observedEnvironment = environment; interruption() }
         }
     }
     if (requestId <= 0) return unknown(StoppedObservationUnknown.INVALID_REQUEST)
@@ -121,7 +129,8 @@ internal fun observeStoppedTelegram(
         ) return unknown(StoppedObservationUnknown.UID_OWNERSHIP_UNKNOWN)
         val timestamp = nowMillis()
         interruption()?.let { return unknown(it) }
-        StoppedTargetObservation.Known(requestId, after.first, after.second, owners.size == 1, timestamp)
+        StoppedTargetObservation.Known(requestId, after.first, after.second, owners.size == 1, timestamp,
+            fingerprint = requireNotNull(observedEnvironment?.fingerprint))
     } catch (_: Throwable) {
         unknown(interruption() ?: StoppedObservationUnknown.CAPABILITY_UNAVAILABLE)
     }
@@ -132,14 +141,16 @@ internal fun observeStoppedTarget(requestId: Long, expected: SelectedTargetIdent
     interruption: () -> StoppedObservationUnknown? = { null }, nowMillis: () -> Long = System::currentTimeMillis,
 ): StoppedTargetObservation {
     fun unknown(reason: StoppedObservationUnknown) = StoppedTargetObservation.Unknown(requestId, reason)
+    var observedEnvironment: StoppedProbeEnvironment? = null
     fun guard(): StoppedObservationUnknown? {
         interruption()?.let { return it }
         val env = port.environment()
         return when {
             env.serviceUid != 2000 -> StoppedObservationUnknown.SHELL_UNAVAILABLE
-            env.fingerprint != VERIFIED_AUTOSTART_FINGERPRINT -> StoppedObservationUnknown.UNSUPPORTED_BUILD
+            !validRuntimeFingerprint(env.fingerprint) -> StoppedObservationUnknown.UNSUPPORTED_BUILD
             env.currentUser != 0 -> StoppedObservationUnknown.WRONG_USER
-            else -> interruption()
+            observedEnvironment != null && env != observedEnvironment -> StoppedObservationUnknown.IDENTITY_CHANGED
+            else -> { observedEnvironment = env; interruption() }
         }
     }
     if (requestId <= 0) return unknown(StoppedObservationUnknown.INVALID_REQUEST)
@@ -159,11 +170,12 @@ internal fun observeStoppedTarget(requestId: Long, expected: SelectedTargetIdent
         guard()?.let { return unknown(it) }
         if (before.first != after.first) return unknown(StoppedObservationUnknown.IDENTITY_CHANGED)
         if (afterFields?.qualifications?.eligible != true) return unknown(StoppedObservationUnknown.INELIGIBLE_TARGET)
-        if (owners != listOf(expected.packageName)) return unknown(StoppedObservationUnknown.UID_OWNERSHIP_UNKNOWN)
+        if (!validTargetUidMembers(expected.packageName, owners)) return unknown(StoppedObservationUnknown.UID_OWNERSHIP_UNKNOWN)
         if (after.first != expected) return unknown(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED)
         val timestamp = nowMillis()
         interruption()?.let { return unknown(it) }
-        StoppedTargetObservation.Known(requestId, after.first, after.second, true, timestamp, qualifiedRecipient = true)
+        StoppedTargetObservation.Known(requestId, after.first, after.second, owners?.size == 1, timestamp,
+            fingerprint = requireNotNull(observedEnvironment?.fingerprint), qualifiedRecipient = true)
     } catch (_: Throwable) { unknown(interruption() ?: StoppedObservationUnknown.CAPABILITY_UNAVAILABLE) }
 }
 

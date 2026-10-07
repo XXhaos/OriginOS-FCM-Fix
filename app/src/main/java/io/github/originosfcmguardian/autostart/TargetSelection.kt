@@ -1,8 +1,6 @@
 package io.github.originosfcmguardian.autostart
 
 import android.content.Context
-import android.content.ComponentName
-import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -34,6 +32,23 @@ data class LauncherAppCandidate(
     val label: String,
     val selected: Boolean,
 )
+
+data class UserInstalledAppInventory(
+    val candidates: List<LauncherAppCandidate>,
+    /** Current PackageManager evidence, used only to hide preinstalled rows from the app list. */
+    val hiddenPreinstalledPackages: Set<String>,
+)
+
+internal fun isPreinstalledApplication(flags: Int): Boolean =
+    flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+
+internal fun isUserInstalledApplication(flags: Int): Boolean =
+    flags and ApplicationInfo.FLAG_INSTALLED != 0 && !isPreinstalledApplication(flags)
+
+/** Bounded current UID membership evidence; shared ownership never implies target qualification. */
+internal fun validTargetUidMembers(packageName: String, owners: List<String>?): Boolean =
+    owners != null && owners.size in 1..64 && owners.distinct().size == owners.size &&
+        owners.all(::isSafeAndroidPackageName) && packageName in owners
 
 enum class TargetIdentityStatus {
     MATCH,
@@ -198,40 +213,39 @@ class TargetPackageProbe(private val context: Context) {
         if (!isRecoveryTargetPackage(expected.packageName)) return@runCatching false
         val info = context.packageManager.getPackageInfo(expected.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
         val app = requireNotNull(info.applicationInfo)
-        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(expected.packageName)
-        val launchable = context.packageManager.queryIntentActivities(launcher, 0).any { resolved ->
-            val activity = resolved.activityInfo
-            activity != null && qualifiedRecoveryLauncher(expected.packageName, expected.uid, activity.packageName,
-                activity.applicationInfo?.uid, activity.enabled, activity.exported, activity.applicationInfo?.enabled) {
-                context.packageManager.getComponentEnabledSetting(ComponentName(activity.packageName, activity.name))
-            }
-        }
         val qualifications = RecoveryTargetQualifications(
             app.flags and ApplicationInfo.FLAG_INSTALLED != 0, app.enabled,
             app.flags and ApplicationInfo.FLAG_SYSTEM != 0,
             app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
-            app.flags and ApplicationInfo.FLAG_PERSISTENT != 0, launchable,
+            app.flags and ApplicationInfo.FLAG_PERSISTENT != 0,
         )
         qualifications.eligible && identity(expected.packageName) == expected &&
-            context.packageManager.getPackagesForUid(expected.uid)?.toList() == listOf(expected.packageName)
+            validTargetUidMembers(expected.packageName, context.packageManager.getPackagesForUid(expected.uid)?.toList())
     }.getOrDefault(false)
 
+    /** Kept for existing selection callers; candidates now include apps without a launcher. */
+    fun launcherCandidates(selectedPackages: Set<String>): List<LauncherAppCandidate> =
+        userInstalledApps(selectedPackages).candidates
+
     @Suppress("DEPRECATION")
-    fun launcherCandidates(selectedPackages: Set<String>): List<LauncherAppCandidate> {
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        return context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+    fun userInstalledApps(selectedPackages: Set<String>): UserInstalledAppInventory {
+        val applications = context.packageManager.getInstalledApplications(PackageManager.MATCH_DISABLED_COMPONENTS)
+        val hiddenPreinstalledPackages = applications.filter { isPreinstalledApplication(it.flags) }
+            .mapTo(mutableSetOf()) { it.packageName }
+        val candidates = applications
             .asSequence()
-            .mapNotNull { info ->
-                val packageName = info.activityInfo?.packageName ?: return@mapNotNull null
-                val uid = info.activityInfo?.applicationInfo?.uid ?: return@mapNotNull null
+            .mapNotNull { app ->
+                val packageName = app.packageName
+                val uid = app.uid
                 if (
+                    !isUserInstalledApplication(app.flags) ||
                     packageName == context.packageName ||
                     !isSafeAndroidPackageName(packageName) ||
                     !isUserZeroTargetAppUid(uid)
                 ) {
                     return@mapNotNull null
                 }
-                val label = info.loadLabel(context.packageManager).toString().trim()
+                val label = context.packageManager.getApplicationLabel(app).toString().trim()
                     .ifEmpty { packageName }
                     .take(80)
                 LauncherAppCandidate(packageName, label, packageName in selectedPackages)
@@ -239,6 +253,7 @@ class TargetPackageProbe(private val context: Context) {
             .distinctBy(LauncherAppCandidate::packageName)
             .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
             .toList()
+        return UserInstalledAppInventory(candidates, hiddenPreinstalledPackages)
     }
 
     @Suppress("DEPRECATION")

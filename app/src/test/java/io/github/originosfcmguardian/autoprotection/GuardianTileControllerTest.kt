@@ -10,14 +10,23 @@ class GuardianTileControllerTest {
         SelectedTargetIdentity("org.telegram.messenger", 10123, 1234, listOf("a".repeat(64))),
         VERIFIED_AUTOSTART_FINGERPRINT, policyVersion = 2)
 
-    private class Fixture(val throttle: GuardianTileThrottle = GuardianTileThrottle()) {
+    private class Fixture(
+        val throttle: GuardianTileThrottle = GuardianTileThrottle(),
+        val opportunity: GuardianTileRecoveryOpportunity = GuardianTileRecoveryOpportunity(throttle),
+    ) {
         var now = 0L
         var session = false
+        var revision = 7L
         val probes = mutableListOf<(StartupProbeResult) -> Unit>()
         val launches = mutableListOf<Pair<() -> Boolean, () -> Unit>>()
+        val launchRevisions = mutableListOf<Long>()
         val publications = mutableListOf<StartupEligibilityStatus?>()
-        val controller = GuardianTileController(throttle, { now }, { session },
-            { probes += it }, { permitted, complete -> launches += permitted to complete }, { publications += it })
+        val events = mutableListOf<ProtectionLifecycleEventKind>()
+        val controller = GuardianTileController(opportunity, { now }, { session }, { revision },
+            { probes += it }, { expected, permitted, complete ->
+                launchRevisions += expected
+                launches += permitted to complete
+            }, { publications += it }, { events += it })
     }
 
     private fun confirmedInvalidTargetWithSurvivor(): StartupProbeResult {
@@ -72,13 +81,13 @@ class GuardianTileControllerTest {
         }
     }
 
-    @Test fun `confirmed isolation restore still obeys session listening and launch generation gates`() {
+    @Test fun `confirmed isolation restore survives panel closing but obeys session and revision gates`() {
         val result = confirmedInvalidTargetWithSurvivor()
         val stopped = Fixture()
         stopped.controller.startListening()
         stopped.controller.stopListening()
         stopped.probes.single()(result)
-        assertTrue(stopped.launches.isEmpty())
+        assertEquals(1, stopped.launches.size)
         val running = Fixture()
         running.controller.startListening()
         running.session = true
@@ -90,9 +99,11 @@ class GuardianTileControllerTest {
         val mayLaunch = queued.launches.single().first
         assertTrue(mayLaunch())
         queued.controller.stopListening()
-        assertFalse(mayLaunch())
+        assertTrue(mayLaunch())
         queued.now = 3_000
         queued.controller.startListening()
+        assertTrue(mayLaunch())
+        queued.revision++
         assertFalse(mayLaunch())
     }
 
@@ -128,6 +139,7 @@ class GuardianTileControllerTest {
         val shared = GuardianTileThrottle()
         val first = Fixture(shared)
         first.controller.startListening()
+        first.probes.single()(StartupProbeResult(null, StartupEligibilityStatus.OFF))
         first.controller.stopListening()
         first.now = 2_999
         first.controller.startListening()
@@ -142,38 +154,105 @@ class GuardianTileControllerTest {
         assertFalse(shared.acquire(2_000))
     }
 
-    @Test fun `stop and newer listening generation discard late probe callbacks`() {
+    @Test fun `late probe continues bounded recovery without publishing into newer listening generation`() {
         val f = Fixture()
         f.controller.startListening()
         val stale = f.probes.single()
         f.controller.stopListening()
         val publishedAtStop = f.publications.size
-        stale(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
         f.controller.refresh()
         assertEquals(publishedAtStop, f.publications.size)
-        assertTrue(f.launches.isEmpty())
         f.now = 3_000
         f.controller.startListening()
+        val publishedAtRestart = f.publications.size
         stale(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
-        assertTrue(f.launches.isEmpty())
-        f.probes.last()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        assertEquals(publishedAtRestart, f.publications.size)
+        assertEquals(1, f.probes.size)
+        assertEquals(1, f.launches.size)
+        stale(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
         assertEquals(1, f.launches.size)
     }
 
-    @Test fun `queued restore is cancelled by stop remove or destruction and cannot revive in new generation`() {
+    @Test fun `queued restore survives stop remove and destruction without publishing after observation ends`() {
         val f = Fixture()
         f.controller.startListening()
         f.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
         val (mayLaunch, finished) = f.launches.single()
         assertTrue(mayLaunch())
         f.controller.stopListening() // Service routes stop, removal and destruction through this gate.
-        assertFalse(mayLaunch())
+        assertTrue(mayLaunch())
         val count = f.publications.size
         finished()
         assertEquals(count, f.publications.size)
         f.now = 3_000
         f.controller.startListening()
         assertFalse(mayLaunch())
+    }
+
+    @Test fun `trigger revision is captured before probe and old OFF ON callback cannot restore`() {
+        val beforeResult = Fixture()
+        beforeResult.controller.startListening()
+        beforeResult.revision += 2 // Explicit OFF then ON have superseded the old trigger.
+        beforeResult.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        assertTrue(beforeResult.launches.isEmpty())
+
+        val queued = Fixture()
+        queued.controller.startListening()
+        queued.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        assertEquals(listOf(7L), queued.launchRevisions)
+        queued.revision += 2
+        assertFalse(queued.launches.single().first())
+    }
+
+    @Test fun `probe and queued launch expire at ten seconds and a regressed clock cannot launch`() {
+        for (elapsed in listOf(-1L, 10_000L, 10_001L)) {
+            val late = Fixture()
+            late.controller.startListening()
+            late.now = elapsed
+            late.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+            assertTrue(late.launches.isEmpty())
+        }
+        val queued = Fixture()
+        queued.controller.startListening()
+        queued.now = 9_999
+        queued.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        assertTrue(queued.launches.single().first())
+        queued.now = 10_000
+        assertFalse(queued.launches.single().first())
+    }
+
+    @Test fun `single flight spans recreated services until read or restore completion even after expiry`() {
+        val shared = GuardianTileRecoveryOpportunity()
+        val first = Fixture(opportunity = shared)
+        first.controller.startListening()
+        first.controller.stopListening()
+        val recreated = Fixture(opportunity = shared)
+        recreated.now = 30_000
+        recreated.controller.startListening()
+        assertTrue(recreated.probes.isEmpty()) // A stuck expired read cannot accumulate a queue.
+        first.now = 30_000
+        first.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        assertTrue(first.launches.isEmpty())
+        recreated.controller.startListening()
+        assertEquals(1, recreated.probes.size)
+        recreated.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        val third = Fixture(opportunity = shared)
+        third.now = 33_000
+        third.controller.startListening()
+        assertTrue(third.probes.isEmpty()) // Restore dispatch still owns the process-wide slot.
+        recreated.launches.single().second()
+        third.controller.startListening()
+        assertEquals(1, third.probes.size)
+    }
+
+    @Test fun `bounded opportunity records listening request and completion without granting consent`() {
+        val f = Fixture()
+        f.controller.startListening()
+        f.probes.single()(StartupProbeResult(token, StartupEligibilityStatus.READY_TO_START))
+        f.controller.stopListening()
+        f.launches.single().second()
+        assertEquals(listOf(ProtectionLifecycleEventKind.TILE_LISTENING,
+            ProtectionLifecycleEventKind.TILE_RESTORE_REQUESTED, ProtectionLifecycleEventKind.TILE_RESTORE_RESULT), f.events)
     }
 
     @Test fun `existing session avoids probe and session started during probe avoids duplicate restore`() {

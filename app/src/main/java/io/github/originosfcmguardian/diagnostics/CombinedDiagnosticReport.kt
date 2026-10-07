@@ -130,6 +130,7 @@ data class CombinedDiagnosticReport(
     val automaticProtection: DiagnosticAutomaticProtection = DiagnosticAutomaticProtection(),
     val fcmRecoveryTrial: FcmRecoveryUiState = FcmRecoveryUiState(),
     val fcmProtection: io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(),
+    val protectionLifecycle: io.github.originosfcmguardian.autoprotection.ProtectionLifecycleSnapshot = io.github.originosfcmguardian.autoprotection.ProtectionLifecycleSnapshot(),
 )
 
 /**
@@ -454,6 +455,28 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             field("lastOutcome", lastOutcome?.name, comma = false)
         }
         append('}')
+        append(",\"protectionLifecycle\":{")
+        with(report.protectionLifecycle) {
+            field("availability", availability.name)
+            field("droppedEvents", droppedEvents)
+            field("systemExitHistoryAvailable", exitHistoryAvailable)
+            field("serviceHasNoRecordedEnd", serviceExpected)
+            field("evidenceLimit", "No clean service end recorded is not proof of an OS kill. Records are asynchronous; unavailable or dropped records leave cause unknown. System exits use their original historical time; no description or trace is collected.")
+            append("\"events\":[")
+            events.takeLast(64).forEachIndexed { index, event ->
+                if (index > 0) append(',')
+                append('{')
+                field("atEpochMillis", event.atMillis)
+                field("elapsedMillis", event.elapsedMillis)
+                field("guardianProcessId", event.processId)
+                field("event", event.kind.name)
+                field("reason", event.reason.name)
+                field("systemExitReason", event.systemExitReason?.toLong())
+                field("systemExitStatus", event.systemExitStatus?.toLong(), comma = false)
+                append('}')
+            }
+            append("]}")
+        }
         append(",\"sourceAvailability\":{")
         report.sourceAvailability.entries.forEachIndexed { index, entry ->
             if (index > 0) append(',')
@@ -609,7 +632,7 @@ private const val MAX_MONITOR_EVENTS = 500
 private const val MAX_LABEL_LENGTH = 80
 private const val MAX_TEXT_LENGTH = 128
 internal const val MAX_REPORT_BYTES = 64 * 1024
-internal const val DIAGNOSTIC_REPORT_SCHEMA = "guardian.combined-diagnostic.v7"
+internal const val DIAGNOSTIC_REPORT_SCHEMA = "guardian.combined-diagnostic.v8"
 private const val LIMITATION_SUMMARY_ONLY =
     "This report contains bounded summaries of already known app state and no raw notification or process events."
 private const val LIMITATION_CAUSALITY =

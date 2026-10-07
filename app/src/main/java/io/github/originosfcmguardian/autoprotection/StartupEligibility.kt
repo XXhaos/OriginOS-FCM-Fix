@@ -1,7 +1,7 @@
 package io.github.originosfcmguardian.autoprotection
 
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 
 internal const val STARTUP_EXIT_HISTORY_LIMIT = 64
 internal enum class StartupExitReason { USER_REQUESTED, USER_STOPPED, CRASH, CRASH_NATIVE, ANR, INITIALIZATION_FAILURE, OTHER }
@@ -61,7 +61,7 @@ internal fun confirmedInvalidTargetLeases(
     if (input.targetReadUnavailable || !input.authorityReadSuccessful || !input.userUnlocked || !selectionReadSuccessful ||
         root.mode != ProtectionConsentMode.ACTIVE || expected.isEmpty() ||
         input.exitHistory != StartupExitHistoryStatus.CLEAR ||
-        input.fingerprint != VERIFIED_AUTOSTART_FINGERPRINT || input.currentUser != 0 ||
+        !validRuntimeFingerprint(input.fingerprint) || input.currentUser != 0 ||
         expected.any { it.fingerprint != input.fingerprint } || !input.privilege.shellReady ||
         input.journal != RestartJournalStatus.CLEAR ||
         (input.budget != AutomaticCheckDecision.Recover && input.budget !is AutomaticCheckDecision.Cooldown) ||
@@ -100,7 +100,7 @@ internal fun startupEligibility(input: StartupEligibilityInputs): StartupEligibi
         input.exitHistory == StartupExitHistoryStatus.USER_STOPPED -> StartupEligibilityStatus.STOPPED_BY_USER
         input.exitHistory == StartupExitHistoryStatus.CRASH_LOOP -> StartupEligibilityStatus.BLOCKED_CRASH_LOOP
         input.exitHistory != StartupExitHistoryStatus.CLEAR -> StartupEligibilityStatus.BLOCKED_STORAGE
-        input.fingerprint != VERIFIED_AUTOSTART_FINGERPRINT || input.currentUser != 0 ||
+        !validRuntimeFingerprint(input.fingerprint) || input.currentUser != 0 ||
             targets.any { input.fingerprint != it.lease.consent.fingerprint ||
                 it.selectedIdentity != it.lease.consent.identity || (!input.targetReadUnavailable &&
                     (!it.qualified || it.freshIdentity != it.lease.consent.identity)) } ->

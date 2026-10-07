@@ -48,6 +48,11 @@ class CompactDiagnosticsPresentationTest {
         assertFalse(recentDiagnosticActions(state).joinToString().contains("private"))
     }
 
+    @Test fun incompleteRecentRecoveryDoesNotReferToRemovedHistoryPage() {
+        val state = loaded().copy(automaticProtection = loaded().automaticProtection.copy(lastOutcome = "FAILED"))
+        assertEquals(listOf("最近自动恢复：未完成，请检查问题摘要"), recentDiagnosticActions(state))
+    }
+
     @Test fun oldBuildAndChangedBuildCannotHaveHealthySummary() {
         val changed = loaded().copy(dailyProtectionReport = DailyProtectionReport(1, ProtectionCheckReason.BUILD_CHANGED,
             "private fingerprint", ProtectionCheckStatus.BUILD_CHANGED, "private summary"))

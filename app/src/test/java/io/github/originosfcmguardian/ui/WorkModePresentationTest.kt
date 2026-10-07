@@ -28,4 +28,13 @@ class WorkModePresentationTest {
             assertFalse(presentation.statusLabel.contains("就绪"))
         }
     }
+
+    @Test fun permissionGuidanceDescribesTheActionWithoutExposingTechnicalDetails() {
+        val required = shizukuWorkModePresentation(ShizukuStatusSnapshot(ShizukuStatus.PERMISSION_REQUIRED, "technical UID fixture"))
+        val blocked = shizukuWorkModePresentation(ShizukuStatusSnapshot(ShizukuStatus.PERMISSION_REQUIRED, "technical UID fixture", true))
+        assertEquals("请授权 Guardian 使用 Shizuku。", required.summary)
+        assertEquals("请在 Shizuku 中允许 Guardian。", blocked.summary)
+        assertFalse(required.summary.contains("technical UID"))
+        assertFalse(blocked.summary.contains("technical UID"))
+    }
 }

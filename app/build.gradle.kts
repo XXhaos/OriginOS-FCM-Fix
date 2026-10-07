@@ -16,8 +16,8 @@ android {
         applicationId = "io.github.originosfcmguardian"
         minSdk = 30
         targetSdk = 37
-        versionCode = 62
-        versionName = "0.1.0-fcm-protection-trial"
+        versionCode = 67
+        versionName = "0.1.0-portable-protection"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "FIREBASE_CONFIG_INCLUDED", hasGoogleServicesConfig.toString())

@@ -17,7 +17,7 @@ import io.github.originosfcmguardian.R
 import io.github.originosfcmguardian.autostart.TargetPackageProbe
 import io.github.originosfcmguardian.autostart.TargetSelectionStore
 import io.github.originosfcmguardian.autostart.TargetStoppedStatus
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.recovery.StoppedRecoveryController
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoveryRecord
@@ -60,23 +60,31 @@ class AutomaticProtectionService : Service() {
     private var latestStartId = 0
     private var stopPendingIntent: PendingIntent? = null
     private var destroyed = false
+    private var stopRequestRecorded = false
     private val targetRetirement = TargetRetirementForegroundHandoff()
     private val idleRetirement: () -> Unit = {
         // Runtime holds its revision/idle lock, and this callback runs on main. No resurrection:
         // only the already-existing, non-foreground service lifetime can be stopped here.
-        if (!destroyed && activeId == null) stopSelf(latestStartId)
+        if (!destroyed && activeId == null) stopServiceLifetime(latestStartId)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_CREATED)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_START)
+        stopRequestRecorded = false
         latestStartId = startId
         if (intent?.action == ACTION_STOP) {
             intent.getStringExtra(EXTRA_SESSION)?.let { id ->
                 AutomaticProtectionRuntime.stopSession(this, id)
                 if (activeId == id && !AutomaticProtectionRuntime.hasSession()) retire(id)
             }
-            if (activeId == null && targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopSelf(startId)
+            if (activeId == null && targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopServiceLifetime(startId)
             return if (AutomaticProtectionRuntime.hasSession() || activeId != null || targetRetirement.pending) START_STICKY else START_NOT_STICKY
         }
         if (intent == null || intent.action == ACTION_RESTORE) {
@@ -84,7 +92,7 @@ class AutomaticProtectionService : Service() {
         }
         val id = intent.takeIf { it.action == ACTION_START }?.getStringExtra(EXTRA_SESSION)
         if (id == null || !startSession(id)) {
-            if (activeId == null && targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopSelf(startId)
+            if (activeId == null && targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopServiceLifetime(startId)
             return if (AutomaticProtectionRuntime.hasSession() || activeId != null || targetRetirement.pending) START_STICKY else START_NOT_STICKY
         }
         return START_STICKY
@@ -92,15 +100,17 @@ class AutomaticProtectionService : Service() {
 
     private fun restoreSavedSession(startId: Int): Int {
         if (activeId != null || targetRetirement.pending) return START_STICKY
+        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_RESTORE)
         targetRetirement.clear()
         val restoreId = UUID.randomUUID().toString()
         activeId = restoreId
         try {
             enterForeground(restoreId, "正在核对启动授权，尚未执行保护")
-        } catch (_: RuntimeException) {
+        } catch (failure: RuntimeException) {
+            ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RESTORE_LAUNCH_FAILED, failure)
             activeId = null
             stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf(startId)
+            stopServiceLifetime(startId)
             return START_NOT_STICKY
         }
         val accepted = AutomaticProtectionRuntime.restoreForService(applicationContext, restoreId) { ready ->
@@ -108,7 +118,10 @@ class AutomaticProtectionService : Service() {
                 AutomaticProtectionRuntime.detach(restoreId)
             } else if (ready == null || !startSession(restoreId)) retire(restoreId)
         }
-        if (!accepted) retire(restoreId)
+        if (!accepted) {
+            ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.RESTORE_REJECTED)
+            retire(restoreId)
+        }
         return if (accepted) START_STICKY else START_NOT_STICKY
     }
 
@@ -140,7 +153,8 @@ class AutomaticProtectionService : Service() {
         stopPendingIntent?.cancel()
         try {
             enterForeground(grant.id, "正在核对运行条件")
-        } catch (_: RuntimeException) {
+        } catch (failure: RuntimeException) {
+            ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RESTORE_LAUNCH_FAILED, failure)
             AutomaticProtectionRuntime.pause(grant.id, "保护不可用：前台服务启动失败，请重新确认")
             retire(grant.id)
             return false
@@ -158,6 +172,9 @@ class AutomaticProtectionService : Service() {
         if (AutomaticProtectionRuntime.authorized(grant)) job.start() else {
             job.cancel()
             retire(grant.id)
+        }
+        if (AutomaticProtectionRuntime.authorized(grant)) {
+            ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_RUNNING)
         }
         return true
     }
@@ -250,6 +267,8 @@ class AutomaticProtectionService : Service() {
             sessionLoop@ while (AutomaticProtectionRuntime.authorized(grant)) {
                 val iterationConnection = connectionGeneration.current()
                 val privilege = ProtectionStartupProbe.privilegeEvidence()
+                // A negative read across a Binder replacement is obsolete, never durable revocation.
+                if (!matchesGmsConnection(iterationConnection)) continue
                 if (privilege.binderAlive != true) {
                     waitForHost()
                     publishNotification(grant, "等待 Shizuku，尚未执行保护")
@@ -409,7 +428,7 @@ class AutomaticProtectionService : Service() {
                 val observation = targetReads[offset % BoundedAutomaticTargetRead.CHUNK_SIZE]
                 var decisionPending: StoppedRecoveryRecord? = null
                 val decision = withContext(Dispatchers.IO) {
-                    val prerequisites = Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT && android.os.Process.myUid() / 100_000 == 0 &&
+                    val prerequisites = validRuntimeFingerprint(Build.FINGERPRINT) && android.os.Process.myUid() / 100_000 == 0 &&
                         runCatching { selection.load().contains(identity) && shellReady() &&
                             (observation.qualified == true || observation.locallyUnavailable) }.getOrDefault(false)
                     val receipt = runCatching { recovery.loadLatest() }
@@ -701,8 +720,9 @@ class AutomaticProtectionService : Service() {
             }
         } catch (_: CancellationException) {
             // Revocation details are set synchronously by the stop/loss path.
-        } catch (_: Exception) {
-            AutomaticProtectionRuntime.pause(grant.id, "保护不可用：读取或恢复异常，请先复检后重新确认")
+        } catch (failure: Exception) {
+            ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RUNTIME_INTERRUPTED, failure)
+            AutomaticProtectionRuntime.interrupt(grant.id)
         } finally {
             FcmProtectionRuntime.hostEnded(grant.id)
             controller?.close()
@@ -732,7 +752,7 @@ class AutomaticProtectionService : Service() {
             if (survivors) restoreSavedSession(latestStartId)
             else {
                 stopForeground(STOP_FOREGROUND_REMOVE)
-                if (!AutomaticProtectionRuntime.hasSession()) stopSelf(latestStartId)
+                if (!AutomaticProtectionRuntime.hasSession()) stopServiceLifetime(latestStartId)
             }
         }
         if (!accepted) targetRetirement.finish(grant.id)
@@ -770,10 +790,25 @@ class AutomaticProtectionService : Service() {
         stopPendingIntent = null
         if (!targetRetirement.holds(id)) stopForeground(STOP_FOREGROUND_REMOVE)
         // A replacement may have reserved its grant before its START command is delivered.
-        if (targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopSelf(latestStartId)
+        if (targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopServiceLifetime(latestStartId)
+    }
+
+    /** Collapse duplicate retirement callbacks for the same started-service lifetime. */
+    private fun stopServiceLifetime(startId: Int) {
+        if (!stopRequestRecorded) {
+            stopRequestRecorded = true
+            ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_STOP_REQUESTED)
+        }
+        stopSelf(startId)
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_TASK_REMOVED)
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_DESTROYED)
         destroyed = true
         targetRetirement.clear()
         AutomaticProtectionRuntime.detachServiceRetirement(idleRetirement)

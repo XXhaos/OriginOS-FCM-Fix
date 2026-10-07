@@ -72,6 +72,13 @@ class StoppedRecoveryTransactionTest {
         assertEquals(StoppedRecoveryOutcome.NO_WRITE_NEEDED, result.outcome)
     }
 
+    @Test fun unsupportedRuntimeInterfaceNeverClaimsOrWrites() {
+        val result = StoppedRecoveryEngine({ known() }, { error("claim") }, { true }, { error("write") })
+            .recover(1, identity) { false }
+        assertEquals(StoppedRecoveryOutcome.BLOCKED, result.outcome)
+        assertFalse(result.commandSucceeded)
+    }
+
     @Test fun changedIdentityAndSharedUidNeverClaim() {
         listOf(known().copy(identity = identity.copy(firstInstallTime = 200)), known().copy(exclusiveUidOwner = false)).forEach { sample ->
             val result = StoppedRecoveryEngine({ sample }, { error("claim") }, { true }, { error("write") }).recover(1, identity)

@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +23,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.Surface
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -50,12 +55,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import io.github.originosfcmguardian.BuildConfig
+import io.github.originosfcmguardian.R
 import io.github.originosfcmguardian.monitoring.MonitorRunPhase
 import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
 import io.github.originosfcmguardian.privileged.ShizukuStatus
@@ -116,15 +124,12 @@ fun HomeScreen(
     onOpenProtectionNotificationSettings: () -> Boolean = { false },
     onRefreshShizuku: () -> Unit = {},
     onOpenShizuku: () -> Unit = {},
-    onOpenGmsConnection: () -> Unit = {},
     onOpenFcmDiagnostics: () -> Boolean = { false },
     onReadGmsConnection: () -> Unit = {},
-    onRequestGmsHeartbeat: () -> Unit = {},
     onRequestFcmProtection: () -> Unit = {},
     onConfirmFcmProtection: () -> Unit = {},
     onDismissFcmProtection: () -> Unit = {},
     onDisableFcmProtection: () -> Unit = {},
-    onDismissGmsConnection: () -> Unit = {},
     onRequestAddGuardianTile: ((String) -> Unit) -> Unit = { result ->
         result("下拉控制中心，进入编辑，将“推送保护”拖到常用区域。")
     },
@@ -149,8 +154,6 @@ fun HomeScreen(
         if (secondaryDestination == "diagnostics" && diagnosticTool != null) diagnosticToolName = null
         else if (secondaryDestination != null) secondaryDestination = null else primaryTab = "home"
     }
-    if (state.gmsConnection.visible) GmsConnectionDialog(state.gmsConnection, onReadGmsConnection,
-        onDismissGmsConnection, onRequestGmsHeartbeat, !state.gmsAutoHeartbeat.manualBlocked)
     if (state.fcmProtectionConfirmation) FcmProtectionConfirmation(onConfirmFcmProtection, onDismissFcmProtection)
     var showNoTouchProtection by remember { mutableStateOf(false) }
     if (showNoTouchProtection) {
@@ -175,18 +178,29 @@ fun HomeScreen(
     Scaffold(
         topBar = { TopAppBar(
             title = {
-                Column {
-                    Text(when (destination) {
-                        "apps" -> "应用"
-                        "settings" -> "设置"
-                        "diagnostics" -> diagnosticTool?.label ?: "诊断"
-                        else -> "Guardian"
-                    }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (destination == "home") Text("OriginOS 后台管理",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (destination == "home") Surface(
+                        shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.size(36.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(painterResource(R.drawable.ic_guardian_tile), contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(22.dp))
+                        }
+                    }
+                    Column {
+                        Text(when (destination) {
+                            "apps" -> "应用"
+                            "settings" -> "设置"
+                            "diagnostics" -> diagnosticTool?.label ?: "诊断"
+                            else -> "Guardian"
+                        }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (destination == "home") Text("OriginOS 后台管理",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             },
             navigationIcon = {
@@ -213,7 +227,9 @@ fun HomeScreen(
                 // Stops stay outside scrollable destinations, even after the target is removed.
                 ProtectionStopBar(state, onStopAutomaticProtection, onStopDeepMonitoring,
                     { onSetNotificationFactsEnabled(false) }, onOpenNotificationListenerSettings)
-                NavigationBar {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    tonalElevation = 0.dp) {
                     NavigationBarItem(selected = primaryTab == "home" && secondaryDestination == null,
                         onClick = { primaryTab = "home"; secondaryDestination = null },
                         icon = { NavigationGlyph(home = true) }, label = { Text("主页") },
@@ -235,14 +251,14 @@ fun HomeScreen(
                     "diagnostics" -> diagnosticsScroll
                     else -> homeScroll
                 }))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (fcmDiagnosticsUnavailable && secondaryDestination == null) Text(
                 io.github.originosfcmguardian.fcm.GMS_DIAGNOSTICS_UNAVAILABLE,
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (destination == "home") {
-                HomeOverview(state, onOpenGmsConnection, { primaryTab = "apps" },
+                HomeOverview(state, onReadGmsConnection, { primaryTab = "apps" },
                     { secondaryDestination = "settings" }, {
                         diagnosticToolName = null
                         secondaryDestination = "diagnostics"
@@ -293,6 +309,9 @@ fun HomeScreen(
             if (diagnosticTool == null) {
                 StatusCard("问题摘要") {
                     Text(diagnosticSummary(state), style = MaterialTheme.typography.bodyMedium)
+                    val lastCheck = state.dailyProtectionReport?.checkedAtEpochMillis
+                    Text(lastCheck?.let { "已保存检查：${formatRecordTime(it)}（历史记录）" } ?: "尚无已保存检查记录",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     diagnosticIssues(state).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
                     if (state.stoppedRecovery.needsReconcile || state.stoppedRecovery.storageBlocked) {
                         StoppedRecoveryReceipt(state.stoppedRecovery,
@@ -304,12 +323,11 @@ fun HomeScreen(
                     val recent = recentDiagnosticActions(state)
                     if (recent.isEmpty()) Text("暂无已保存操作")
                     recent.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    TextButton(onClick = { diagnosticToolName = DiagnosticTool.RECOVERY.name }) { Text("查看操作历史") }
                 }
                 StatusCard("导出报告") {
-                    Text("含设备型号、系统版本、所选应用包名和名称，分享前请检查；不含令牌、通知正文、testId、Android ID、签名、UID、PID 或原始命令输出。",
+                    Text("含设备和所选应用信息，分享前请检查。",
                         style = MaterialTheme.typography.bodySmall)
-                    Text("只导出已有快照，不执行新的特权读取；连接和投递因果仍可能未知。", style = MaterialTheme.typography.bodySmall)
+                    Text("只导出已有记录，不含令牌或消息正文。", style = MaterialTheme.typography.bodySmall)
                     DiagnosticReportExportButton(state.diagnosticReportExportBusy, onExportCombinedDiagnosticReport)
                     state.diagnosticReportExportFeedback?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
@@ -321,19 +339,6 @@ fun HomeScreen(
                         TextButton(onClick = { diagnosticToolName = tool.name }) { Text(tool.label) }
                     }
                 }
-                if (advancedDiagnostics) {
-                    FcmConnectionDetails(state, onOpenGmsConnection)
-                    RecoveryCountsCard(state)
-                    StatusCard("自动保护详情") {
-                        Text(state.automaticProtection.detail, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-            if (diagnosticTool == DiagnosticTool.RECOVERY) {
-            StoppedRecoveryReceipt(state.stoppedRecovery,
-                reconcileBusy = state.detecting || state.automaticProtection.enabled || state.automaticProtection.busy,
-                onReconcile = onReconcileStoppedRecovery)
-            if (state.stoppedRecovery.receiptOutcome == null && !state.stoppedRecovery.needsReconcile) Text("暂无恢复操作记录")
             }
             if (diagnosticTool == DiagnosticTool.DAILY) {
             StatusCard("定期巡检") {
@@ -402,7 +407,7 @@ fun HomeScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(if (state.notificationFacts.enabled) "已启用" else "默认关闭")
                         Text(
-                            "仅记录所选应用的包名、时间和发布/移除事件，不采集通知内容。",
+                            "只记录所选应用的通知事件，不采集内容。",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -423,11 +428,11 @@ fun HomeScreen(
                 )
                 StatusRow("有效所选应用", state.notificationFacts.targetCount.toString())
                 Text(
-                    "系统通知使用权覆盖所有应用；Guardian 只保存所选应用的包名、时间和事件，不保存通知内容。可在系统页面撤销权限。",
+                    "系统授权覆盖所有应用；这里只保存所选应用的包名、时间和事件，可随时撤销权限。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    "启用监听可能让 Guardian 在后台驻留，耗电影响尚未实测；不需要时可关闭记录并撤销权限。",
+                    "监听可能增加后台运行，耗电尚未实测；不需要时请关闭。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (state.notificationFacts.enabled && !state.notificationFacts.accessGranted) {
@@ -445,7 +450,7 @@ fun HomeScreen(
                 }
                 if (state.notificationFacts.targetCount < 1) {
                     Text(
-                        "请先在“关注应用”中选择至少一个身份有效的应用，才能开启记录。",
+                        "请先在“应用”页选择一个有效应用。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -534,11 +539,11 @@ fun HomeScreen(
                     }
                 }
                 Text(
-                    "这些记录只确认系统观察到通知发布、更新或移除；不能证明通知来自 FCM，也不能证明应用被推送拉起。",
+                    "仅记录系统通知事件，不证明来自 FCM 或由推送唤醒。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    "历史按包名归类，未记录每条事件所属的安装身份；重新安装前的同包名记录可能仍在列表中。导出会保存点击时的筛选快照。",
+                    "重新安装前的同包名历史可能仍保留。导出保存当前筛选。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -599,20 +604,11 @@ fun HomeScreen(
                 state.fcm.latestReceipt?.let { receipt ->
                     Spacer(Modifier.height(4.dp))
                     Text("最近 Guardian 回调", fontWeight = FontWeight.SemiBold)
-                    StatusRow("testId", receipt.testId)
                     StatusRow("收到时间", formatRecordTime(receipt.receivedAtEpochMillis))
-                    StatusRow("消息优先级", receipt.messagePriority.label())
-                    StatusRow("表观墙钟差", "${receipt.apparentWallClockDeltaMillis} ms（可能含时钟偏差）")
-                    StatusRow("本机处理", receipt.handlerDurationMillis?.let { "$it ms" } ?: "通知结果尚未落盘")
-                    StatusRow("回调时进程已运行", receipt.processAgeAtCallbackMillis?.let { "$it ms" } ?: "未记录")
-                    Text("进程运行时长仅辅助判断接收时的状态，不能单独证明由推送启动。")
                     StatusRow("通知提交", receipt.notificationOutcome.label())
-                    StatusRow("屏幕交互", receipt.deviceInteractive.label())
-                    StatusRow("Device Idle", receipt.deviceIdleMode.label())
-                    StatusRow("粗粒度网络", receipt.networkAvailability.label())
                 } ?: Text("尚无受控 FCM 回调证据", style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    "本卡仅证明 Guardian 自身回调与本机通知提交请求。notify() 返回不代表系统界面实际可见；墙钟差也不是精确网络延迟。",
+                    "仅为 Guardian 自测记录；通知提交不代表屏幕上已显示。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -676,10 +672,9 @@ internal fun NoTouchProtectionDialog(onDismiss: () -> Unit,
         title = { Text("无感保活") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("将盾牌“推送保护”放到控制中心常用区域。下拉到按钮可见时，Guardian 会尝试恢复已开启的保护，无需点击。")
-                Text("先连接特权服务并开启自动保护。亮起表示检测运行中；点击按钮可打开 Guardian。手动关闭的保护不会自动开启。")
-                Text("这是辅助恢复，不保证永久常驻。权限未就绪或系统限制时，请打开应用处理。")
-                Text("也可手动添加：控制中心 → 编辑 → 推送保护。")
+                Text("添加盾牌“推送保护”，下拉到按钮可见时，尝试恢复意外中断的保护；手动关闭不会重新开启。")
+                Text("需要自动保护和 Shizuku 已开启。亮起表示检测运行中，点击可打开 Guardian。此功能不保证永久常驻。")
+                Text("也可在控制中心的编辑列表中添加。")
                 message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             }
         },
@@ -774,37 +769,27 @@ private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onApps: () -> Un
         }, style = MaterialTheme.typography.bodyMedium)
         shizuku.actionLabel?.let { label -> Button(onClick = onShizukuAction) { Text(label) } }
     }
-    StatusCard("自动保护") {
+    StatusCard("自动保护", emphasis = true) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically) {
             Text(automaticProtectionStatus(automatic), modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodyLarge)
             AutomaticProtectionToggle(automatic, canEnableAutomaticProtection(state), onEnableMaster, onDisableMaster)
         }
-        Text(if (automatic.configurationAvailable) "已选择 ${automatic.configuredIdentities.size} 个应用；关闭总开关会保留选择。"
+        Text(if (automatic.configurationAvailable) "已选 ${automatic.configuredIdentities.size} 个应用 · 关闭总开关保留选择"
             else "应用选择记录暂不可用；保留上次已知选择。", style = MaterialTheme.typography.bodySmall)
         if (automatic.revocationSaveFailed) TextButton(onClick = onDisableMaster) { Text("重试保存关闭状态") }
-        Text("每轮检查后等待约 30 秒；休眠可能延后，不保证通知送达。",
+        Text("约每 30 秒检查；休眠可能延后，不保证送达。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onApps) { Text("管理应用（${automatic.configuredIdentities.size}）") }
     }
-    StatusCard("FCM 连接与保活") {
-        Text("FCM 连接状态", style = MaterialTheme.typography.titleSmall)
-        Text(fcmProtectionObservationText(state.fcmProtection, android.os.SystemClock.elapsedRealtime()), style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = onGms) { Text("查看连接状态") }
+    StatusCard("FCM 连接与保活", emphasis = true) {
+        FcmInlineConnection(state.gmsConnection, state.fcmProtection.latestObservation, onGms)
         FcmProtectionControls(state.fcmProtection,
             automatic.enabled && state.shizuku.status == ShizukuStatus.READY_SHELL,
             onEnableFcm, onDisableFcm)
     }
-    StatusCard("上次检查") {
-        Text(diagnosticSummary(state), style = MaterialTheme.typography.bodyMedium,
-            color = if (diagnosticIssues(state).isNotEmpty()) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurface)
-        val lastCheck = state.dailyProtectionReport?.checkedAtEpochMillis
-        Text(lastCheck?.let { "已保存检查：${formatRecordTime(it)}（历史记录）" } ?: "尚无已保存检查记录",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        TextButton(onClick = onDiagnostics) { Text("查看技术详情") }
-    }
+    RecoveryCountsCard(state)
     StatusCard("诊断信息") {
         Text("用于故障排查和技术支持的记录。", style = MaterialTheme.typography.bodyMedium)
         OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("打开诊断信息") }
@@ -817,37 +802,9 @@ private fun HomeOverview(state: HomeUiState, onGms: () -> Unit, onApps: () -> Un
 }
 
 @Composable
-private fun gmsConnectionClock(state: HomeUiState): Long {
-    var elapsed by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
-    LaunchedEffect(state.gmsConnection.observation) {
-        elapsed = android.os.SystemClock.elapsedRealtime()
-        val sample = state.gmsConnection.observation as? io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample
-            ?: return@LaunchedEffect
-        while (sample.isFresh(elapsed)) {
-            kotlinx.coroutines.delay(1_000)
-            elapsed = android.os.SystemClock.elapsedRealtime()
-        }
-    }
-    return elapsed
-}
-
-@Composable
-private fun FcmConnectionDetails(state: HomeUiState, onGms: () -> Unit) {
-    StatusCard("FCM 连接详情") {
-        Text(gmsConnectionSummary(state.gmsConnection, gmsConnectionClock(state)), style = MaterialTheme.typography.bodySmall)
-        (state.gmsConnection.observation as? io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample)?.let {
-            Text("观察时间：${formatRecordTime(it.observedAtMillis)}", style = MaterialTheme.typography.bodySmall)
-        }
-        Text("自动重连未接入，未开启；TCP 迹象不证明通知送达。", style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = onGms) { Text("单次只读观察") }
-    }
-}
-
-@Composable
 private fun RecoveryCountsCard(state: HomeUiState) {
     StatusCard("解除停止限制") {
         val counts = state.recoveryCounts
-        Text("当前关注应用的已保存确认次数", style = MaterialTheme.typography.bodySmall)
         if (counts.available) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -860,19 +817,10 @@ private fun RecoveryCountsCard(state: HomeUiState) {
                 }
             }
         }
-        Text(counts.detail, style = MaterialTheme.typography.bodySmall)
-        if (counts.available) Text(recoveryCountsSnapshotLabel(counts.calculatedAtMillis, counts.zoneId),
-            style = MaterialTheme.typography.bodySmall)
-        Text("仅计实际写入并读回确认的解除；不是通知送达次数。", style = MaterialTheme.typography.bodySmall)
-    }
-    state.automaticProtection.lastOutcome?.let { outcome ->
-        Text(when (outcome) {
-            "FLAG_CLEARED" -> "最新操作：停止限制已解除"
-            "NO_WRITE_NEEDED" -> "最新操作：无需恢复"
-            "STILL_STOPPED" -> "最新操作：限制仍存在"
-            "UNCONFIRMED" -> "最新操作：恢复结果待确认"
-            else -> "最新操作：未完成，请查看应用详情"
-        }, style = MaterialTheme.typography.bodySmall)
+        if (!counts.available) Text("统计暂不可用", style = MaterialTheme.typography.bodySmall)
+        else Text(recoveryCountsSnapshotText(counts.calculatedAtMillis, counts.zoneId),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("仅计解除限制，不代表消息送达。", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -880,19 +828,10 @@ private fun automaticProtectionStatus(state: io.github.originosfcmguardian.autop
     state.waitingForReconciliation -> "等待只读复检"
     state.busy -> "启动或恢复中"
     state.waitingForPrivilege -> "等待特权；尚未执行保护"
-    state.enabled -> "停止限制检测已开启"
+    state.enabled -> "检测已开启"
     state.revocationSaveFailed -> "关闭状态未可靠保存"
     state.savedAuthorization -> "等待恢复检测"
     else -> "检测未开启"
-}
-
-private fun recoveryCountsSnapshotLabel(calculatedAtMillis: Long?, zoneId: String?): String {
-    val timestamp = if (calculatedAtMillis != null && zoneId != null) runCatching {
-        java.time.Instant.ofEpochMilli(calculatedAtMillis).atZone(java.time.ZoneId.of(zoneId))
-            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
-    }.getOrNull() else null
-    return if (timestamp != null) "统计截至 $timestamp（$zoneId）；回到应用刷新"
-        else "统计时间或时区未知；回到应用刷新"
 }
 
 @Composable
@@ -919,7 +858,7 @@ private fun ProtectionStopBar(state: HomeUiState, onStopProtection: () -> Unit, 
 
 @Composable
 private fun NavigationGlyph(home: Boolean) {
-    val color = MaterialTheme.colorScheme.onSurface
+    val color = LocalContentColor.current
     Canvas(Modifier.size(24.dp)) {
         val unit = size.width / 24f
         val stroke = Stroke(width = 1.8.dp.toPx())
@@ -938,16 +877,23 @@ private fun NavigationGlyph(home: Boolean) {
 }
 
 @Composable
-private fun StatusCard(title: String, attention: Boolean = false, content: @Composable () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp),
+private fun StatusCard(title: String, attention: Boolean = false, emphasis: Boolean = false,
+    content: @Composable () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    // Accent marks the primary controls, not connection health or runnable authority.
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(1.dp, if (attention) colors.error.copy(alpha = 0.3f)
+            else if (emphasis) colors.primary.copy(alpha = 0.24f) else colors.outlineVariant.copy(alpha = 0.5f)),
         colors = CardDefaults.cardColors(containerColor = if (attention) MaterialTheme.colorScheme.errorContainer
+            else if (emphasis) lerp(colors.surfaceContainer, colors.primaryContainer, 0.24f)
             else MaterialTheme.colorScheme.surfaceContainer,
             contentColor = if (attention) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface)) {
         Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                color = if (attention) colors.onErrorContainer else if (emphasis) colors.primary else colors.onSurface)
             content()
         }
     }

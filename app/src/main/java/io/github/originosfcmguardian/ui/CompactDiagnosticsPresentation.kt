@@ -5,7 +5,7 @@ import io.github.originosfcmguardian.privileged.ShizukuStatus
 
 internal enum class DiagnosticTool(val label: String) {
     DAILY("定期巡检"), NOTIFICATIONS("通知记录"),
-    MONITOR("深度监控"), TIMELINE("监控时间线"), RECOVERY("恢复操作历史"), SELF_TEST("Guardian 推送自测"),
+    MONITOR("深度监控"), TIMELINE("监控时间线"), SELF_TEST("Guardian 推送自测"),
 }
 
 internal fun gmsConnectionSummary(state: GmsConnectionUiState, nowElapsed: Long): String = when {
@@ -62,5 +62,5 @@ private fun recoveryOutcomeSummary(outcome: String): String = when (outcome) {
     "NO_WRITE_NEEDED" -> "无需恢复"
     "STILL_STOPPED" -> "停止限制仍存在"
     "UNCONFIRMED" -> "结果待确认"
-    else -> "未完成，请查看恢复操作历史"
+    else -> "未完成，请检查问题摘要"
 }

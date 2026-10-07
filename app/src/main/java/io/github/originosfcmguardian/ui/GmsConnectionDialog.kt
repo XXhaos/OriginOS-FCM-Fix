@@ -3,22 +3,24 @@ package io.github.originosfcmguardian.ui
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
 import io.github.originosfcmguardian.core.gms.*
-import kotlinx.coroutines.delay
-import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 
 data class GmsConnectionUiState(
     val visible: Boolean = false, val busy: Boolean = false,
@@ -28,6 +30,9 @@ data class GmsConnectionUiState(
     val networkTrackingAvailable: Boolean = false,
     val heartbeatBusy: Boolean = false,
     val heartbeatStatus: GmsHeartbeatStatus? = null,
+    val readAttempted: Boolean = false,
+    val readCompletedAtElapsedMillis: Long? = null,
+    val automaticObservationAtReadCompletion: GmsConnectionObservation? = null,
 )
 
 internal fun gmsHeartbeatMessage(status: GmsHeartbeatStatus): String = when (status) {
@@ -60,51 +65,55 @@ internal fun gmsServiceHeadline(sample: GmsConnectionObservation.Sample, nowElap
     val source = sample.gcmService
     val sampledElapsed = source.elapsedRealtimeMillis
     return when {
-        networkChanged -> "网络背景已变化；当前 GMS 自报状态未知"
+        networkChanged -> "网络背景已变化；当前 FCM 连接未知"
         sampledElapsed == null || source.completeness != SourceCompleteness.COMPLETE ||
-            source.state == GcmConnectionState.UNKNOWN -> "GMS 自报连接状态未知"
-        nowElapsed < sampledElapsed || nowElapsed - sampledElapsed > 30_000 -> "历史自报状态已过期；当前连接未知"
-        source.state == GcmConnectionState.REPORTED_CONNECTED -> "GMS 自报：已连接"
+            source.state == GcmConnectionState.UNKNOWN -> "FCM 连接状态未知"
+        !sample.isFresh(nowElapsed) || nowElapsed < sampledElapsed ||
+            nowElapsed - sampledElapsed > 30_000 -> "历史自报状态已过期；当前连接未知"
+        source.state == GcmConnectionState.REPORTED_CONNECTED ->
+            "FCM 已连接 · ${gmsConnectedDurationText(source.connectedDurationMillis)}"
         source.state == GcmConnectionState.SERVICE_ABSENT -> "本次完整读取：FCM 服务不存在"
-        else -> "GMS 自报：已断开"
+        else -> "FCM 已断开"
     }
+}
+
+/** Fixed GMS-reported duration for this read; never extrapolate from clocks or socket evidence. */
+internal fun gmsConnectedDurationText(durationMillis: Long?): String {
+    if (durationMillis == null || durationMillis < 0) return "连接时长未知"
+    val seconds = durationMillis / 1_000
+    val duration = when {
+        seconds < 60 -> "${seconds}秒"
+        seconds < 3_600 -> "${seconds / 60}分${seconds % 60}秒"
+        else -> "${seconds / 3_600}小时${seconds % 3_600 / 60}分${seconds % 60}秒"
+    }
+    return "连接时长 $duration"
+}
+
+internal fun gmsObservationUpdateText(sample: GmsConnectionObservation.Sample): String {
+    val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        .format(Date(sample.gcmService.observedAtMillis ?: sample.observedAtMillis))
+    return "更新于$time"
 }
 
 @Composable
 fun GmsConnectionDialog(state: GmsConnectionUiState, onRead: () -> Unit, onDismiss: () -> Unit,
                         onHeartbeat: () -> Unit, manualHeartbeatAllowed: Boolean = true) {
-    var nowElapsed by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
-    LaunchedEffect(state.observation) {
-        while (true) { nowElapsed = SystemClock.elapsedRealtime(); delay(1_000) }
-    }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("GMS 连接") },
+    val nowElapsed = fcmPresentationClock(state.observation)
+    val status = fcmConnectionStatus(state.observation, nowElapsed,
+        networkInvalid = state.networkChanged, networkTrackingUnavailable = !state.networkTrackingAvailable)
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("FCM 连接") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("连接读取为只读；这里仅触发单次手动心跳，不表示已修复。")
+            Text(status.text, modifier = Modifier.clearAndSetSemantics { contentDescription = status.accessibilityLabel },
+                style = MaterialTheme.typography.titleMedium)
+            Text("状态仅供参考，不代表消息送达。", style = MaterialTheme.typography.bodySmall)
             if (state.busy) Text(if (state.heartbeatBusy) "正在请求心跳…" else "读取中…")
             OutlinedButton(onClick = onHeartbeat, enabled = !state.busy && manualHeartbeatAllowed) { Text("触发一次心跳") }
-            if (!manualHeartbeatAllowed) Text("需先关闭低频心跳并确认停止；未结算的旧操作不能手动绕过。")
+            if (!manualHeartbeatAllowed) Text("请先关闭 FCM 保护并确认停止，再手动请求心跳。")
             state.heartbeatStatus?.let { Text(gmsHeartbeatMessage(it)) }
-            when (val value = state.observation) {
-                null -> Text("尚未取样；需要已授权的 Shizuku shell。")
-                is GmsConnectionObservation.Unknown -> Text("无法判断：${value.reason}")
-                is GmsConnectionObservation.Sample -> {
-                    Text(gmsServiceHeadline(value, nowElapsed, state.networkChanged || !state.networkTrackingAvailable))
-                    Text("GMS 自报状态不保证连接活性或通知送达。", style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                    Text(gmsSampleHeadline(value, nowElapsed, state.networkChanged || !state.networkTrackingAvailable))
-                    if (!state.networkTrackingAvailable) Text("网络变化回调不可用；仅保留历史样本。")
-                    Text("取样开始：${DateFormat.getDateTimeInstance().format(Date(value.observedAtMillis))}；样本年龄 ${((nowElapsed - value.elapsedRealtimeMillis).coerceAtLeast(0) / 1000)} 秒")
-                    Text("shell /proc/net/tcp：${value.tcp.completeness}；tcp6：${value.tcp6.completeness}")
-                    Text("仅匹配 GMS 独占 UID、established、远端5228–5230。不能证明端点、TLS、MCS 或通知送达；443 未用作 FCM 证据。")
-                    Text("取样时 Guardian 默认网络背景：${state.networkBackground}。这不是 GMS 的实际路由；VPN 可影响可见性。")
-                    Text(if (!value.receiverInspectionComplete) "GCM_RECONNECT manifest 接收者查询不可用。"
-                        else if (value.receivers.isEmpty()) "未查询到 manifest 接收者；不排除动态注册。"
-                        else "GCM_RECONNECT manifest 接收者：")
-                    value.receivers.forEach {
-                        Text("${it.name}\nexported=${it.exported}；manifest enabled=${it.enabled}；permission=${it.permission ?: "无"}")
-                    }
-                    Text("接收者元数据不证明 shell 可分发，也不证明重连有效。")
-                }
-            }
+            if (state.observation == null || state.observation is GmsConnectionObservation.Unknown)
+                Text("请确认 Shizuku 已授权，再读取一次。", style = MaterialTheme.typography.bodySmall)
+            if (state.observation is GmsConnectionObservation.Sample && !state.networkTrackingAvailable)
+                Text("无法确认网络变化，请重新读取。", style = MaterialTheme.typography.bodySmall)
         } },
         confirmButton = { TextButton(onClick = onRead, enabled = !state.busy) { Text("读取一次") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(if (state.busy) "取消并关闭" else "关闭") } })

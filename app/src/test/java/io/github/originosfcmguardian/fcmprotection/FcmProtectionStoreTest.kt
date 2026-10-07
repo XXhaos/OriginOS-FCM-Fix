@@ -53,6 +53,24 @@ class FcmProtectionStoreTest {
         assertFalse(on.accepts(afterBoot.copy(versionCode = FcmRecoveryPolicy.VERSION + 1), false))
         assertFalse(on.accepts(afterBoot.copy(lastUpdateTime = 901), false))
     }
+    @Test fun `portable admission preserves existing authority and requires explicit consent to new version`() {
+        val store = FcmProtectionStore(Storage())
+        val original = store.confirm(sample())
+        val prepared = store.recoveryPrepared(original.epoch!!)
+        val bytes = FcmProtectionCodec.encode(prepared)
+        val upgraded = sample().copy(versionCode = FcmRecoveryPolicy.VERSION + 100, lastUpdateTime = 1000)
+        assertFalse(prepared.admits(upgraded, true))
+        assertFalse(prepared.admits(upgraded, false))
+        assertEquals(prepared, store.read())
+        assertArrayEquals(bytes, FcmProtectionCodec.encode(store.read()))
+        val confirmed = store.confirm(upgraded)
+        val newlyPrepared = store.recoveryPrepared(confirmed.epoch!!)
+        assertTrue(newlyPrepared.admits(upgraded, true))
+        assertTrue(newlyPrepared.admits(upgraded, false))
+        assertTrue(FcmRecoveryPolicy.qualified(upgraded, 100))
+        assertFalse(FcmRecoveryPolicy.qualified(upgraded.copy(signerSha256 = "a".repeat(64)), 100))
+        assertFalse(newlyPrepared.accepts(upgraded.copy(signerSha256 = "a".repeat(64)), false))
+    }
     @Test fun `codec is bounded and corruption never restores combined ON`() {
         val store = FcmProtectionStore(Storage()); val encoded = FcmProtectionCodec.encode(store.confirm(sample()))
         assertTrue(encoded.size <= FcmProtectionCodec.MAX_BYTES)

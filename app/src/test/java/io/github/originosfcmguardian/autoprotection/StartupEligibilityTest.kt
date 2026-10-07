@@ -51,6 +51,16 @@ class StartupEligibilityTest {
         invalid.forEach { assertEquals(StartupEligibilityStatus.BLOCKED_IDENTITY, startupEligibility(it)) }
     }
 
+    @Test fun `another valid firmware can start with matching consent but OTA requires fresh confirmation`() {
+        val firmware = "another/product/device:17/BUILD/123:user/release-keys"
+        val differentFirmware = ready.copy(fingerprint = firmware,
+            authority = ready.authority!!.copy(token = token.copy(fingerprint = firmware)))
+        assertEquals(StartupEligibilityStatus.READY_TO_START, startupEligibility(differentFirmware))
+        assertEquals(StartupEligibilityStatus.BLOCKED_IDENTITY,
+            startupEligibility(differentFirmware.copy(fingerprint = "$firmware-new")))
+        assertEquals(listOf(identity), differentFirmware.authority!!.configuredSchema3().targetConsents.map { it.identity })
+    }
+
     @Test fun `unresolved journal and unavailable budget block startup while rate limits wait`() {
         for (journal in RestartJournalStatus.entries.filter { it !in setOf(RestartJournalStatus.CLEAR, RestartJournalStatus.PENDING) }) {
             assertEquals(StartupEligibilityStatus.BLOCKED_RECONCILIATION, startupEligibility(ready.copy(journal = journal)))

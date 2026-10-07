@@ -11,7 +11,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.core.SafeCommand
 import io.github.originosfcmguardian.autostart.AutostartSettingsLaunchResult
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
@@ -109,6 +109,7 @@ data class HomeUiState(
     val protectionNotificationVisibility: ProtectionNotificationVisibility = ProtectionNotificationVisibility.UNKNOWN,
     val automaticConfirmationIdentity: SelectedTargetIdentity? = null,
     val visibleApps: List<VisibleProtectionApp> = emptyList(),
+    val hiddenPreinstalledPackages: Set<String> = emptySet(),
     val visibleAppsLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val appsMessage: String? = null,
     val automaticPreparationPackage: String? = null,
@@ -180,23 +181,36 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val diagnosticPreparedExport = PreparedCombinedDiagnosticExport()
     private var gmsConnectionJob: Job? = null
     private var gmsConnectionGeneration = 0L
+    private var gmsConnectionClosed = false
+    @Volatile
     private var gmsNetworkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     fun openGmsConnection() {
-        _uiState.update { it.copy(gmsConnection = GmsConnectionUiState(visible = true)) }
+        if (gmsConnectionClosed) return
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(visible = true)) }
+        ensureGmsNetworkTracking()
+    }
+
+    private fun ensureGmsNetworkTracking() {
         val cm = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
         if (gmsNetworkCallback == null) {
             val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-                private fun changed(network: android.net.Network, force: Boolean) {
+                private fun changed(network: android.net.Network, key: String? = null, lost: Boolean = false) {
+                    if (gmsNetworkCallback !== this) return
                     _uiState.update { current ->
                         val value = current.gmsConnection
-                        if (value.visible && value.networkKey != null &&
-                            (force || value.networkKey.substringBefore(':') != network.networkHandle.toString()))
+                        if (gmsReadNetworkInvalidated(value.networkKey, network.networkHandle, key, lost))
                             current.copy(gmsConnection = value.copy(networkChanged = true)) else current
                     }
                 }
-                override fun onAvailable(network: android.net.Network) = changed(network, false)
-                override fun onLost(network: android.net.Network) = changed(network, true)
-                override fun onCapabilitiesChanged(network: android.net.Network, capabilities: android.net.NetworkCapabilities) = changed(network, true)
+                override fun onAvailable(network: android.net.Network) = changed(network)
+                override fun onLost(network: android.net.Network) = changed(network, lost = true)
+                override fun onCapabilitiesChanged(network: android.net.Network, capabilities: android.net.NetworkCapabilities) {
+                    val wifi = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    val cell = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
+                    val vpn = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                    val validated = capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    changed(network, "${network.networkHandle}:$wifi:$cell:$vpn:$validated")
+                }
             }
             runCatching { cm.registerDefaultNetworkCallback(callback); gmsNetworkCallback = callback }
         }
@@ -204,13 +218,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissGmsConnection() {
+        // Inline observations outlive page/background transitions. Only the legacy modal closes.
+        if (!_uiState.value.gmsConnection.visible) return
+        gmsConnectionGeneration++
+        gmsConnectionJob?.cancel(); gmsConnectionJob = null
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(
+            visible = false, busy = false, heartbeatBusy = false,
+        )) }
+    }
+
+    private fun closeGmsConnection() {
+        gmsConnectionClosed = true
         gmsConnectionGeneration++
         gmsConnectionJob?.cancel(); gmsConnectionJob = null
         gmsNetworkCallback?.let { callback -> runCatching {
             getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         } }
         gmsNetworkCallback = null
-        _uiState.update { it.copy(gmsConnection = GmsConnectionUiState()) }
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(
+            visible = false, busy = false, heartbeatBusy = false, networkTrackingAvailable = false,
+        )) }
     }
 
     fun requestFcmProtection() {
@@ -229,19 +256,30 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun readGmsConnection() {
-        if (!_uiState.value.gmsConnection.visible || _uiState.value.gmsConnection.busy) return
+        if (gmsConnectionClosed || _uiState.value.gmsConnection.busy) return
+        ensureGmsNetworkTracking()
         val generation = ++gmsConnectionGeneration
         val network = gmsNetworkContext(getApplication())
         _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true, observation = null,
+            readAttempted = true, readCompletedAtElapsedMillis = null,
             heartbeatBusy = false, heartbeatStatus = null,
             networkBackground = network.summary, networkKey = network.key, networkChanged = false)) }
         gmsConnectionJob = viewModelScope.launch {
-            val observation = shizukuRuntime.executor.readGmsConnection()
-            coroutineContext.ensureActive()
-            val changed = network != gmsNetworkContext(getApplication())
-            if (generation == gmsConnectionGeneration) _uiState.update {
-                it.copy(gmsConnection = it.gmsConnection.copy(busy = false, observation = observation,
-                    networkChanged = it.gmsConnection.networkChanged || changed))
+            try {
+                val observation = readDirectGmsConnection(generation) { shizukuRuntime.executor.readGmsConnection() }
+                coroutineContext.ensureActive()
+                val changed = network.key == "unknown" || network.key != gmsNetworkContext(getApplication()).key
+                if (generation == gmsConnectionGeneration) _uiState.update {
+                    it.copy(gmsConnection = it.gmsConnection.copy(observation = observation,
+                        readCompletedAtElapsedMillis = android.os.SystemClock.elapsedRealtime(),
+                        automaticObservationAtReadCompletion = it.fcmProtection.latestObservation,
+                        networkChanged = it.gmsConnection.networkChanged || changed))
+                }
+            } finally {
+                if (generation == gmsConnectionGeneration) {
+                    gmsConnectionJob = null
+                    _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = false)) }
+                }
             }
         }
     }
@@ -477,7 +515,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             var pickerOpened = false
             try {
-                val bytes = withContext(Dispatchers.Default) { encodeDiagnosticReport(report, format) }
+                val lifecycle = withContext(Dispatchers.IO) {
+                    io.github.originosfcmguardian.autoprotection.ProtectionLifecycleDiagnostics.readSnapshot()
+                }
+                val bytes = withContext(Dispatchers.Default) {
+                    encodeDiagnosticReport(report.copy(protectionLifecycle = lifecycle), format)
+                }
                 diagnosticPreparedExport.prepare(bytes)
                 pickerOpened = openPicker()
                 check(pickerOpened)
@@ -1009,7 +1052,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         return recoveryUiActive && !current.automaticProtection.enabled && !current.automaticProtection.busy && canOfferStoppedRecovery(
             target, current.stoppedRecovery,
             current.targetSelectionLoadState == HomeSourceLoadState.LOADED && !current.targetSelectionStoreCorrupt,
-            Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT,
+            validRuntimeFingerprint(Build.FINGERPRINT),
             shizukuRuntime.status.value.status == ShizukuStatus.READY_SHELL,
             current.detecting || target.identity in current.targetReadInFlight,
         )
@@ -1133,7 +1176,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 val detail = if (!healthy) "恢复操作记录不可用；为避免重复执行，已禁止恢复操作。请保留记录排查。"
                     else result?.detail ?: fallback ?: record?.detail
                 current.copy(
-                    recoveryFirmwareSupported = Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT,
+                    recoveryFirmwareSupported = validRuntimeFingerprint(Build.FINGERPRINT),
                     stoppedRecovery = StoppedRecoveryUiState(
                         loaded = true, busy = false, storageBlocked = !healthy,
                         needsReconcile = pending,
@@ -1170,7 +1213,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeForActivityExit() {
-        dismissGmsConnection()
+        closeGmsConnection()
         recoveryUiActive = false
         cancelStoppedRecovery()
         stoppedRecoveryController.close()
@@ -1178,7 +1221,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        dismissGmsConnection()
+        closeGmsConnection()
         recoveryUiActive = false
         cancelStoppedRecovery()
         stoppedRecoveryController.close()
@@ -1296,16 +1339,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         visibleAppsRefreshJob = viewModelScope.launch {
             loadSelectedTargetsNow()
             val result = runCatching { withContext(Dispatchers.IO) {
-                targetProbe.launcherCandidates(emptySet()).map { candidate ->
+                val inventory = targetProbe.userInstalledApps(emptySet())
+                inventory.candidates.map { candidate ->
                     val identity = targetProbe.identity(candidate.packageName)
                     VisibleProtectionApp(candidate.packageName, candidate.label, identity,
                         identity != null && targetProbe.isRecoveryCandidate(identity))
-                }
+                } to inventory.hiddenPreinstalledPackages
             } }
             if (result.exceptionOrNull() is CancellationException) throw result.exceptionOrNull() as CancellationException
             if (generation != visibleAppsGeneration) return@launch
             _uiState.update { state -> result.fold(
-                onSuccess = { state.copy(visibleApps = if (preserve) retainRechecksForUnchangedInstallations(state, it) else it,
+                onSuccess = { (apps, hidden) -> state.copy(visibleApps = if (preserve) retainRechecksForUnchangedInstallations(state, apps) else apps,
+                    hiddenPreinstalledPackages = hidden,
                     visibleAppsLoadState = HomeSourceLoadState.LOADED) },
                 onFailure = { state.copy(visibleAppsLoadState = HomeSourceLoadState.FAILED,
                     appsMessage = "应用列表读取失败，请重试；旧列表可能已变化") }) }

@@ -5,7 +5,7 @@ import android.os.Binder
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.TargetSelectionCodec
 import io.github.originosfcmguardian.autostart.TargetSelectionStore
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.privileged.StoppedObservationCodec
 import io.github.originosfcmguardian.privileged.StoppedTargetObservation
 import io.github.originosfcmguardian.privileged.StoppedObservationUnknown
@@ -79,7 +79,7 @@ class StoppedRecoveryController internal constructor(context: Context, private v
         val before = observe(nextId)
         check(session.active())
         val known = before as? StoppedTargetObservation.Known ?: error("新鲜身份、停止状态或能力读取不可用")
-        check(known.identity == identity && known.exclusiveUidOwner) { "完整安装身份或独占 UID 已变化" }
+        check(known.identity == identity && known.hasVerifiedPackageUid) { "完整安装身份或 UID 归属证据已变化" }
         check(!targetAware || known.qualifiedRecipient) { "目标恢复资格未确认" }
         if (!known.stopped) return StoppedRecoveryResult(StoppedRecoveryOutcome.NO_WRITE_NEEDED, "停止标记已解除，消息接收尚未验证", journal.load().latest)
         val record = prepare(known)
@@ -120,6 +120,9 @@ class StoppedRecoveryController internal constructor(context: Context, private v
         }
         val known = observed as? StoppedTargetObservation.Known
             ?: return@run StoppedRecoveryResult(StoppedRecoveryOutcome.UNCONFIRMED, "只读复检不可用，未重新执行恢复", record)
+        if (!known.hasVerifiedPackageUid || targetAware && !known.qualifiedRecipient) {
+            return@run StoppedRecoveryResult(StoppedRecoveryOutcome.UNCONFIRMED, "只读复检 UID 归属或目标资格不可用，未重新执行恢复", record)
+        }
         val outcome = when {
             known.identity != record.identity -> StoppedRecoveryOutcome.BLOCKED
             known.stopped -> StoppedRecoveryOutcome.STILL_STOPPED
@@ -157,7 +160,7 @@ class StoppedRecoveryController internal constructor(context: Context, private v
                                 val result = try {
                                     check(continuation.isActive)
                                     check(session.active())
-                                    check(android.os.Build.FINGERPRINT == VERIFIED_AUTOSTART_FINGERPRINT)
+                                    check(validRuntimeFingerprint(android.os.Build.FINGERPRINT))
                                     bindBeforeRecoveryAction(bind = session::bind,
                                         fallback = { fallback("恢复传输暂不可用，尚未开始恢复操作") }) { remote ->
                                         check(remote.serviceUid == 2000)

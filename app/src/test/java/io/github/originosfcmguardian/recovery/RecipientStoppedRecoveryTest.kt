@@ -2,6 +2,7 @@ package io.github.originosfcmguardian.recovery
 
 import io.github.originosfcmguardian.autostart.*
 import io.github.originosfcmguardian.privileged.*
+import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.DataInputStream
@@ -77,18 +78,40 @@ class RecipientStoppedRecoveryTest {
     @Test fun incompleteAndUnsafeQualificationsNeverReturnKnown() {
         val unsafe = listOf(null, qualifications.copy(installed = null), qualifications.copy(installed = false),
             qualifications.copy(enabled = false), qualifications.copy(system = true), qualifications.copy(updatedSystem = true),
-            qualifications.copy(persistent = true), qualifications.copy(enabledExportedLauncher = false),
-            qualifications.copy(enabledExportedLauncher = null))
+            qualifications.copy(persistent = true))
         unsafe.forEach { value ->
             assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields.copy(qualifications = value)))) is StoppedTargetObservation.Unknown)
             assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields, fields.copy(qualifications = value)))) is StoppedTargetObservation.Unknown)
         }
     }
 
-    @Test fun sharedMissingDuplicateAndForeignOwnersFailClosed() {
-        listOf(null, emptyList(), listOf(identity.packageName, "com.example.shared"),
-            listOf(identity.packageName, identity.packageName), listOf("com.example.other")).forEach { owners ->
-            assertTrue(observeStoppedTarget(1, identity, Port(owners = owners)) is StoppedTargetObservation.Unknown)
+    @Test fun stableUserApplicationWithoutLauncherStillReturnsQualifiedIdentityEvidence() {
+        for (launcherEvidence in listOf(false, null)) {
+            val nonLauncher = fields.copy(qualifications = qualifications.copy(enabledExportedLauncher = launcherEvidence))
+            val observation = observeStoppedTarget(1, identity, Port(listOf(nonLauncher, nonLauncher)))
+                as StoppedTargetObservation.Known
+            assertEquals(identity, observation.identity)
+            assertTrue(observation.qualifiedRecipient)
+        }
+    }
+
+    @Test fun validSharedMembershipKeepsNonexclusiveQualifiedEvidence() {
+        val result = observeStoppedTarget(1, identity,
+            Port(owners = listOf(identity.packageName, "com.example.shared"))) as StoppedTargetObservation.Known
+        assertFalse(result.exclusiveUidOwner)
+        assertTrue(result.qualifiedRecipient)
+        assertTrue(result.hasVerifiedPackageUid)
+        assertEquals(result, StoppedObservationCodec.decode(StoppedObservationCodec.encode(result), 1, identity))
+    }
+
+    @Test fun missingDuplicateMalformedOversizedAndForeignOwnersFailClosed() {
+        listOf(null, emptyList(), listOf(identity.packageName, "invalid;package"),
+            listOf(identity.packageName, identity.packageName), listOf("com.example.other"),
+            listOf(identity.packageName) + (1..64).map { "com.example.member$it" }).forEach { owners ->
+            val observation = observeStoppedTarget(1, identity, Port(owners = owners))
+            assertTrue(observation is StoppedTargetObservation.Unknown)
+            assertEquals(StoppedRecoveryOutcome.BLOCKED,
+                StoppedRecoveryEngine({ observation }, { error("claim") }, { true }, { error("write") }).recover(1, identity).outcome)
         }
     }
 
@@ -130,6 +153,12 @@ class RecipientStoppedRecoveryTest {
             "moe.shizuku.privileged.api", "com.android.vending", "com.android.shell", "com.android.systemui").forEach {
             assertFalse(isRecoveryTargetPackage(it))
             assertThrows(IllegalArgumentException::class.java) { stoppedRecoveryArgv(identity.copy(packageName = it)) }
+            if (!isSafeAndroidPackageName(it)) return@forEach
+            val excluded = identity.copy(packageName = it)
+            val observation = observeStoppedTarget(1, excluded, Port())
+            assertTrue(observation is StoppedTargetObservation.Unknown)
+            assertEquals(StoppedRecoveryOutcome.BLOCKED,
+                StoppedRecoveryEngine({ observation }, { error("claim") }, { true }, { error("write") }).recover(1, excluded).outcome)
         }
     }
 
@@ -213,5 +242,74 @@ class RecipientStoppedRecoveryTest {
         assertEquals(identity, confirmedRecoveryReceipt(result.copy(record = finished), finished.createdAtMillis + 1)?.identity)
         assertNull(confirmedRecoveryReceipt(result.copy(record = finished, commandSucceeded = false), finished.createdAtMillis + 1))
         assertNull(confirmedRecoveryReceipt(result.copy(record = finished.copy(stage = StoppedRecoveryStage.RECONCILED)), finished.createdAtMillis + 1))
+    }
+
+    @Test fun sharedRecipientUsesOnePackageWriteAndRetainsJournalAndCodecEvidence() {
+        val sharedOwners = listOf(identity.packageName, "com.example.shared")
+        fun sample(stopped: Boolean) = observeStoppedTarget(1, identity,
+            Port(listOf(fields.copy(stopped = stopped), fields.copy(stopped = stopped)), sharedOwners)) as StoppedTargetObservation.Known
+        val baseline = sample(true)
+        assertFalse(baseline.exclusiveUidOwner)
+        val journal = StoppedRecoveryJournal(Memory())
+        val record = journal.prepareAutomatically(identity, baseline, consent)
+        var reads = 0
+        var writes = 0
+        val result = StoppedRecoveryEngine({
+            val observed = sample(++reads < 3)
+            StoppedObservationCodec.decode(StoppedObservationCodec.encode(observed), 1, identity)
+        }, journal::claim, { true }, {
+            assertEquals(identity.packageName, stoppedRecoveryArgv(identity).last())
+            writes++
+            0
+        }).recover(record.requestId, identity)
+        assertEquals(1, writes)
+        assertEquals(3, reads)
+        assertEquals(StoppedRecoveryOutcome.FLAG_CLEARED, result.outcome)
+        assertFalse(sample(false).exclusiveUidOwner)
+        val finished = journal.finish(record.requestId, result.outcome, result.detail)
+        assertEquals(finished, journal.load().latest)
+        assertEquals(4, finished.consentVersion)
+        assertEquals(identity, finished.identity)
+    }
+
+    @Test fun sharedRecipientManualPrepareKeepsExistingSchemaAndRequiresConfirmation() {
+        val memory = Memory()
+        val journal = StoppedRecoveryJournal(memory)
+        val baseline = known().copy(exclusiveUidOwner = false)
+        assertThrows(IllegalStateException::class.java) { journal.prepare(identity, baseline, false) }
+        val record = journal.prepare(identity, baseline, true)
+        assertEquals(3, DataInputStream(memory.bytes!!.inputStream()).readInt())
+        assertEquals(record, StoppedRecoveryJournal(memory).load().latest)
+    }
+
+    @Test fun sharedMembershipCannotBypassFreshIdentityOrApplicationQualification() {
+        val owners = listOf(identity.packageName, "com.example.shared")
+        val drift = fields.copy(firstInstallTime = 101)
+        val unsafe = fields.copy(qualifications = qualifications.copy(system = true))
+        listOf(Port(listOf(fields, drift), owners), Port(listOf(unsafe), owners),
+            Port(listOf(fields, unsafe), owners)).forEach { port ->
+            val observation = observeStoppedTarget(1, identity, port)
+            var writes = 0
+            val result = StoppedRecoveryEngine({ observation }, { error("claim") }, { true }, { writes++; 0 }).recover(1, identity)
+            assertEquals(StoppedRecoveryOutcome.BLOCKED, result.outcome)
+            assertEquals(0, writes)
+        }
+    }
+
+    @Test fun legacySharedTelegramNeverClaimsAndCannotProduceConfirmedReadback() {
+        val telegram = identity.copy(packageName = "org.telegram.messenger")
+        val shared = StoppedTargetObservation.Known(1, telegram, true, false, 100)
+        assertFalse(shared.hasVerifiedPackageUid)
+        var writes = 0
+        val blocked = StoppedRecoveryEngine({ shared }, { error("claim") }, { true }, { writes++; 0 }).recover(1, telegram)
+        assertEquals(StoppedRecoveryOutcome.BLOCKED, blocked.outcome)
+        assertEquals(0, writes)
+        var reads = 0
+        val afterLostOwnership = StoppedRecoveryEngine({
+            if (++reads < 3) shared.copy(exclusiveUidOwner = true) else shared.copy(stopped = false)
+        }, { true }, { true }, { writes++; 0 }).recover(1, telegram)
+        assertEquals(StoppedRecoveryOutcome.UNCONFIRMED, afterLostOwnership.outcome)
+        assertEquals(1, writes)
+        assertThrows(IllegalStateException::class.java) { StoppedRecoveryJournal(Memory()).prepare(telegram, shared, true) }
     }
 }

@@ -5,9 +5,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -20,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
@@ -92,8 +96,10 @@ internal fun AutomaticProtectionCard(
 ) {
     var confirmHide by remember { mutableStateOf(false) }
     var notificationSettingsFailed by remember { mutableStateOf(false) }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(if (showProtectionControls) "$targetLabel 自动保护" else "后台与通知", style = MaterialTheme.typography.titleMedium)
             if (showProtectionControls) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
@@ -114,21 +120,21 @@ internal fun AutomaticProtectionCard(
                 else -> "上次操作未完成，请查看暂停原因"
             }, style = MaterialTheme.typography.bodySmall) }
             if (showSharedGuidance) {
-                Text("约每 30 秒检查，休眠可能延后；不保持目标应用常驻。",
+                Text("约每 30 秒检查，休眠可能延后；不让应用常驻。",
                     style = MaterialTheme.typography.bodySmall)
-                Text("检测到停止限制时尝试恢复，无固定恢复次数或间隔限制。",
+                Text("被停止时尝试恢复，无固定次数或间隔限制；不保证送达。",
                     style = MaterialTheme.typography.bodySmall)
             }
-            if (!canEnable && !state.masterEnabled && !state.busy) Text("请检查存储与待确认记录；开启时会重新核对安装身份和运行条件。",
+            if (!canEnable && !state.masterEnabled && !state.busy) Text("请检查存储或待确认记录；开启前会重新核对运行条件。",
                 style = MaterialTheme.typography.bodySmall)
             }
             if (showPreferences) {
                 Text(notificationVisibility.label(), style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { notificationSettingsFailed = !onOpenNotificationSettings() }) { Text("通知显示设置") }
                 Text("关闭此类通知不关闭保护。", style = MaterialTheme.typography.bodySmall)
-                if (notificationSettingsFailed) Text("未能打开设置，请在系统通知管理中调整 Guardian 的保护通知。",
+                if (notificationSettingsFailed) Text("无法打开设置，请在系统通知管理中调整 Guardian 保护通知。",
                     style = MaterialTheme.typography.bodySmall)
-            Text("Guardian 可在系统中开启自启动、允许后台耗电并锁定后台；隐藏任务不等于系统保活，锁定效果依机型而定。",
+            Text("自启动、后台耗电和任务锁定可在系统中设置，效果依机型而定；隐藏任务不保证后台运行。",
                 style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically) {
@@ -143,7 +149,7 @@ internal fun AutomaticProtectionCard(
     if (confirmHide) AlertDialog(
         onDismissRequest = { confirmHide = false },
         title = { Text("隐藏 Guardian 任务？") },
-        text = { Text("仅隐藏最近任务卡片，保留桌面入口。如需锁定后台，可先锁定再隐藏；锁定效果需在本机确认。可从桌面重新打开并关闭此选项。") },
+        text = { Text("仅隐藏最近任务卡片，保留桌面入口。需要锁定后台时，请先锁定再隐藏；效果以本机为准。可从桌面打开 Guardian 关闭隐藏。") },
         confirmButton = { TextButton(onClick = { confirmHide = false; onSetHidden(true) }) { Text("确认隐藏") } },
         dismissButton = { TextButton(onClick = { confirmHide = false }) { Text("取消") } },
     )
@@ -171,7 +177,18 @@ internal fun automaticProtectionToggleEnabled(state: AutomaticProtectionState, c
 @Composable
 internal fun AutomaticProtectionConfirmation(onConfirm: () -> Unit, onDismiss: () -> Unit, targetLabel: String = "应用", packageName: String = "") {
     AlertDialog(onDismissRequest = onDismiss, title = { Text("选择 $targetLabel 自动保护？") },
-        text = { Text("$packageName\n仅授权这个应用的当前安装：检测到停止限制时尝试解除，不让它常驻后台。其他应用不会因此获得授权。\n\n应用选择会保存；首页总开关开启时才运行保护。关闭总开关会保留应用选择，取消此应用选择会移除它的授权。\n\n无固定恢复次数或间隔限制；约每 30 秒检查，休眠可能延后，不保证通知送达。无法区分系统停止与主动强停，想保持应用停止时请先关闭总开关。已派发操作可能完成。缺少 Shizuku 时仅等待，重启后可能需重新启动 Shizuku。") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(packageName, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("仅授权此应用的当前安装：被停止时尝试解除限制，不让应用常驻。")
+                Text("选择会保存。首页总开关控制运行；关闭总开关保留选择，关闭此应用开关移除授权。")
+                Text("约每 30 秒检查，休眠可能延后；无固定次数或间隔限制，不保证送达。")
+                Text("无法区分系统停止和主动强停。想保持停止，请先关总开关；已派发操作可能完成。")
+                Text("Shizuku 未就绪时等待，重启手机后需重新启动 Shizuku。")
+            }
+        },
         confirmButton = { Button(onClick = onConfirm) { Text("授权并选择") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }

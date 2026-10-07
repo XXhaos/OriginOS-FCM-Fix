@@ -1,9 +1,6 @@
 package io.github.originosfcmguardian.privileged
 
 import android.content.pm.ApplicationInfo
-import android.content.Intent
-import android.content.ComponentName
-import android.content.pm.ResolveInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.Build
@@ -13,7 +10,6 @@ import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import io.github.originosfcmguardian.autostart.RecoveryTargetQualifications
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
-import io.github.originosfcmguardian.autostart.qualifiedRecoveryLauncher
 
 /**
  * Shizuku UserService is a shell process, not an application Context. Resolve only these
@@ -34,8 +30,6 @@ internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
         check(api.isInstance(remote))
         SystemPackageReads(
             requireNotNull(remote),
-            api.getMethod("getPackageInfo", String::class.java, Long::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-                .also { check(it.returnType == PackageInfo::class.java) },
             api.getMethod("getPackagesForUid", Int::class.javaPrimitiveType)
                 .also { check(it.returnType == Array<String>::class.java) },
             api,
@@ -57,8 +51,8 @@ internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
 
     private fun readPackage(packageName: String, qualify: Boolean): StoppedPackageFields? {
         val reads = packageManager
-        val info = reads.getPackageInfo.invoke(
-            reads.remote, packageName, PackageManager.GET_SIGNING_CERTIFICATES.toLong(), 0,
+        val info = invokePackageFlagsRead(reads.api, reads.remote, "getPackageInfo",
+            arrayOf(String::class.java), arrayOf(packageName), PackageManager.GET_SIGNING_CERTIFICATES.toLong(), 0,
         ) as? PackageInfo ?: return null
         val applicationInfo = info.applicationInfo ?: return null
         val signers = info.signingInfo?.apkContentsSigners ?: return null
@@ -71,7 +65,6 @@ internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
                 applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM != 0,
                 applicationInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
                 applicationInfo.flags and ApplicationInfo.FLAG_PERSISTENT != 0,
-                hasEnabledExportedLauncher(packageName, applicationInfo.uid),
             ) else null,
         )
     }
@@ -83,25 +76,5 @@ internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
         return owners.map { it as String }
     }
 
-    private fun hasEnabledExportedLauncher(packageName: String, uid: Int): Boolean {
-        val reads = packageManager
-        val query = reads.api.getMethod("queryIntentActivities", Intent::class.java, String::class.java,
-            Long::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-        check(query.returnType.name == "android.content.pm.ParceledListSlice")
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(packageName)
-        val slice = requireNotNull(query.invoke(reads.remote, intent, null, 0L, 0))
-        val results = slice.javaClass.getMethod("getList").invoke(slice) as? List<*> ?: error("Launcher evidence unavailable")
-        require(results.size <= 1024 && results.all { it is ResolveInfo })
-        return results.any { result ->
-            val activity = (result as ResolveInfo).activityInfo
-            activity != null && qualifiedRecoveryLauncher(packageName, uid, activity.packageName,
-                activity.applicationInfo?.uid, activity.enabled, activity.exported, activity.applicationInfo?.enabled) {
-                val componentState = reads.api.getMethod("getComponentEnabledSetting", ComponentName::class.java, Int::class.javaPrimitiveType)
-                check(componentState.returnType == Int::class.javaPrimitiveType)
-                componentState.invoke(reads.remote, ComponentName(activity.packageName, activity.name), 0) as? Int
-            }
-        }
-    }
-
-    private data class SystemPackageReads(val remote: Any, val getPackageInfo: Method, val getPackagesForUid: Method, val api: Class<*>)
+    private data class SystemPackageReads(val remote: Any, val getPackagesForUid: Method, val api: Class<*>)
 }

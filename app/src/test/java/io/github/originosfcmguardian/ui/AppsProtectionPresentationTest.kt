@@ -111,6 +111,34 @@ class AppsProtectionPresentationTest {
         assertFalse(canPrepareAppProtection(state, row.app))
     }
 
+    @Test fun hiddenPreinstalledAppDoesNotReturnAsAnUnavailableSavedSelection() {
+        val state = ready.copy(visibleApps = listOf(secondApp),
+            hiddenPreinstalledPackages = setOf(first.packageName),
+            selectedTargets = listOf(SelectedTargetUiState(first, "Zulu")),
+            automaticProtection = authority(first))
+        val groups = protectionAppGroups(state, "")
+        assertTrue(groups.protected.isEmpty())
+        assertEquals(listOf(second), groups.all.map { it.app.identity })
+        assertEquals(listOf(first), state.automaticProtection.configuredIdentities)
+        assertEquals(listOf(first), state.selectedTargets.map { it.identity })
+    }
+
+    @Test fun refreshedPreinstalledEvidenceHidesAStaleCurrentRowToo() {
+        val state = ready.copy(hiddenPreinstalledPackages = setOf(first.packageName),
+            automaticProtection = authority(first))
+        val groups = protectionAppGroups(state, "")
+        assertTrue(groups.protected.isEmpty())
+        assertEquals(listOf(second), groups.all.map { it.app.identity })
+    }
+
+    @Test fun missingIdentityDoesNotInventPreinstalledEvidenceForSavedChoice() {
+        val state = ready.copy(visibleApps = listOf(firstApp.copy(identity = null)),
+            selectedTargets = listOf(SelectedTargetUiState(first, "Zulu")),
+            automaticProtection = authority(first))
+        assertEquals(first, protectionAppGroups(state, "").protected.single().app.identity)
+        assertEquals(listOf(first), state.automaticProtection.configuredIdentities)
+    }
+
     @Test fun historicalStoppedFailureNeverPromotesToProtectedOrAuthorized() {
         val state = ready.copy(stoppedRecovery = StoppedRecoveryUiState(loaded = true, recordIdentity = first,
             receiptOutcome = StoppedRecoveryOutcome.STILL_STOPPED))

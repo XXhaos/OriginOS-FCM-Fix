@@ -23,7 +23,7 @@ internal fun protectionTargetIssues(
         TargetCheckStatus.IDENTITY_MATCH, TargetCheckStatus.ALLOWED, TargetCheckStatus.NEEDS_USER_ACTION,
         TargetCheckStatus.UNKNOWN, TargetCheckStatus.UNAVAILABLE -> return@mapNotNull null
         TargetCheckStatus.IDENTITY_CHANGED -> "上次巡检：应用身份已变化；请重新选择并检查"
-        TargetCheckStatus.MISSING -> "上次巡检：应用未安装或不可见；请检查关注应用选择"
+        TargetCheckStatus.MISSING -> "上次巡检：应用未安装或不可见；请检查应用选择"
     }
     val current = selectedTargets.singleOrNull { it.identity.packageName == target.packageName }
     val action = when {

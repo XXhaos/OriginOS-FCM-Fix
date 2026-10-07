@@ -1,8 +1,11 @@
 package io.github.originosfcmguardian.ui
 
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -11,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -32,6 +36,7 @@ import java.text.DateFormat
 import java.util.Date
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun DeepMonitoringCard(
     state: HomeUiState,
     onStart: (String) -> Unit,
@@ -42,11 +47,13 @@ internal fun DeepMonitoringCard(
     val monitor = state.deepMonitoring
     val packages = state.selectedTargets.map { it.identity.packageName }
     var chosen by remember(packages) { mutableStateOf(packages.firstOrNull()) }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("手动深度监控", style = MaterialTheme.typography.titleMedium)
-            Text("仅排障时开启，一次观察一个应用，30 分钟后自动结束。会显示持续通知，不修改智能耗电策略。", style = MaterialTheme.typography.bodySmall)
-            Text("需要 Shizuku shell 和可见通知。长时间熄屏时系统可能暂停监控；空记录不代表没有发生事件。", style = MaterialTheme.typography.bodySmall)
+            Text("排障时使用：每次观察一个应用，30 分钟后自动结束。需要 Shizuku shell 和持续可见通知，不修改耗电策略。", style = MaterialTheme.typography.bodySmall)
+            Text("长时间熄屏可能暂停监控；没有记录不代表没有事件。", style = MaterialTheme.typography.bodySmall)
             Text(when (monitor.phase) {
                 MonitorRunPhase.IDLE -> "状态：未运行"
                 MonitorRunPhase.STARTING -> "状态：准备中"
@@ -66,8 +73,8 @@ internal fun DeepMonitoringCard(
                     )
                 }
             }
-            if (packages.isEmpty()) Text("请先在“关注应用”中选择目标应用。")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (packages.isEmpty()) Text("请先在“应用”页选择目标应用。")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Button(
                     onClick = { chosen?.let(onStart) },
                     enabled = !monitor.busy && !state.deepMonitoringExportBusy && !monitor.historyCorrupt && chosen != null &&
@@ -89,12 +96,12 @@ internal fun DeepMonitoringCard(
                 )
                 val events = remember(session, query) { queryMonitorSession(session, query) }
                 Text("最近会话：${session.identity.packageName}", style = MaterialTheme.typography.bodySmall)
-                Text("${session.status.label()} · ${session.events.size}/500 条 · ${session.pollCount} 次有限读取", style = MaterialTheme.typography.bodySmall)
+                Text("${session.status.label()} · ${session.events.size} 条记录", style = MaterialTheme.typography.bodySmall)
                 Text("开始于 ${DateFormat.getDateTimeInstance().format(Date(session.startedAtEpochMillis))}", style = MaterialTheme.typography.bodySmall)
                 Text(if (session.events.isEmpty()) {
-                    "尚无可显示的进程事件，发生情况未知；空记录不能证明应用未启动。"
+                    "尚无进程记录；是否发生事件未知，不能据此判断应用未启动。"
                 } else {
-                    "下列事件来自系统记录；FCM 来源、唤醒原因及连续连接均未知。记录仅属于该次固定安装身份。"
+                    "记录仅属于本次安装，不证明消息送达、唤醒原因或持续连接。"
                 }, style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = !recentOnly, onClick = { recentOnly = false }, label = { Text("全会话") })
@@ -107,17 +114,11 @@ internal fun DeepMonitoringCard(
                         FilterChip(selected = chosenKind == kind, onClick = { chosenKind = kind }, label = { Text(kind.label()) })
                     }
                 }
-                Text("当前筛选 ${events.size} 条 · 系统事件事实", style = MaterialTheme.typography.bodySmall)
+                Text("当前筛选 ${events.size} 条", style = MaterialTheme.typography.bodySmall)
                 if (events.isEmpty()) Text("当前筛选没有记录，事件发生情况未知。", style = MaterialTheme.typography.bodySmall)
                 Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
                     events.forEach { event ->
-                        val name = when (event.kind) {
-                            ProcessTraceKind.PROCESS_START -> "进程启动（PID ${event.pid}）"
-                            ProcessTraceKind.UID_ACTIVE -> "UID 活跃"
-                            ProcessTraceKind.UID_IDLE -> "UID 空闲"
-                            ProcessTraceKind.UID_RUNNING -> "UID 开始运行"
-                            ProcessTraceKind.UID_STOPPED -> "UID 停止运行"
-                        }
+                        val name = event.kind.label()
                         Text("${DateFormat.getDateTimeInstance().format(Date(event.timestampEpochMillis))} · $name", style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -125,22 +126,22 @@ internal fun DeepMonitoringCard(
                     onClick = { onExport(query) },
                     enabled = !monitor.historyCorrupt && !state.deepMonitoringExportBusy,
                 ) { Text(if (state.deepMonitoringExportBusy) "正在导出…" else "导出会话筛选 JSON") }
-                Text("导出点击时的记录；运行中的会话只是当时快照。文件含应用包名和进程事件，不含通知内容或安装签名。", style = MaterialTheme.typography.bodySmall)
+                Text("导出点击时的快照，含包名和进程事件，不含通知内容或安装签名。", style = MaterialTheme.typography.bodySmall)
             }
             OutlinedButton(onClick = onClear, enabled = !monitor.busy && !state.deepMonitoringExportBusy && (monitor.session != null || monitor.historyCorrupt)) {
                 Text("清除最近监控记录")
             }
-            Text("只保留最近一次会话；新会话会替换旧会话。通知记录与监控记录分开保存。", style = MaterialTheme.typography.bodySmall)
+            Text("新会话会替换上次会话；通知记录单独保存。", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
 private fun ProcessTraceKind.label(): String = when (this) {
     ProcessTraceKind.PROCESS_START -> "进程启动"
-    ProcessTraceKind.UID_ACTIVE -> "UID 活跃"
-    ProcessTraceKind.UID_IDLE -> "UID 空闲"
-    ProcessTraceKind.UID_RUNNING -> "UID 开始运行"
-    ProcessTraceKind.UID_STOPPED -> "UID 停止运行"
+    ProcessTraceKind.UID_ACTIVE -> "应用活跃"
+    ProcessTraceKind.UID_IDLE -> "应用空闲"
+    ProcessTraceKind.UID_RUNNING -> "应用开始运行"
+    ProcessTraceKind.UID_STOPPED -> "应用停止运行"
 }
 
 private fun MonitorSessionStatus.label(): String = when (this) {

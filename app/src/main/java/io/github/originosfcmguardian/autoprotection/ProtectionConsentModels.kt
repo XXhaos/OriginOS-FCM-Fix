@@ -1,7 +1,7 @@
 package io.github.originosfcmguardian.autoprotection
 
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
-import io.github.originosfcmguardian.autostart.VERIFIED_AUTOSTART_FINGERPRINT
+import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 
 internal enum class ProtectionConsentMode { DISABLED, ACTIVE, SUSPENDED, USER_PAUSED }
 internal enum class ProtectionSuspensionReason { PREREQUISITES_LOST, IDENTITY_CHANGED, PENDING_RECEIPT, RECOVERY_BUSY, SERVICE_UNAVAILABLE, BUDGET_UNAVAILABLE }
@@ -23,7 +23,7 @@ internal data class DurableConsentToken(
         require(id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
         require(generation > 0 && consentedAtMillis > 0)
         require(identity.packageName == "org.telegram.messenger" && identity.signerSha256.size <= 16)
-        require(fingerprint == VERIFIED_AUTOSTART_FINGERPRINT)
+        require(validRuntimeFingerprint(fingerprint))
         require(schemaVersion == 1 && policyVersion in 1..RESTART_CONSENT_POLICY_VERSION && userId == 0)
     }
 }
@@ -41,7 +41,7 @@ internal data class RecipientConsentToken(
     init {
         require(id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
         require(generation > 0 && consentedAtMillis > 0 && identity.signerSha256.size <= 16)
-        require(fingerprint == VERIFIED_AUTOSTART_FINGERPRINT && policyVersion == RECIPIENT_CONSENT_POLICY_VERSION && userId == 0)
+        require(validRuntimeFingerprint(fingerprint) && policyVersion == RECIPIENT_CONSENT_POLICY_VERSION && userId == 0)
     }
 }
 

@@ -45,4 +45,30 @@ class RecoveryTargetEligibilityTest {
         listOf(qualified.copy(installed = false), qualified.copy(enabled = false), qualified.copy(system = true),
             qualified.copy(updatedSystem = true), qualified.copy(persistent = true)).forEach { assertFalse(it.eligible) }
     }
+
+    @Test fun ordinaryUserApplicationDoesNotRequireLauncherEvidence() {
+        val qualified = RecoveryTargetQualifications(true, true, false, false, false)
+        assertTrue(qualified.eligible)
+        assertTrue(qualified.copy(enabledExportedLauncher = false).eligible)
+        assertTrue(qualified.copy(enabledExportedLauncher = true).eligible)
+    }
+
+    @Test fun everyRequiredPackageQualificationRemainsFailClosed() {
+        val qualified = RecoveryTargetQualifications(true, true, false, false, false)
+        listOf(qualified.copy(installed = null), qualified.copy(installed = false),
+            qualified.copy(enabled = null), qualified.copy(enabled = false),
+            qualified.copy(system = null), qualified.copy(system = true),
+            qualified.copy(updatedSystem = null), qualified.copy(updatedSystem = true),
+            qualified.copy(persistent = null), qualified.copy(persistent = true)).forEach {
+            assertFalse(it.eligible)
+        }
+    }
+
+    @Test fun googlePackagePrefixDoesNotReplaceActualPackageQualification() {
+        assertTrue(isRecoveryTargetPackage("com.google.android.apps.maps"))
+        assertTrue(isRecoveryTargetPackage("com.google.android.keep"))
+        assertFalse(isRecoveryTargetPackage("com.google.android.gms"))
+        assertFalse(isRecoveryTargetPackage("com.android.vending"))
+        assertFalse(isRecoveryTargetPackage("moe.shizuku.privileged.api"))
+    }
 }

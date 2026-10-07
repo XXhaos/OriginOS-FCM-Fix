@@ -31,7 +31,25 @@ class GuardianTileManifestContractTest {
         assertEquals(setOf(LAUNCHER_CATEGORY), launcherFilters.single().names("category"))
     }
 
-    private fun mainActivity(): Element {
+    @Test
+    fun tileUsesNonActiveListeningModeForPanelRecovery() {
+        val tile = application().children("service").single {
+            it.androidAttribute("name") == ".autoprotection.GuardianTileService"
+        }
+        assertEquals("true", tile.androidAttribute("exported"))
+        assertEquals("android.permission.BIND_QUICK_SETTINGS_TILE", tile.androidAttribute("permission"))
+        assertEquals(listOf("android.service.quicksettings.action.QS_TILE"),
+            tile.children("intent-filter").flatMap { it.names("action") })
+        assertTrue("Panel opening requires standard non-active mode", tile.children("meta-data").none {
+            it.androidAttribute("name") == "android.service.quicksettings.ACTIVE_TILE"
+        })
+    }
+
+    private fun mainActivity(): Element = application().children("activity").single {
+        it.androidAttribute("name") == ".MainActivity"
+    }
+
+    private fun application(): Element {
         val local = File("src/main/AndroidManifest.xml")
         val manifest = if (local.isFile) local else File("app/src/main/AndroidManifest.xml")
         require(manifest.isFile) { "Missing manifest test input" }
@@ -40,7 +58,6 @@ class GuardianTileManifestContractTest {
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
         }.newDocumentBuilder().parse(manifest)
         return document.documentElement.children("application").single()
-            .children("activity").single { it.androidAttribute("name") == ".MainActivity" }
     }
 
     private fun Element.children(tag: String): List<Element> =

@@ -43,17 +43,18 @@ class ShizukuWorkModeContentTest {
             MaterialTheme { Column { ShizukuWorkModeContent(snapshot.value, { actions++ }, {}, { manager++ }, {}) } }
         }
         compose.onNodeWithText("Shizuku 授权").assertDoesNotExist()
+        compose.onNodeWithText("请在 Shizuku 中允许 Guardian。").assertExists()
         compose.onNodeWithText("打开 Shizuku").performClick()
         compose.runOnIdle {
             assertEquals(1, actions)
             snapshot.value = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "synthetic shell UID 2000")
         }
         compose.onNodeWithText("已授权 · shell 就绪").assertExists()
-        compose.onNodeWithText("服务已连接且 Guardian 已获授权。保护仍需单独开启。").assertExists()
+        compose.onNodeWithText("保护仍需单独开启。").assertExists()
         compose.onNodeWithText("Shizuku 授权").assertDoesNotExist()
         compose.onNodeWithText("synthetic shell UID 2000").assertDoesNotExist()
-        compose.onNodeWithText("连接详情").performClick()
-        compose.onNodeWithText("synthetic shell UID 2000").assertExists()
+        compose.onNodeWithText("连接详情").assertDoesNotExist()
+        compose.onNodeWithText("收起连接详情").assertDoesNotExist()
         compose.onNodeWithText("打开 Shizuku").performClick()
         compose.runOnIdle { assertEquals(1, manager) }
     }
