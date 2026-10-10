@@ -16,8 +16,8 @@ android {
         applicationId = "io.github.originosfcmguardian"
         minSdk = 30
         targetSdk = 37
-        versionCode = 67
-        versionName = "0.1.0-portable-protection"
+        versionCode = 68
+        versionName = "0.1.0-lean-runtime"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "FIREBASE_CONFIG_INCLUDED", hasGoogleServicesConfig.toString())
@@ -32,6 +32,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

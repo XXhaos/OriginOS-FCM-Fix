@@ -1,5 +1,32 @@
 # AGENTS.md — OriginOS FCM Guardian
 
+## Latest commit identity rule — user attribution (2026-10-10)
+
+For every authorized commit, both author and committer must be
+`XXhaos <53092039+XXhaos@users.noreply.github.com>`, matching the user's all-project Git identity.
+Verify effective identity before committing; never fall back to the historical scaffold identity.
+SSH transport still logs in as `git` with the existing host-specific private key.
+An identity correction does not authorize rewriting older commits; amend pushed history only
+within the user's explicit scope and use an exact expected-SHA `--force-with-lease`.
+
+## Latest remote/backup rule — direct local SSH identity (2026-10-10)
+
+The user requires remote connections to use the appropriate existing private key in `~/.ssh`
+directly, not 1Password/SSH Agent or a project-local key copy. This host's Gitea identity is
+`~/.ssh/Git`; select it explicitly, disable agent use and preserve host-key verification.
+Never read/print/commit key contents. Before an authorized commit/push, synchronize affected
+README, usage/setup/introductory documents, plans/progress and existing release material when
+applicable. A backup request does not itself require a new public release or private APK upload,
+and this rule does not authorize future automatic commits/pushes. Local-only/no-handoff still applies.
+
+## Latest optimization rule — core functionality first (2026-10-10)
+
+Resource/lifecycle optimization must preserve protection behavior, detection frequency, bounded
+concurrency, durable selections/authority and diagnostic usefulness. Do not trade functionality
+for APK size, memory or battery figures. Verify affected release paths; fix or roll back a concrete
+functional regression before accepting resource benefits. APK shrinkage alone is not RAM, battery
+or survival evidence. Do not add unrelated system-bound roles solely to claim higher priority.
+
 ## Latest device-UI override — autonomous unlock and screen care (2026-10-06)
 
 When the user confirms phone connection, the agent may wake/unlock/lock it and handle Guardian/

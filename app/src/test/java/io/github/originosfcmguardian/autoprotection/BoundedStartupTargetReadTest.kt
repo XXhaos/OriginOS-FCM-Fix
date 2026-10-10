@@ -22,7 +22,7 @@ class BoundedStartupTargetReadTest {
         // Give actual worker entry room, then prove entry before asserting timeout-held capacity.
         // The reader still enforces a real deadline and the original sub-second return bound.
         try {
-            BoundedStartupTargetRead(timeoutMillis = 500).use { reader ->
+            BoundedStartupTargetRead(timeoutMillis = 500, idleKeepAliveMillis = 20).use { reader ->
                 try {
                     repeat(4) { target ->
                         val actualEntry = CountDownLatch(1)
@@ -53,6 +53,23 @@ class BoundedStartupTargetReadTest {
                 assertEquals(4, entered.get()) // No rejected work starts after workers are released.
             }
         } finally { release.countDown(); caller.shutdownNow() }
+    }
+
+    @Test fun `idle PM worker expires and a later batch obtains a fresh worker`() {
+        BoundedStartupTargetRead(timeoutMillis = 1_000, maxWorkers = 1, idleKeepAliveMillis = 20).use { reader ->
+            val first = reader.readBatch(listOf(1)) { Thread.currentThread() }
+            assertTrue(first is StartupTargetReadResult.Complete)
+            val firstThread = (first as StartupTargetReadResult.Complete).values.single()
+            firstThread.join(2_000)
+            assertFalse("A completed PM worker must expire while idle", firstThread.isAlive)
+
+            val second = reader.readBatch(listOf(2)) { Thread.currentThread() }
+            assertTrue(second is StartupTargetReadResult.Complete)
+            val secondThread = (second as StartupTargetReadResult.Complete).values.single()
+            assertNotSame(firstThread, secondThread)
+            secondThread.join(2_000)
+            assertFalse("The recreated PM worker must also expire while idle", secondThread.isAlive)
+        }
     }
 
     @Test fun `one batch deadline discards completed prefix and late facts`() {

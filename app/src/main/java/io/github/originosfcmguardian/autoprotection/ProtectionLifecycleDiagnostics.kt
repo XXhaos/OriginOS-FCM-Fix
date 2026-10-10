@@ -19,8 +19,9 @@ import java.util.concurrent.atomic.AtomicLong
 /** Diagnostic-only FIFO. No main-thread disk/Binder IO, timers, restart or authority decisions. */
 internal object ProtectionLifecycleDiagnostics {
     private val dropped = AtomicLong(0)
-    private val worker = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
-        { task -> Thread(task, "guardian-lifecycle-journal").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
+    private val worker = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, ArrayBlockingQueue(64),
+        { task -> Thread(task, "guardian-lifecycle-journal").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy()).apply { allowCoreThreadTimeOut(true) }
     @Volatile private var storage: AtomicProtectionLifecycleStorage? = null
     @Volatile private var writeFailed = false
 

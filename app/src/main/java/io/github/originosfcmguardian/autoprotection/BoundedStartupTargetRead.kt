@@ -29,19 +29,21 @@ internal object StartupTargetReader {
 }
 
 /**
- * One deadline for the whole batch, with no queued work or replacement workers. A worker may
+ * One deadline for the whole batch, with no queued work or replacement of occupied workers. A worker may
  * continue in Binder after cancellation; it owns only PM inputs/results, never authority or IO.
  * Each admitted batch reads serially on one of four workers and publishes only a complete list.
+ * Idle workers expire after 30 seconds; this never releases a slot still occupied by a PM read.
  */
 internal class BoundedStartupTargetRead(
     private val timeoutMillis: Long = 5_000,
     maxWorkers: Int = 4,
+    idleKeepAliveMillis: Long = 30_000,
 ) : AutoCloseable {
-    private val workers = ThreadPoolExecutor(maxWorkers, maxWorkers, 0, TimeUnit.MILLISECONDS,
+    private val workers = ThreadPoolExecutor(maxWorkers, maxWorkers, idleKeepAliveMillis, TimeUnit.MILLISECONDS,
         SynchronousQueue(), { task -> Thread(task, "guardian-startup-pm-read").apply { isDaemon = true } },
-        ThreadPoolExecutor.AbortPolicy())
+        ThreadPoolExecutor.AbortPolicy()).apply { allowCoreThreadTimeOut(true) }
 
-    init { require(timeoutMillis > 0); require(maxWorkers in 1..4) }
+    init { require(timeoutMillis > 0); require(maxWorkers in 1..4); require(idleKeepAliveMillis > 0) }
 
     fun <T, R> readBatch(inputs: List<T>, read: (T) -> R): StartupTargetReadResult<R> {
         val captured = inputs.toList()
