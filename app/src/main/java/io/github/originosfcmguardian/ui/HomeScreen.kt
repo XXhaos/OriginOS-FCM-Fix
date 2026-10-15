@@ -44,7 +44,6 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -118,10 +117,6 @@ fun HomeScreen(
     val destination = secondaryDestination ?: primaryTab
     val homeScroll = rememberScrollState()
     val settingsScroll = rememberScrollState()
-    val diagnosticsScroll = rememberScrollState()
-    LaunchedEffect(secondaryDestination) {
-        if (secondaryDestination == "diagnostics") diagnosticsScroll.scrollTo(0)
-    }
     BackHandler(enabled = secondaryDestination != null || primaryTab != "home") {
         if (secondaryDestination != null) secondaryDestination = null else primaryTab = "home"
     }
@@ -163,7 +158,6 @@ fun HomeScreen(
                         Text(when (destination) {
                             "apps" -> "应用"
                             "settings" -> "设置"
-                            "diagnostics" -> "诊断"
                             else -> "Guardian"
                         }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -183,10 +177,6 @@ fun HomeScreen(
                 if (secondaryDestination == null) TextButton(onClick = {
                     fcmDiagnosticsUnavailable = !onOpenFcmDiagnostics()
                 }) { Text("FCM Diagnostics", style = MaterialTheme.typography.labelLarge, maxLines = 1) }
-                else if (destination == "diagnostics") TextButton(onClick = { secondaryDestination = "settings" }) { Text("设置") }
-                else if (destination == "settings") TextButton(onClick = {
-                    secondaryDestination = "diagnostics"
-                }) { Text("诊断") }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
         )
@@ -214,7 +204,6 @@ fun HomeScreen(
                 .padding(contentPadding)
                 .then(if (destination == "apps") Modifier else Modifier.verticalScroll(when (destination) {
                     "settings" -> settingsScroll
-                    "diagnostics" -> diagnosticsScroll
                     else -> homeScroll
                 }))
                 .padding(horizontal = 16.dp, vertical = 16.dp),
@@ -225,11 +214,9 @@ fun HomeScreen(
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (destination == "home") {
                 HomeOverview(state, onReadGmsConnection,
-                    { secondaryDestination = "settings" }, {
-                        secondaryDestination = "diagnostics"
-                    }, onShizukuAction = onShizukuAction,
+                    { secondaryDestination = "settings" }, onShizukuAction = onShizukuAction,
                     onEnableMaster = onRequestAutomaticProtection, onDisableMaster = onStopAutomaticProtection,
-                    onEnableFcm = onRequestFcmProtection, onDisableFcm = onDisableFcmProtection)
+                    onExport = onExportCombinedDiagnosticReport, onReconcile = onReconcileStoppedRecovery)
             }
 
             if (destination == "settings") {
@@ -241,13 +228,9 @@ fun HomeScreen(
             AutomaticProtectionCard(state.automaticProtection, canEnableAutomaticProtection(state),
                 state.hiddenFromRecents, state.recentsMessage, onRequestAutomaticProtection,
                 onStopAutomaticProtection, onSetHiddenFromRecents, onOpenProtectionNotificationSettings,
-                showProtectionControls = false, notificationVisibility = state.protectionNotificationVisibility)
-
-            StatusCard("自启动设置") {
-                Text("请手动允许 Guardian 和需要接收通知的应用自启动。", style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(onClick = onOpenAutostartSettings) { Text("打开自启动设置") }
-                state.autostartSettingsMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            }
+                showProtectionControls = false, notificationVisibility = state.protectionNotificationVisibility,
+                onOpenAutostartSettings = onOpenAutostartSettings,
+                autostartSettingsMessage = state.autostartSettingsMessage)
             StatusCard("关于") {
                 Text("OriginOS FCM Guardian", style = MaterialTheme.typography.bodyMedium)
                 StatusRow("版本", BuildConfig.VERSION_NAME)
@@ -270,27 +253,6 @@ fun HomeScreen(
             )
             }
 
-            if (destination == "diagnostics") {
-                StatusCard("问题摘要") {
-                    Text(diagnosticSummary(state), style = MaterialTheme.typography.bodyMedium)
-                    diagnosticIssues(state).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    if (state.stoppedRecovery.needsReconcile || state.stoppedRecovery.storageBlocked) {
-                        StoppedRecoveryReceipt(state.stoppedRecovery,
-                            reconcileBusy = state.detecting || state.automaticProtection.enabled || state.automaticProtection.busy,
-                            onReconcile = onReconcileStoppedRecovery)
-                    }
-                }
-                StatusCard("最近操作") {
-                    val recent = recentDiagnosticActions(state)
-                    if (recent.isEmpty()) Text("暂无已保存操作")
-                    recent.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
-                }
-                StatusCard("导出报告") {
-                    Text("报告含设备与应用信息，请私下分享。", style = MaterialTheme.typography.bodySmall)
-                    DiagnosticReportExportButton(state.diagnosticReportExportBusy, onExportCombinedDiagnosticReport)
-                    state.diagnosticReportExportFeedback?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                }
-            }
         }
     }
 
@@ -348,7 +310,7 @@ internal fun NoTouchProtectionDialog(onDismiss: () -> Unit,
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("将“推送保护”添加到控制中心，下拉显示时可恢复意外中断的保护。")
-                Text("请保持 Shizuku 和自动保护开启。手动关闭保护后不会自动开启。")
+                Text("请保持 Shizuku 和 FCM 推送保护开启。手动关闭保护后不会自动开启。")
                 message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             }
         },
@@ -429,32 +391,16 @@ internal fun SelectedTargetDetails(
 
 @Composable
 private fun HomeOverview(state: HomeUiState, onGms: () -> Unit,
-    onSettings: () -> Unit, onDiagnostics: () -> Unit, onShizukuAction: () -> Unit,
+    onSettings: () -> Unit, onShizukuAction: () -> Unit,
     onEnableMaster: () -> Unit, onDisableMaster: () -> Unit,
-    onEnableFcm: () -> Unit, onDisableFcm: () -> Unit) {
-    val automatic = state.automaticProtection
+    onExport: (DiagnosticReportFormat) -> Unit, onReconcile: () -> Unit) {
     ShizukuHomeCard(state.shizuku, onSettings, onShizukuAction)
-    StatusCard("自动保护") {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically) {
-            Text(automaticProtectionStatus(automatic), modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge)
-            AutomaticProtectionToggle(automatic, canEnableAutomaticProtection(state), onEnableMaster, onDisableMaster)
-        }
-        AutomaticProtectionUptime(automatic)
-        Text(if (automatic.configurationAvailable) "已选 ${automatic.configuredIdentities.size} 个应用"
-            else "应用列表暂不可用", style = MaterialTheme.typography.bodySmall)
-        if (automatic.revocationSaveFailed) TextButton(onClick = onDisableMaster) { Text("重试保存关闭状态") }
-    }
-    StatusCard("FCM 连接与保活") {
-        FcmInlineConnection(state.gmsConnection, state.fcmProtection.latestObservation, onGms)
-        FcmProtectionControls(state.fcmProtection,
-            automatic.enabled && state.shizuku.status == ShizukuStatus.READY_SHELL,
-            onEnableFcm, onDisableFcm)
-    }
+    PushProtectionCard(state, onEnableMaster, onDisableMaster, onGms, onReconcile)
     RecoveryCountsCard(state)
-    StatusCard("诊断信息") {
-        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("打开诊断信息") }
+    StatusCard("导出报告") {
+        Text("报告含设备与应用信息，请私下分享。", style = MaterialTheme.typography.bodySmall)
+        DiagnosticReportExportButton(state.diagnosticReportExportBusy, onExport)
+        state.diagnosticReportExportFeedback?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
@@ -514,16 +460,6 @@ private fun RecoveryCountsCard(state: HomeUiState) {
         else Text(recoveryCountsSnapshotText(counts.calculatedAtMillis, counts.zoneId),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-}
-
-private fun automaticProtectionStatus(state: io.github.originosfcmguardian.autoprotection.AutomaticProtectionState): String = when {
-    state.waitingForReconciliation -> "等待复检"
-    state.busy -> "启动或恢复中"
-    state.waitingForPrivilege -> "等待 Shizuku"
-    state.enabled -> "保护已开启"
-    state.revocationSaveFailed -> "关闭失败，请重试"
-    state.savedAuthorization -> "等待恢复"
-    else -> "保护未开启"
 }
 
 @Composable

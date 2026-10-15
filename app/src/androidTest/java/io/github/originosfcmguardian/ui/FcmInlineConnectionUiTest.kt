@@ -10,10 +10,12 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import io.github.originosfcmguardian.core.gms.*
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -52,21 +54,28 @@ class FcmInlineConnectionUiTest {
         compose.runOnIdle { assertEquals(0, reads) }
     }
 
-    @Test fun productionHomeUsesDirectReadAndNeverRendersLegacyModal() {
+    @Test fun productionHomeRefreshesWhileVisibleWithoutManualControlOrLegacyModal() {
         var reads = 0
         compose.setContent { HomeFixture(HomeUiState(gmsConnection = GmsConnectionUiState(visible = true))) { reads++ } }
-        compose.onNodeWithTag("fcm-inline-read").performScrollTo().performClick()
-        compose.runOnIdle { assertEquals(1, reads) }
+        compose.runOnIdle { assertTrue("Visible Home requests a read without a tap", reads > 0) }
+        compose.onNodeWithText("FCM推送保护").assertExists()
+        compose.onNodeWithTag("fcm-inline-read").assertDoesNotExist()
+        compose.onNodeWithText("刷新").assertDoesNotExist()
         compose.onNodeWithText("FCM 连接").assertDoesNotExist()
         compose.onNodeWithText("读取一次").assertDoesNotExist()
         compose.onNodeWithText("触发一次心跳").assertDoesNotExist()
     }
 
-    @Test fun retiredInspectionHasNoHomeOrDiagnosticEntry() {
+    @Test fun retiredInspectionHasNoHomeOrSettingsEntry() {
         compose.setContent { HomeFixture(HomeUiState()) {} }
         compose.onNodeWithText("上次检查").assertDoesNotExist()
-        compose.onNodeWithText("打开诊断信息").performScrollTo().performClick()
-        compose.onNodeWithText("问题摘要").assertExists()
+        compose.onNodeWithText("打开诊断信息").assertDoesNotExist()
+        compose.onNodeWithText("问题摘要").assertDoesNotExist()
+        compose.onNodeWithText("定期巡检").assertDoesNotExist()
+        compose.onNodeWithText("高级排查").assertDoesNotExist()
+        compose.onNodeWithContentDescription("连接与后台设置").performScrollTo().performClick()
+        compose.onNodeWithText("后台设置").assertExists()
+        compose.onNodeWithText("诊断").assertDoesNotExist()
         compose.onNodeWithText("定期巡检").assertDoesNotExist()
         compose.onNodeWithText("高级排查").assertDoesNotExist()
     }
@@ -76,8 +85,11 @@ class FcmInlineConnectionUiTest {
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
             onClearCorruptTargetSelection = {},
-
-              onReadGmsConnection = onRead) }
+            onRequestAutomaticProtection = { error("Navigation must not request protection") },
+            onStopAutomaticProtection = { error("Navigation must not stop protection") },
+            onRequestFcmProtection = { error("Reading must not request FCM consent") },
+            onDisableFcmProtection = { error("Reading must not revoke FCM consent") },
+            onReadGmsConnection = onRead) }
     }
 
     private fun sample(): GmsConnectionObservation.Sample {

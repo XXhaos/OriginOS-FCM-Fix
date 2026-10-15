@@ -92,6 +92,8 @@ internal fun AutomaticProtectionCard(
     showToggle: Boolean = true,
     targetLabel: String = "应用",
     notificationVisibility: ProtectionNotificationVisibility = ProtectionNotificationVisibility.UNKNOWN,
+    onOpenAutostartSettings: (() -> Unit)? = null,
+    autostartSettingsMessage: String? = null,
 ) {
     var confirmHide by remember { mutableStateOf(false) }
     var notificationSettingsFailed by remember { mutableStateOf(false) }
@@ -99,7 +101,7 @@ internal fun AutomaticProtectionCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(if (showProtectionControls) "$targetLabel 自动保护" else "后台与通知", style = MaterialTheme.typography.titleMedium)
+            Text(if (showProtectionControls) "$targetLabel 自动保护" else "后台设置", style = MaterialTheme.typography.titleMedium)
             if (showProtectionControls) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically) {
@@ -120,6 +122,11 @@ internal fun AutomaticProtectionCard(
                 TextButton(onClick = { notificationSettingsFailed = !onOpenNotificationSettings() }) { Text("通知显示设置") }
                 if (notificationSettingsFailed) Text("打开失败，请在系统通知管理中设置。",
                     style = MaterialTheme.typography.bodySmall)
+                onOpenAutostartSettings?.let { openSettings ->
+                    Text("请允许 Guardian 和需要接收通知的应用自启动。", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = openSettings) { Text("打开自启动设置") }
+                    autostartSettingsMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("在最近任务中隐藏", modifier = Modifier.weight(1f))

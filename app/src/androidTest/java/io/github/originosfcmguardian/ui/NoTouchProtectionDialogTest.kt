@@ -19,7 +19,7 @@ class NoTouchProtectionDialogTest {
         } }
         compose.runOnIdle { assertEquals(0, requests) }
         compose.onNodeWithText("将“推送保护”添加到控制中心，下拉显示时可恢复意外中断的保护。").assertExists()
-        compose.onNodeWithText("请保持 Shizuku 和自动保护开启。手动关闭保护后不会自动开启。").assertExists()
+        compose.onNodeWithText("请保持 Shizuku 和 FCM 推送保护开启。手动关闭保护后不会自动开启。").assertExists()
         compose.onNodeWithText("添加磁贴").performClick()
         compose.runOnIdle { assertEquals(1, requests) }
         compose.onNodeWithText("系统添加入口暂不可用").assertExists()

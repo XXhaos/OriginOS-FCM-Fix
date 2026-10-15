@@ -10,6 +10,8 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import io.github.originosfcmguardian.fcm.GMS_DIAGNOSTICS_UNAVAILABLE
@@ -32,9 +34,12 @@ class CompactDiagnosticsScreenTest {
         var available = false
         var launches = 0
         compose.setContent { Fixture(HomeUiState(), launch = { launches++; available }) }
-        compose.onNodeWithText("FCM 连接与保活").assertExists()
+        compose.onNodeWithText("FCM推送保护").assertExists()
+        compose.onNodeWithContentDescription("FCM推送保护开关").assertExists()
+        compose.onNodeWithText("FCM 连接与保活").assertDoesNotExist()
         compose.onNodeWithText("Google Play 服务保护").assertDoesNotExist()
-        compose.onNodeWithText("刷新").assertExists()
+        compose.onNodeWithText("刷新").assertDoesNotExist()
+        compose.onNodeWithTag("fcm-inline-read").assertDoesNotExist()
         compose.onNodeWithText("FCM Diagnostics").assertIsDisplayed().performClick()
         compose.onNodeWithText(GMS_DIAGNOSTICS_UNAVAILABLE).assertExists()
         compose.runOnIdle {
@@ -48,16 +53,18 @@ class CompactDiagnosticsScreenTest {
         compose.runOnIdle { assertEquals(2, launches) }
     }
 
-    @Test fun diagnosticsKeepSummaryAndExportWithoutRetiredToolNavigation() {
+    @Test fun homeExportsDirectlyWithoutDiagnosticOrRetiredToolNavigation() {
         var exports = 0
         compose.setContent { Fixture(HomeUiState(), export = { exports++ }) }
         evidence.checked(SyntheticPhase.INITIAL) {
-            compose.onNodeWithText("打开诊断信息").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+            compose.onNodeWithText("打开诊断信息").assertDoesNotExist()
+            compose.onNodeWithText("诊断信息").assertDoesNotExist()
+            compose.onNodeWithText("导出报告").performScrollTo().assertIsDisplayed()
         }
         compose.waitForIdle()
-        evidence.record(SyntheticPhase.DIAGNOSTICS_OPEN)
-        compose.onNodeWithText("问题摘要").assertExists()
-        compose.onNodeWithText("正在读取记录…").assertDoesNotExist() // Shizuku issue takes precedence.
+        compose.onNodeWithText("问题摘要").assertDoesNotExist()
+        compose.onNodeWithText("最近操作").assertDoesNotExist()
+        compose.onNodeWithText("报告含设备与应用信息，请私下分享。").assertExists()
         compose.onNodeWithText("原始状态记录").assertDoesNotExist()
         compose.onNodeWithText("主动获取测试令牌").assertDoesNotExist()
         compose.onNodeWithText("所选应用通知记录").assertDoesNotExist()
@@ -78,14 +85,17 @@ class CompactDiagnosticsScreenTest {
         compose.onNodeWithText("查看工具入口").assertDoesNotExist()
         compose.onNodeWithText("定期巡检").assertDoesNotExist()
         compose.onNodeWithText("立即巡检").assertDoesNotExist()
-        compose.onNodeWithText("设置").performClick()
-        compose.onNodeWithText("诊断").performClick()
-        compose.onNodeWithText("问题摘要").assertExists()
+        compose.onNodeWithContentDescription("连接与后台设置").performScrollTo().performClick()
+        compose.onNodeWithText("后台设置").assertExists()
+        compose.onNodeWithText("诊断").assertDoesNotExist()
+        compose.onNodeWithText("导出报告").assertDoesNotExist()
         compose.onNodeWithText("返回").performClick()
         compose.onNodeWithText("Guardian").assertExists()
+        compose.onNodeWithText("导出脱敏报告").performScrollTo().assertIsEnabled()
+        compose.runOnIdle { assertEquals(1, exports) }
     }
 
-    @Test fun savedCountsAreOnHomeAndDiagnosticsHaveNoRetiredToolsOrDuplicateHistory() {
+    @Test fun savedCountsAndReportAreOnHomeWithoutRetiredToolsOrDuplicateHistory() {
         val savedAt = java.time.Instant.parse("2026-10-06T15:59:00Z").toEpochMilli()
         val first = SelectedTargetIdentity("fixture.first", 10_001, 100, listOf("a".repeat(64)))
         val second = SelectedTargetIdentity("fixture.second", 10_002, 100, listOf("b".repeat(64)))
@@ -101,8 +111,9 @@ class CompactDiagnosticsScreenTest {
         compose.onNodeWithText("更新于 10-06 23:59").assertExists()
         compose.onNodeWithText("仅计解除限制，不代表消息送达。").assertDoesNotExist()
 
-        compose.onNodeWithText("打开诊断信息").performScrollTo().performClick()
-        compose.onNodeWithText("最近操作").assertExists()
+        compose.onNodeWithText("导出报告").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("打开诊断信息").assertDoesNotExist()
+        compose.onNodeWithText("最近操作").assertDoesNotExist()
         compose.onNodeWithText("查看操作历史").assertDoesNotExist()
         compose.onNodeWithText("查看工具入口").assertDoesNotExist()
         compose.onNodeWithText("定期巡检").assertDoesNotExist()
@@ -110,7 +121,7 @@ class CompactDiagnosticsScreenTest {
         compose.onNodeWithText("恢复操作历史").assertDoesNotExist()
         compose.onNodeWithText("FCM 连接详情").assertDoesNotExist()
         compose.onNodeWithText("自动保护详情").assertDoesNotExist()
-        compose.onNodeWithText("解除停止限制").assertDoesNotExist()
+        compose.onNodeWithText("解除停止限制").assertExists()
     }
 
     @Composable private fun Fixture(state: HomeUiState, launch: () -> Boolean = { false }, export: () -> Unit = {},

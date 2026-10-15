@@ -53,6 +53,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -96,6 +97,8 @@ data class HomeUiState(
     val fcmRecovery: io.github.originosfcmguardian.fcmrecovery.FcmRecoveryUiState = io.github.originosfcmguardian.fcmrecovery.FcmRecoveryUiState(),
     val fcmProtection: io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(),
     val fcmProtectionConfirmation: Boolean = false,
+    val pushProtectionBusy: Boolean = false,
+    val pushProtectionMessage: String? = null,
     val automaticProtectionFromDaemon: Boolean = false,
 )
 
@@ -116,6 +119,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val stoppedRecoveryController by lazy { StoppedRecoveryController(application) }
     private fun remoteOwned() = DaemonAppRuntime.isRemoteOwned(getApplication())
     private var daemonRefreshJob: Job? = null
+    private var pushProtectionJob: Job? = null
+    private var pushProtectionAction = 0L
     private var stoppedRecoveryJob: Job? = null
     private var recoveryUiActive = false
     private var stoppedRecoveryRecordGeneration = 0L
@@ -187,6 +192,82 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.fcmProtection.busy || _uiState.value.gmsAutoHeartbeat.stopPending) return
         _uiState.update { it.copy(fcmProtectionConfirmation = true) }
     }
+
+    /** One Home action composes existing commands; it never changes saved resumption rules. */
+    fun requestPushProtection() {
+        val state = _uiState.value
+        if (!recoveryUiActive || state.pushProtectionBusy || state.automaticProtection.busy ||
+            state.fcmProtection.busy || state.automaticProtection.revocationSaveFailed) return
+        _uiState.update { it.copy(pushProtectionMessage = null) }
+        if (!state.fcmProtection.configured || state.fcmProtection.requiresConfirmation) {
+            requestFcmProtection()
+        } else {
+            // Existing FCM consent follows the existing master host on its own.
+            requestAutomaticProtection()
+        }
+    }
+
+    fun confirmPushProtection() {
+        if (!_uiState.value.fcmProtectionConfirmation || !recoveryUiActive || pushProtectionJob?.isActive == true) return
+        dismissFcmProtection()
+        val action = ++pushProtectionAction
+        _uiState.update { it.copy(pushProtectionBusy = true, pushProtectionMessage = null) }
+        pushProtectionJob = viewModelScope.launch {
+            try {
+                if (!_uiState.value.automaticProtection.masterEnabled) {
+                    if (!canEnableAutomaticProtection(_uiState.value)) {
+                        _uiState.update { it.copy(pushProtectionMessage = "暂时无法开启，请稍后重试。") }
+                        return@launch
+                    }
+                    requestAutomaticProtection()
+                }
+                // Both commands are asynchronous. Observe actual readiness instead of racing
+                // enableFcm against the command gate or treating a delay as an acknowledgement.
+                val host = awaitPushProtectionHost(uiState)
+                coroutineContext.ensureActive()
+                if (action != pushProtectionAction || !recoveryUiActive) return@launch
+                if (host == null || !pushProtectionHostReady(host)) {
+                    _uiState.update { it.copy(pushProtectionMessage = if (it.automaticProtection.configuredIdentities.isEmpty())
+                        "请先在应用页选择需要保护的应用。" else "等待 Shizuku 和保护服务就绪后，请完成开启。") }
+                    return@launch
+                }
+                if (host.fcmProtection.configured && !host.fcmProtection.requiresConfirmation) return@launch
+                if (remoteOwned()) {
+                    DaemonAppRuntime.enableFcm(getApplication())
+                    val completed = withTimeoutOrNull(30_000) {
+                        uiState.first { value -> !value.fcmProtection.busy &&
+                            (value.fcmProtection.configured && !value.fcmProtection.requiresConfirmation ||
+                                value.fcmProtection.confirmationFailure != null || value.fcmProtection.storageBlocked) }
+                    }
+                    if (completed == null) _uiState.update { it.copy(pushProtectionMessage = "正在接续保护，请稍后查看。") }
+                } else {
+                    withContext(Dispatchers.IO) {
+                        io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.confirm(getApplication())
+                    }
+                }
+            } finally {
+                if (action == pushProtectionAction) {
+                    pushProtectionJob = null
+                    _uiState.update { it.copy(pushProtectionBusy = false) }
+                }
+            }
+        }
+    }
+
+    private fun cancelPushProtectionAction() {
+        ++pushProtectionAction
+        pushProtectionJob?.cancel()
+        pushProtectionJob = null
+        dismissFcmProtection()
+        _uiState.update { it.copy(pushProtectionBusy = false) }
+    }
+
+    fun stopPushProtection() {
+        cancelPushProtectionAction()
+        _uiState.update { it.copy(pushProtectionMessage = null) }
+        // Master OFF already pauses both execution branches and preserves their saved choices.
+        stopAutomaticProtection()
+    }
     fun dismissFcmProtection() { _uiState.update { it.copy(fcmProtectionConfirmation = false) } }
     fun confirmFcmProtection() {
         if (!_uiState.value.fcmProtectionConfirmation) return
@@ -200,15 +281,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.disable(getApplication())
     }
 
-    fun readGmsConnection() {
+    fun readGmsConnection(preserveObservation: Boolean = false) {
         if (gmsConnectionClosed || _uiState.value.gmsConnection.busy) return
         ensureGmsNetworkTracking()
         val generation = ++gmsConnectionGeneration
         val network = gmsNetworkContext(getApplication())
-        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true, observation = null,
-            readAttempted = true, readCompletedAtElapsedMillis = null,
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true,
+            observation = it.gmsConnection.observation.takeIf { preserveObservation },
+            readAttempted = true, readCompletedAtElapsedMillis = it.gmsConnection.readCompletedAtElapsedMillis.takeIf { preserveObservation },
             heartbeatBusy = false, heartbeatStatus = null,
-            networkBackground = network.summary, networkKey = network.key, networkChanged = false)) }
+            networkBackground = network.summary,
+            networkKey = if (preserveObservation) it.gmsConnection.networkKey else network.key,
+            networkChanged = preserveObservation && (it.gmsConnection.networkChanged ||
+                it.gmsConnection.networkKey != null && it.gmsConnection.networkKey != network.key))) }
         gmsConnectionJob = viewModelScope.launch {
             try {
                 val observation = if (remoteOwned()) DaemonAppRuntime.readGmsConnection(getApplication())
@@ -219,7 +304,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(gmsConnection = it.gmsConnection.copy(observation = observation,
                         readCompletedAtElapsedMillis = android.os.SystemClock.elapsedRealtime(),
                         automaticObservationAtReadCompletion = it.fcmProtection.latestObservation,
-                        networkChanged = it.gmsConnection.networkChanged || changed))
+                        networkKey = network.key,
+                        networkChanged = changed || (!preserveObservation && it.gmsConnection.networkChanged)))
                 }
             } finally {
                 if (generation == gmsConnectionGeneration) {
@@ -478,6 +564,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun openShizuku() = shizukuRuntime.openManager()
 
     fun onAppBackgrounded() {
+        cancelPushProtectionAction()
         dismissGmsConnection()
         recoveryUiActive = false
         daemonRefreshJob?.cancel(); daemonRefreshJob = null
@@ -842,6 +929,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeForActivityExit() {
+        cancelPushProtectionAction()
         closeGmsConnection()
         recoveryUiActive = false
         daemonRefreshJob?.cancel(); daemonRefreshJob = null
@@ -851,6 +939,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        cancelPushProtectionAction()
         closeGmsConnection()
         recoveryUiActive = false
         daemonRefreshJob?.cancel(); daemonRefreshJob = null

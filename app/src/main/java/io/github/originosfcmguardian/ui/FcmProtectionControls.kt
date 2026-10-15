@@ -63,12 +63,12 @@ internal fun fcmProtectionGuidance(state: FcmProtectionUiState): String = when {
     else -> ""
 }
 @Composable internal fun FcmProtectionConfirmation(onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("开启 FCM 保护？") },
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("开启 FCM 推送保护？") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("允许 Guardian 自动维护 FCM 连接，并在异常时尝试恢复。")
-            Text("使用前请开启自动保护，并启动和授权 Shizuku。")
+            Text("自动恢复已选应用的后台唤醒，并维护 FCM 连接。")
+            Text("请保持 Shizuku 已启动并授权。")
             Text("保存运行记录，不读取消息内容。")
         } },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("确认开启 FCM 保护") } },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("确认开启") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }

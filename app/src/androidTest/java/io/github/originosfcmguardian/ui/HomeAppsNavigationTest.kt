@@ -30,6 +30,7 @@ import io.github.originosfcmguardian.autostart.SelectedTargetUiState
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatusSnapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -45,9 +46,11 @@ class HomeAppsNavigationTest {
         var starts = 0
         var stops = 0
         var checks = 0
+        var connectionReads = 0
         val state = mutableStateOf(HomeUiState(shizuku = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "ready")))
         compose.setContent { Fixture(state.value, shizukuAction = { actions++ },
-            startProtection = { starts++ }, stop = { stops++ }, check = { checks++ }) }
+            startProtection = { starts++ }, stop = { stops++ }, check = { checks++ },
+            readConnection = { connectionReads++ }) }
         listOf(ShizukuStatus.READY_SHELL, ShizukuStatus.NOT_RUNNING).forEach { status ->
             compose.runOnIdle { state.value = state.value.copy(shizuku = ShizukuStatusSnapshot(status, "fixture")) }
             // No scroll: the shortcut belongs to the first card, not a separate bottom card.
@@ -56,7 +59,10 @@ class HomeAppsNavigationTest {
             compose.onNodeWithText("返回").performClick()
             compose.onNodeWithContentDescription("连接与后台设置").assertIsDisplayed()
         }
-        compose.runOnIdle { assertEquals(0, actions); assertEquals(0, starts); assertEquals(0, stops); assertEquals(0, checks) }
+        compose.runOnIdle {
+            assertTrue("Visible Home refreshes connection evidence", connectionReads > 0)
+            assertEquals(0, actions); assertEquals(0, starts); assertEquals(0, stops); assertEquals(0, checks)
+        }
     }
 
     @Test fun homeMissingOrStoppedManagerUsesExistingExplicitActionWithoutAutomaticRequests() {
@@ -138,10 +144,16 @@ class HomeAppsNavigationTest {
         compose.onNodeWithText("OriginOS FCM Guardian").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(version).performScrollTo().assertIsDisplayed()
         compose.runOnIdle { assertEquals(0, stops) }
-        compose.onNodeWithText("诊断").performClick()
-        compose.onNodeWithText(version).assertDoesNotExist()
-        compose.onNodeWithContentDescription("主页标签").performClick()
+        compose.onNodeWithText("后台设置").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("通知显示设置").assertExists()
+        compose.onNodeWithText("打开自启动设置").assertExists()
+        compose.onNodeWithContentDescription("最近任务隐藏开关").assertExists()
+        compose.onNodeWithText("后台与通知").assertDoesNotExist()
+        compose.onNodeWithText("自启动设置").assertDoesNotExist()
+        compose.onNodeWithText("诊断").assertDoesNotExist()
+        compose.onNodeWithText("返回").performClick()
         compose.onNodeWithText("关于").assertDoesNotExist()
+        compose.onNodeWithText(version).assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, stops) }
     }
 
@@ -215,13 +227,16 @@ class HomeAppsNavigationTest {
             state.value = state.value.copy(automaticProtection = masterOffAutomaticProtectionState(
                 state.value.automaticProtection, "已关闭；应用选择保留"))
         }) }
-        compose.onNodeWithContentDescription("自动保护总开关").assertIsOn().performClick()
-        compose.onNodeWithContentDescription("自动保护总开关").assertIsOff()
+        compose.onNodeWithContentDescription("FCM推送保护开关").performScrollTo().assertIsOn().performClick()
+        compose.onNodeWithContentDescription("FCM推送保护开关").assertIsOff()
         compose.onNodeWithContentDescription("应用标签").performClick()
         compose.onNodeWithContentDescription("已保护（1）").assertExists()
         compose.onNodeWithContentDescription("Telegram 自动保护选择").assertIsOn()
         openSettings()
-        compose.onNodeWithText("诊断").performClick()
+        compose.onNodeWithText("后台设置").assertExists()
+        compose.onNodeWithText("诊断").assertDoesNotExist()
+        compose.onNodeWithText("返回").performClick()
+        compose.onNodeWithContentDescription("FCM推送保护开关").assertIsOff()
         compose.runOnIdle { assertEquals(1, stops); assertEquals(listOf(telegram.identity), state.value.automaticProtection.configuredIdentities) }
     }
 
@@ -231,7 +246,8 @@ class HomeAppsNavigationTest {
     }
 
     @Composable private fun Fixture(state: HomeUiState, stop: () -> Unit = {}, stopMonitor: () -> Unit = {},
-        shizukuAction: () -> Unit = {}, check: () -> Unit = {}, startProtection: () -> Unit = {}) {
+        shizukuAction: () -> Unit = {}, check: () -> Unit = {}, startProtection: () -> Unit = {},
+        readConnection: () -> Unit = {}) {
         val visibleState = state.copy(visibleApps = state.selectedTargets.map {
             VisibleProtectionApp(it.identity.packageName, it.label, it.identity, supported = true)
         }, visibleAppsLoadState = HomeSourceLoadState.LOADED)
@@ -242,6 +258,6 @@ class HomeAppsNavigationTest {
 
              onStopAutomaticProtection = stop,
             onRequestAutomaticProtection = startProtection, onConfirmAutomaticProtection = startProtection,
-            onRequestAppAutomaticProtection = { startProtection() }) }
+            onRequestAppAutomaticProtection = { startProtection() }, onReadGmsConnection = readConnection) }
     }
 }
