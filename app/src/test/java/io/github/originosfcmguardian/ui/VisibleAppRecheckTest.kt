@@ -139,7 +139,7 @@ class VisibleAppRecheckTest {
         val missing = ProtectionAppRow(app.copy(identity = null, stoppedSnapshot = snapshot), true)
         assertNull(protectionAppRecheckTarget(ready, missing))
         assertFalse(canRecheckProtectionApp(ready, missing))
-        assertEquals("应用身份不可用；请刷新应用列表", protectionAppStatus(ready, missing))
+        assertEquals("无法读取应用，请刷新", protectionAppStatus(ready, missing))
         val healthy = ready.copy(selectedTargets = listOf(SelectedTargetUiState(first, "First", stoppedSnapshot = snapshot)),
             visibleApps = listOf(app.copy(stoppedSnapshot = snapshot)))
         listOf(HomeSourceLoadState.LOADING, HomeSourceLoadState.FAILED).forEach { load ->

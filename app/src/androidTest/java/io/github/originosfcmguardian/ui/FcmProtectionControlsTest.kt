@@ -16,7 +16,10 @@ class FcmProtectionControlsTest {
     @Test fun unifiedControlNeedsExplicitConfirmationAndKeepsBranchesInternal() {
         var requests = 0
         compose.setContent { MaterialTheme { FcmProtectionControls(FcmProtectionUiState(), true, { requests++ }, {}) } }
-        compose.onNodeWithText("FCM 保护（试用）").assertExists()
+        compose.onNodeWithText("FCM 保护").assertExists()
+        compose.onNodeWithText("FCM 保护（试用）").assertDoesNotExist()
+        compose.onNodeWithText("低频心跳").assertDoesNotExist()
+        compose.onNodeWithText("FCM 恢复").assertDoesNotExist()
         compose.onNodeWithText("低频心跳（试用）").assertDoesNotExist()
         compose.onNodeWithText("FCM 恢复（试用）").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, requests) }
@@ -26,6 +29,8 @@ class FcmProtectionControlsTest {
     @Test fun combinedDialogDoesNotConfirmUntilUserClicks() {
         var confirms = 0
         compose.setContent { MaterialTheme { FcmProtectionConfirmation({ confirms++ }, {}) } }
+        compose.onNodeWithText("开启 FCM 保护？").assertExists()
+        compose.onNodeWithText("开启 FCM 保护试用？").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, confirms) }
         compose.onNodeWithText("确认开启 FCM 保护").performClick()
         compose.runOnIdle { assertEquals(1, confirms) }

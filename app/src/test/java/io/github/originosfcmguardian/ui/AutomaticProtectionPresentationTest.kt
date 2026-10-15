@@ -14,6 +14,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AutomaticProtectionPresentationTest {
+    @Test fun backendWaitDoesNotMisdiagnoseWorkingShizukuOrClaimRunningTime() {
+        val waiting = AutomaticProtectionState(masterEnabled = true, waitingForService = true)
+        assertEquals("等待保护服务", automaticProtectionStatusLabel(waiting))
+        assertFalse(waiting.waitingForPrivilege)
+        assertNull(waiting.coreSessionStartedAtElapsedMillis)
+        assertEquals("等待 Shizuku", automaticProtectionStatusLabel(AutomaticProtectionState(waitingForPrivilege = true)))
+    }
     private val target = SelectedTargetUiState(SelectedTargetIdentity("org.telegram.messenger", 10434, 100, listOf("a".repeat(64))), "Telegram")
     private val ready = HomeUiState(selectedTargets = listOf(target), recoveryFirmwareSupported = true,
         targetSelectionLoadState = HomeSourceLoadState.LOADED, stoppedRecovery = StoppedRecoveryUiState(loaded = true),
@@ -90,10 +97,10 @@ class AutomaticProtectionPresentationTest {
         assertTrue(shown.savedAuthorization)
         assertTrue(shown.waitingForReconciliation)
         assertFalse(shown.enabled)
-        assertEquals("等待只读复检", automaticProtectionStatusLabel(shown))
+        assertEquals("等待复检", automaticProtectionStatusLabel(shown))
         assertFalse(canEnableAutomaticProtection(ready.copy(automaticProtection = waiting)))
         val normal = waiting.copy(waitingForReconciliation = false, enabled = true)
-        assertEquals("检测已开启", automaticProtectionStatusLabel(normal))
+        assertEquals("保护已开启", automaticProtectionStatusLabel(normal))
     }
 
     @Test fun transientWaitKeepsApplicationsProtectedButDoesNotClaimActiveDetection() {
@@ -107,11 +114,11 @@ class AutomaticProtectionPresentationTest {
             val shown = targetAutomaticProtectionState(waiting, row.identity)
             assertTrue(shown.savedAuthorization)
             assertFalse(shown.enabled)
-            assertEquals("等待恢复检测", automaticProtectionStatusLabel(shown))
+            assertEquals("等待复检", automaticProtectionStatusLabel(shown))
         }
         assertFalse(guardianTilePresentation(waiting, actuallyProtecting = true).active)
         assertEquals(waiting.detail, guardianTilePresentation(waiting, actuallyProtecting = false).subtitle)
-        assertEquals("检测未开启", automaticProtectionStatusLabel(AutomaticProtectionState()))
-        assertEquals("检测已开启", automaticProtectionStatusLabel(previous))
+        assertEquals("保护未开启", automaticProtectionStatusLabel(AutomaticProtectionState()))
+        assertEquals("保护已开启", automaticProtectionStatusLabel(previous))
     }
 }

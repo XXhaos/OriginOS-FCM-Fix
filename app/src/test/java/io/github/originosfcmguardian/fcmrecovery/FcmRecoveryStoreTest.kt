@@ -11,14 +11,21 @@ class FcmRecoveryStoreTest {
     private class Storage : FcmRecoveryStorage {
         var value = FcmRecoverySnapshot()
         var marker: FcmRecoverySnapshot? = null
+        var mcsMarker: FcmRecoverySnapshot? = null
         var halted = false
         var failWrite = false
         override fun read() = value.copy(configured = value.configured && !halted,
             consumed = value.consumed || marker != null, consumedBoot = marker?.consumedBoot ?: value.consumedBoot,
-            consumedAt = marker?.consumedAt ?: value.consumedAt, consumedElapsed = marker?.consumedElapsed ?: value.consumedElapsed)
+            consumedAt = marker?.consumedAt ?: value.consumedAt, consumedElapsed = marker?.consumedElapsed ?: value.consumedElapsed,
+            mcsConsumed = value.mcsConsumed || mcsMarker != null,
+            mcsConsumedBoot = mcsMarker?.mcsConsumedBoot ?: value.mcsConsumedBoot,
+            mcsConsumedAt = mcsMarker?.mcsConsumedAt ?: value.mcsConsumedAt,
+            mcsConsumedElapsed = mcsMarker?.mcsConsumedElapsed ?: value.mcsConsumedElapsed)
         override fun write(value: FcmRecoverySnapshot) { if (failWrite) error("interrupted storage"); this.value = value }
         override fun markConsumed(value: FcmRecoverySnapshot) { marker = value }
         override fun clearConsumed() { marker = null }
+        override fun markMcsConsumed(value: FcmRecoverySnapshot) { mcsMarker = value }
+        override fun clearMcsConsumed() { mcsMarker = null }
         override fun halt() { halted = true }
         override fun releaseHalt() { halted = false }
     }
@@ -86,6 +93,46 @@ class FcmRecoveryStoreTest {
         assertNull(GmsHeartbeatPolicy.rejection(sample(GcmConnectionState.REPORTED_CONNECTED), 100))
         assertFalse(FcmRecoveryPolicy.absent(sample(GcmConnectionState.REPORTED_DISCONNECTED), 100))
         assertFalse(FcmRecoveryPolicy.absent(sample(GcmConnectionState.UNKNOWN, complete = SourceCompleteness.MALFORMED), 100))
+    }
+    @Test fun `MCS marker survives torn document restart OFF ON and oscillation without touching SEND marker`() {
+        val storage = Storage(); val store = FcmRecoveryStore(storage)
+        val dis = sample(GcmConnectionState.REPORTED_DISCONNECTED, socket = false).copy(versionCode = FcmRecoveryPolicy.MCS_VERSION)
+        store.confirm(FcmRecoveryPolicy.binding(dis))
+        val operation = FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS
+        storage.failWrite = true
+        assertThrows(IllegalStateException::class.java) { store.consume(dis, operation) }
+        storage.failWrite = false
+        val resumed = FcmRecoveryStore(storage)
+        assertTrue(resumed.read().mcsConsumed); assertFalse(resumed.read().consumed); assertNull(storage.marker)
+        resumed.disable(); resumed.confirm(FcmRecoveryPolicy.binding(dis))
+        assertNull(resumed.consume(dis, operation))
+        val absent = dis.copy(gcmService = dis.gcmService.copy(state = GcmConnectionState.SERVICE_ABSENT))
+        assertNotNull(resumed.consume(absent))
+        val absenceBytes = FcmRecoveryStoreCodec.encode(storage.marker!!.copy(events = emptyList()), legacyMarker = true)
+        for (state in listOf(GcmConnectionState.SERVICE_ABSENT, GcmConnectionState.REPORTED_DISCONNECTED)) {
+            val changed = dis.copy(observedAtMillis = 2000, elapsedRealtimeMillis = 200,
+                gcmService = GcmServiceSource(state, SourceCompleteness.COMPLETE, 2000, 200, 0))
+            val saved = resumed.rearm(changed, 200, true)
+            assertTrue(saved.consumed); assertTrue(saved.mcsConsumed)
+            assertArrayEquals(absenceBytes, FcmRecoveryStoreCodec.encode(storage.marker!!.copy(events = emptyList()), legacyMarker = true))
+        }
+        val connected = dis.copy(observedAtMillis = 2000, elapsedRealtimeMillis = 200,
+            tcp = SocketSource(SourceCompleteness.COMPLETE, true),
+            gcmService = GcmServiceSource(GcmConnectionState.REPORTED_CONNECTED, SourceCompleteness.COMPLETE, 2000, 200, 0))
+        assertTrue(resumed.rearm(connected, 200, false).mcsConsumed)
+        assertTrue(resumed.rearm(connected.copy(tcp = SocketSource(SourceCompleteness.COMPLETE, false)), 200, true).mcsConsumed)
+        assertTrue(resumed.rearm(connected, 200, true, false).mcsConsumed)
+        assertFalse(resumed.rearm(connected, 200, true, true).mcsConsumed)
+        assertNull(storage.mcsMarker)
+        assertNotNull(resumed.consume(dis.copy(gcmService = dis.gcmService.copy(observedAtMillis = 3000, elapsedRealtimeMillis = 300)), operation))
+    }
+    @Test fun `legacy version two stores absence and power unchanged with no fabricated MCS operation`() {
+        val event = FcmRecoveryEvent(1000, 100, FcmRecoveryEventAction.REQUEST_RESULT,
+            status = FcmRecoveryStatus.REQUESTED, reason = FcmRecoveryReason.COMMAND_ACCEPTED)
+        val old = FcmRecoverySnapshot(true, "a".repeat(64), true, "12345678-1234-1234-1234-123456789abc", 1000, 100,
+            events = listOf(event), powerSampleAtMillis = 1000)
+        assertEquals(old, FcmRecoveryStoreCodec.decode(FcmRecoveryStoreCodec.encode(old, legacyMarker = true)))
+        assertEquals(old, FcmRecoveryStoreCodec.decode(FcmRecoveryStoreCodec.encode(old)))
     }
     @Test fun `hourly reservation survives recreation eviction and OFF ON and blocks backward clock`() {
         val storage = Storage(); val store = FcmRecoveryStore(storage)

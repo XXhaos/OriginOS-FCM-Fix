@@ -27,6 +27,8 @@ class HomeScreenSmokeTest {
         composeRule.onNodeWithText("一键修复").assertDoesNotExist()
         composeRule.onNodeWithText("恢复原始配置").assertDoesNotExist()
         composeRule.onNodeWithText("原始状态记录").assertDoesNotExist()
-        composeRule.onNodeWithText("查看工具入口").performScrollTo().assertExists()
+        composeRule.onNodeWithText("查看工具入口").assertDoesNotExist()
+        composeRule.onNodeWithText("定期巡检").assertDoesNotExist()
+        composeRule.onNodeWithText("导出脱敏报告").performScrollTo().assertIsDisplayed()
     }
 }

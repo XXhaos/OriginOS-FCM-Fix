@@ -36,7 +36,6 @@ class AutomaticProtectionControlsTest {
         compose.onNodeWithText("保护通知：状态未知").assertExists()
         compose.onNodeWithText("保护通知：系统已关闭").assertDoesNotExist()
         compose.onNodeWithText("通知显示设置").assertIsEnabled().performClick()
-        compose.onNodeWithText("关闭此类通知不关闭保护。").assertExists()
         compose.runOnIdle { assertEquals(3, settingsOpened) }
     }
 
@@ -47,7 +46,7 @@ class AutomaticProtectionControlsTest {
                 { error("Unexpected enable") }, { error("Unexpected revoke") }, {},
                 onOpenNotificationSettings = { ++settingsOpened > 1 }, showProtectionControls = false)
         } }
-        val failure = "无法打开设置，请在系统通知管理中调整 Guardian 保护通知。"
+        val failure = "打开失败，请在系统通知管理中设置。"
         compose.onNodeWithText("通知显示设置").performClick()
         compose.onNodeWithText(failure).assertExists()
         compose.onNodeWithText("通知显示设置").assertIsEnabled().performClick()
@@ -83,6 +82,7 @@ class AutomaticProtectionControlsTest {
         compose.onNodeWithContentDescription("自动保护总开关").assertIsNotEnabled()
         compose.onNodeWithContentDescription("最近任务隐藏开关").performClick()
         compose.runOnIdle { assertEquals(0, hidden) }
+        compose.onNodeWithText("请先锁定后台任务，再隐藏。隐藏后可从桌面打开 Guardian。").assertExists()
         compose.onNodeWithText("确认隐藏").performClick()
         compose.runOnIdle { assertEquals(1, hidden) }
     }
@@ -137,7 +137,7 @@ class AutomaticProtectionControlsTest {
                 false, false, null, { error("Unexpected enable") }, { stops++ }, {})
         } }
         compose.onNodeWithText("等待 Shizuku").assertExists()
-        compose.onNodeWithText("检测已开启").assertDoesNotExist()
+        compose.onNodeWithText("保护已开启").assertDoesNotExist()
         compose.onNodeWithContentDescription("自动保护总开关").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, stops) }
     }

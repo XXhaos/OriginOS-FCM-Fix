@@ -10,6 +10,8 @@ import android.content.pm.ResolveInfo
 import android.os.IBinder
 import android.os.SystemClock
 import android.system.Os
+import android.net.Network
+import android.net.NetworkCapabilities
 import io.github.originosfcmguardian.core.gms.*
 import io.github.originosfcmguardian.autostart.effectiveRecoveryComponentEnabled
 import java.io.FileInputStream
@@ -84,6 +86,42 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         return GmsReceiverInspection(true, receivers)
     }
     override fun elapsedRealtime() = SystemClock.elapsedRealtime()
+    override fun usableInternet(): Boolean = runCatching {
+        if (Os.getuid() != 2000) return false
+        val binder = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java)
+            .invoke(null, "connectivity") as IBinder
+        val connectivityApi = Class.forName("android.net.IConnectivityManager")
+        val connectivity = Class.forName("android.net.IConnectivityManager\$Stub")
+            .getMethod("asInterface", IBinder::class.java).invoke(null, binder)
+        val active = connectivityApi.getMethod("getActiveNetwork").invoke(connectivity) as? Network ?: return false
+        val capabilities = invokeShellNetworkCapabilities(connectivityApi, checkNotNull(connectivity), Network::class.java, active)
+            as? NetworkCapabilities ?: return false
+        fun facts(c: NetworkCapabilities) = FcmMcsNetwork(c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
+            c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED), c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED),
+            c.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+        val networks = if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            val all = connectivityApi.getMethod("getAllNetworks").invoke(connectivity) as? Array<*> ?: return false
+            if (all.size > 32 || all.any { it !is Network }) return false
+            all.mapNotNull { network ->
+                (invokeShellNetworkCapabilities(connectivityApi, checkNotNull(connectivity), Network::class.java,
+                    checkNotNull(network)) as? NetworkCapabilities)?.let(::facts)
+            }
+        } else emptyList()
+        usableFcmMcsNetwork(facts(capabilities), networks)
+    }.getOrDefault(false)
+    override fun disconnectedMcsQualified(): Boolean {
+        val identity = gmsPackage() ?: return false
+        // Prefer current receiver capability. The reviewed version only supplies a fallback
+        // for legacy dumps which omit export metadata; it never overrides contrary evidence.
+        if (Os.getuid() != 2000 ||
+            identity.signerSha256 != FcmRecoveryPolicy.SIGNER || environment().currentUser != 0 ||
+            packagesForUid(identity.uid) != listOf(GMS_OBSERVATION_PACKAGE)) return false
+        val protected = api.getMethod("isProtectedBroadcast", String::class.java)
+            .invoke(remote, FcmRecoveryPolicy.MCS_ACTION) as? Boolean
+        if (protected != false || !FcmPackageStateReader.read()) return false
+        return FcmMcsReceiverReader.read(identity.uid,
+            allowReviewedMissingExported = identity.versionCode == FcmRecoveryPolicy.MCS_VERSION)
+    }
     override fun recoverySenderQualified(): Boolean {
         if (Os.getuid() != 2000) return false
         val component = ComponentName(GMS_OBSERVATION_PACKAGE, FcmRecoveryPolicy.COMPONENT)

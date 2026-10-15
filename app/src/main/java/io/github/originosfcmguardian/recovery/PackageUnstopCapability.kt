@@ -5,6 +5,11 @@ import java.util.concurrent.TimeUnit
 
 /** Only checks the existing fixed command; never probes support by changing a package. */
 internal object PackageUnstopCapability {
+    private val children = java.util.concurrent.ConcurrentHashMap.newKeySet<Process>()
+    fun isQuiescent(): Boolean {
+        children.removeIf { runCatching { !it.isAlive }.getOrDefault(false) }
+        return children.isEmpty()
+    }
     fun advertised(bytes: ByteArray): Boolean {
         if (bytes.isEmpty() || bytes.size > 65_536 || bytes.last() != 10.toByte() ||
             bytes.any { it.toInt() !in 9..13 && it.toInt() !in 32..126 }) return false
@@ -16,6 +21,7 @@ internal object PackageUnstopCapability {
     fun read(active: () -> Boolean): Boolean {
         if (!active()) return false
         val child = ProcessBuilder("/system/bin/cmd", "package", "help").start()
+        children.add(child)
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(4096)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1_500)
@@ -42,6 +48,7 @@ internal object PackageUnstopCapability {
             runCatching { child.destroyForcibly() }
             runCatching { child.inputStream.close() }; runCatching { child.errorStream.close() }
             runCatching { child.outputStream.close() }; output.reset()
+            if (runCatching { !child.isAlive }.getOrDefault(false)) children.remove(child)
         }
     }
 }

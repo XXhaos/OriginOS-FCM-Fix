@@ -32,31 +32,13 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             }
         }
 
-        section("FCM 本应用证据")
-        statusRow("配置状态", report.fcmConfiguration)
-        statusRow("注册状态", report.fcmRegistration)
-        statusRow("通知权限", report.notificationPermission)
-        val receipt = report.latestFcmReceipt
-        if (receipt == null) {
-            row("最近回调", null)
-        } else {
-            row("最近回调时间（Unix 毫秒）", receipt.receivedAtEpochMillis)
-            statusRow("消息优先级", receipt.messagePriority)
-            statusRow("通知处理结果", receipt.notificationOutcome)
-            statusRow("设备可交互", receipt.deviceInteractive)
-            statusRow("设备处于空闲模式", receipt.deviceIdleMode)
-            statusRow("网络可用性", receipt.networkAvailability)
-            row("处理耗时（毫秒）", receipt.handlerDurationMillis)
-            row("回调时进程年龄（毫秒）", receipt.processAgeAtCallbackMillis)
-        }
-
-        section("FCM 恢复试用事件")
+        section("FCM 恢复事件")
         row("统一 FCM 保护授权", report.fcmProtection.configured)
         row("维护分支", report.fcmProtection.maintenance.name)
         row("恢复分支当前资格", report.fcmProtection.recoveryReady)
         row("统一授权需重新确认", report.fcmProtection.requiresConfirmation)
         row("本次统一确认未通过原因", report.fcmProtection.confirmationFailure?.name)
-        row("试用配置", report.fcmRecoveryTrial.configured)
+        row("恢复配置", report.fcmRecoveryTrial.configured)
         row("记录存储阻断", report.fcmRecoveryTrial.storageBlocked)
         append("\n仅保留最近64条状态变化与请求结果；REQUESTED仅表示请求被接受，连接观察不证明通知送达。\n\n")
         append("电量为整机参考，不能归因于 Guardian，也不是 mAh/能量测量。CPU 毫秒仅为 Guardian 主进程累计工作，排除 Shizuku/独立 shell/GMS/无线电；仅同一进程标识且进程年龄与 CPU 连续递增时才可比较。字段缺失为未知。小时样本只搭载现有轮询，不额外唤醒。\n\n")
@@ -65,6 +47,7 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
                 .append(" / ").append(e.service.name).append(" / ").append(e.completeness.name)
                 .append(" / ").append(e.socket.name).append(" / ").append(e.eligibility.name)
             e.status?.let { append(" / ").append(it.name).append(" / ").append(e.reason?.name) }
+            e.operation?.let { append(" / 请求操作=").append(it.name) }
             e.observationUnknownReason?.let { append(" / 读取未知原因=").append(it.name) }
             e.power?.let { p ->
                 append(" / 整机电量=").append(p.batteryPercent?.let { "$it%" } ?: "未知")
@@ -78,6 +61,46 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             }
             append('\n')
         }
+        section("FCM 断连与恢复片段")
+        val episodes = report.fcmRecoveryEpisodes
+        row("片段记录可用性", episodes.availability.name)
+        row("片段来源状态", episodeSourceAvailability(episodes).name)
+        row("已保留片段数", if (episodes.availability == io.github.originosfcmguardian.fcmrecovery.FcmEpisodeAvailability.AVAILABLE)
+            episodes.episodes.size else null)
+        row("历史淘汰片段数", episodes.evictedEpisodes)
+        row("片段写入失败数", episodes.writeFailures)
+        row("片段更新丢弃数", episodes.droppedUpdates)
+        row("报告片段预览上限", MAX_EPISODE_PREVIEW)
+        row("未在报告预览显示的片段数", if (episodes.availability == io.github.originosfcmguardian.fcmrecovery.FcmEpisodeAvailability.AVAILABLE)
+            (episodes.episodes.size - MAX_EPISODE_PREVIEW).coerceAtLeast(0) else null)
+        append("\n仅预览最近8个片段；完整有界记录保留在应用内；片段时刻属于已保留的状态转换，不代表每次轮询都已记录。来源不可用或有缺口不代表没有断连。请求开始、未决与返回时间分开；旧记录无返回时刻则未知，诊断关联UUID不导出。请求接受不等于恢复成功；请求之后观察到连接不证明唯一原因或通知送达。服务仍在但断连不授权缺失服务恢复。超时只由后续已有观察标记，不是独立计时保证。\n")
+        if (episodes.availability == io.github.originosfcmguardian.fcmrecovery.FcmEpisodeAvailability.AVAILABLE) {
+            episodes.episodes.takeLast(MAX_EPISODE_PREVIEW).forEach { episode ->
+                append("\n### FCM 片段 ").append(episode.sequence).append("\n\n")
+                row("Guardian 进程", episode.processId)
+                row("进程启动时开机毫秒", episode.processStartedElapsedMillis)
+                row("最后观察到的故障类型", episode.kind.name)
+                row("开始时间（Unix 毫秒）", episode.startedAtMillis)
+                row("开始时开机毫秒", episode.startedElapsedMillis)
+                row("最后保留观察时间（Unix 毫秒）", episode.lastObservedAtMillis)
+                row("最后保留观察时开机毫秒", episode.lastObservedElapsedMillis)
+                row("请求时间（Unix 毫秒）", episode.requestAtMillis)
+                row("请求时开机毫秒", episode.requestElapsedMillis)
+                row("请求结果仍未决", episode.requestPending)
+                row("请求状态", episode.requestStatus?.name)
+                episode.requestOperation?.let { row("请求操作", it.name) }
+                row("请求返回时间（Unix 毫秒）", episode.resultAtMillis)
+                row("请求返回时开机毫秒", episode.resultElapsedMillis)
+                row("请求原因", episode.reason?.name)
+                row("结束时间（Unix 毫秒）", episode.endedAtMillis)
+                row("结束时开机毫秒", episode.endedElapsedMillis)
+                row("片段结论", episode.outcome.name)
+                row("后续观察时已超时", episode.timeoutObserved)
+                row("最后阻断原因", episode.lastBlock.name)
+            }
+        }
+        appendProtectionResourceMarkdown(report.protectionResources)
+        appendDaemonDiagnosticsMarkdown(report.daemonDiagnostics)
         section("保护停止与进程记录")
         row("记录可用性", report.protectionLifecycle.availability.name)
         row("丢弃记录数", report.protectionLifecycle.droppedEvents)
@@ -89,45 +112,6 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             event.systemExitReason?.let { append(" / 系统退出类型=").append(it).append(" / 状态=").append(event.systemExitStatus) }
             append('\n')
         }
-        section("通知观察摘要")
-        val facts = report.notificationFacts
-        if (facts == null) {
-            row("通知观察", null)
-        } else {
-            row("观察已启用", facts.enabled)
-            row("访问权限已授予", facts.accessGranted)
-            row("监听器已连接", facts.connected)
-            row("保留事件数", facts.retainedCount)
-            row("发布或更新数", facts.postedOrUpdatedCount)
-            row("移除数", facts.removedCount)
-            row("最近观察时间（Unix 毫秒）", facts.latestObservedAtEpochMillis)
-            row("丢弃事件数", facts.droppedEvents)
-            row("停止后的持久化不确定", facts.stopPersistenceUncertain)
-        }
-
-        section("最近深度监测摘要")
-        val monitor = report.monitor
-        if (monitor == null) {
-            row("最近监测", null)
-        } else {
-            row("包名", monitor.packageName)
-            row("开始时间（Unix 毫秒）", monitor.startedAtEpochMillis)
-            row("截止时间（Unix 毫秒）", monitor.deadlineEpochMillis)
-            statusRow("监测状态", monitor.status)
-            row("保留事件数", monitor.retainedEventCount)
-            row("进程启动数", monitor.processStartCount)
-            row("UID 活跃事件数", monitor.uidActiveCount)
-            row("UID 空闲事件数", monitor.uidIdleCount)
-            row("UID 运行事件数", monitor.uidRunningCount)
-            row("UID 停止事件数", monitor.uidStoppedCount)
-            row("采样轮数", monitor.pollCount)
-        }
-
-        section("日常只读检查")
-        row("检查范围", "仅已选应用安装身份；不代表停止标志、FCM 连接或通知送达；旧检查结果为未知")
-        statusRow("检查状态", report.dailyProtectionStatus)
-        row("检查时间（Unix 毫秒）", report.dailyProtectionCheckedAtEpochMillis)
-
         section("停止标志恢复摘要")
         val recovery = report.stoppedRecovery
         row("恢复来源已加载", recovery.loaded)
@@ -172,6 +156,9 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
         statusRow("持续 FCM 连接（continuousFcmConnection）", "UNKNOWN")
         statusRow("通知与安装身份连续性（notificationInstallationContinuity）", "UNKNOWN")
 
+        section("已移除的排查工具")
+        append("深度监控、通知事实采集、Guardian Firebase 推送自测和定期巡检已移除；历史文件保留但不读取。未采集不代表没有事件，也不能证明通知送达或没有漏收。\n")
+
         section("局限")
         append("报告仅复用已有摘要；未导出原始事件。时间接近不能证明 FCM、唤起或通知的因果关系。\n")
         append("导出时间与各来源的采样时间不同，各字段可能更旧；导出不触发新的特权读取，也不确认之后的状态变化。\n\n")
@@ -203,12 +190,10 @@ private fun StringBuilder.statusRow(label: String, value: String?) {
 
 private fun sourceLabel(source: String): String = when (source) {
     "targetSelection" -> "目标应用选择（targetSelection）"
-    "fcmEvidence" -> "FCM 回调证据（fcmEvidence）"
-    "notificationFacts" -> "通知观察（notificationFacts）"
-    "recentMonitor" -> "最近深度监测（recentMonitor）"
-    "dailyProtection" -> "日常只读检查（dailyProtection）"
+    "dailyProtection" -> "已移除的定期巡检（兼容字段）"
     "stoppedRecovery" -> "停止标志恢复（stoppedRecovery）"
     "automaticProtection" -> "自动保护应用内快照（automaticProtection）"
+    "fcmRecoveryEpisodes" -> "FCM 断连与恢复片段（fcmRecoveryEpisodes）"
     else -> "来源（$source）"
 }
 
@@ -262,7 +247,6 @@ private fun statusLabel(status: String): String = when (status) {
     "COMPLETED" -> "已结束"
     "INTERRUPTED" -> "已中断"
     "LIMIT_REACHED" -> "已达到记录上限"
-    "HEALTHY_READ_ONLY" -> "当次只读检查符合条件"
     "BUILD_CHANGED" -> "系统构建已变化"
     "IDLE" -> "空闲"
     "RECOVERING" -> "恢复操作中"
@@ -279,6 +263,7 @@ private fun statusLabel(status: String): String = when (status) {
     "NO_WRITE_NEEDED" -> "当次无需写入"
     "BLOCKED" -> "操作被阻断"
     "APP_RUNTIME_SNAPSHOT" -> "应用内运行显示快照"
+    "DAEMON_PROJECTED_UI_SNAPSHOT" -> "独立核心投影显示快照"
     else -> "状态原值"
 }
 

@@ -133,6 +133,7 @@ class GmsConnectionProbeTest {
         try {
             assertEquals(GmsUnknown.TIMED_OUT, reason(runner.read(1) { false }))
             assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertFalse(runner.isQuiescent())
             assertEquals(GmsUnknown.BUSY, reason(runner.read(2) { false }))
             release.countDown()
         } finally { release.countDown(); runner.close() }

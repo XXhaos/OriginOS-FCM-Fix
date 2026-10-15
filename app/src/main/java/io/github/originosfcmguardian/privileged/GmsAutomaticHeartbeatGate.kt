@@ -45,7 +45,7 @@ internal class GmsAutomaticHeartbeatGate(private val clock: () -> Long) {
         capability?.takeIf { it.live.get() }?.let { it.nextAllowed = Math.addExact(clock(), GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS) }
     }
     @Synchronized fun launch(cap: GmsAutoCapability?, sample: GmsConnectionObservation.Sample,
-        begin: () -> Boolean, start: () -> Process): Pair<Process?, GmsHeartbeatReason?> {
+        begin: () -> Boolean, start: () -> Process?): Pair<Process?, GmsHeartbeatReason?> {
         if (closed || blocked) return null to GmsHeartbeatReason.SESSION_REVOKED
         if (cap != null && (capability !== cap || !cap.live.get() || cap.bootId != sample.bootId ||
                 cap.session.bindingDigest != gmsHeartbeatBindingDigest(sample))) {
@@ -61,7 +61,8 @@ internal class GmsAutomaticHeartbeatGate(private val clock: () -> Long) {
         }
         if (!begin()) return null to GmsHeartbeatReason.CANCELLED
         manualEvent() // Both request kinds start a complete shared interval.
-        return start() to null
+        val child = start() ?: return null to GmsHeartbeatReason.SESSION_REVOKED
+        return child to null
     }
     @Synchronized fun revoke(callerUid: Int, generation: Long, id: String?): Boolean {
         val current = capability ?: return generation > 0 && generation <= lastGeneration

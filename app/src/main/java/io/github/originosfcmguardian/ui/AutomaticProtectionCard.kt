@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -63,12 +62,13 @@ internal fun targetAutomaticProtectionState(state: AutomaticProtectionState, ide
 }
 
 internal fun automaticProtectionStatusLabel(state: AutomaticProtectionState): String = when {
-    state.waitingForReconciliation -> "等待只读复检"
-    state.busy -> "启动或恢复中…"
+    state.waitingForReconciliation -> "等待复检"
+    state.busy -> "正在启动…"
+    state.waitingForService -> "等待保护服务"
     state.waitingForPrivilege -> "等待 Shizuku"
-    state.enabled -> "检测已开启"
-    state.savedAuthorization -> "等待恢复检测"
-    else -> "检测未开启"
+    state.enabled -> "保护已开启"
+    state.savedAuthorization -> "等待复检"
+    else -> "保护未开启"
 }
 
 internal fun ProtectionNotificationVisibility.label(): String = when (this) {
@@ -92,7 +92,6 @@ internal fun AutomaticProtectionCard(
     showToggle: Boolean = true,
     targetLabel: String = "应用",
     notificationVisibility: ProtectionNotificationVisibility = ProtectionNotificationVisibility.UNKNOWN,
-    showSharedGuidance: Boolean = true,
 ) {
     var confirmHide by remember { mutableStateOf(false) }
     var notificationSettingsFailed by remember { mutableStateOf(false) }
@@ -104,52 +103,38 @@ internal fun AutomaticProtectionCard(
             if (showProtectionControls) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically) {
-                Text(automaticProtectionStatusLabel(state))
+                Text(automaticProtectionStatusLabel(state), modifier = Modifier.weight(1f))
                 if (showToggle) AutomaticProtectionToggle(state, canEnable, onEnable, onDisable, targetLabel)
             }
-            Text(state.detail, style = MaterialTheme.typography.bodySmall)
             if (state.revocationSaveFailed) {
+                Text("关闭状态保存失败，请重试。", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = onDisable) { Text("重试保存关闭状态") }
+            } else if (!state.enabled && !state.busy && !state.waitingForPrivilege &&
+                !state.waitingForReconciliation && state.detail != "自动保护未开启") {
+                Text(state.detail, style = MaterialTheme.typography.bodySmall)
             }
-            state.lastCheckedAtMillis?.let { Text("上次检测：${formatRecordTime(it)}", style = MaterialTheme.typography.bodySmall) }
-            state.lastOutcome?.let { Text(when (it) {
-                "FLAG_CLEARED" -> "上次自动恢复：停止限制已解除"
-                "NO_WRITE_NEEDED" -> "上次核对：无需恢复"
-                "STILL_STOPPED" -> "上次恢复未成功：限制仍存在"
-                "UNCONFIRMED" -> "上次恢复结果待确认，请只读核对"
-                else -> "上次操作未完成，请查看暂停原因"
-            }, style = MaterialTheme.typography.bodySmall) }
-            if (showSharedGuidance) {
-                Text("约每 30 秒检查，休眠可能延后；不让应用常驻。",
-                    style = MaterialTheme.typography.bodySmall)
-                Text("被停止时尝试恢复，无固定次数或间隔限制；不保证送达。",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            if (!canEnable && !state.masterEnabled && !state.busy) Text("请检查存储或待确认记录；开启前会重新核对运行条件。",
-                style = MaterialTheme.typography.bodySmall)
             }
             if (showPreferences) {
                 Text(notificationVisibility.label(), style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { notificationSettingsFailed = !onOpenNotificationSettings() }) { Text("通知显示设置") }
-                Text("关闭此类通知不关闭保护。", style = MaterialTheme.typography.bodySmall)
-                if (notificationSettingsFailed) Text("无法打开设置，请在系统通知管理中调整 Guardian 保护通知。",
+                if (notificationSettingsFailed) Text("打开失败，请在系统通知管理中设置。",
                     style = MaterialTheme.typography.bodySmall)
-            Text("自启动、后台耗电和任务锁定可在系统中设置，效果依机型而定；隐藏任务不保证后台运行。",
-                style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically) {
-                Text("在最近任务中隐藏")
+                Text("在最近任务中隐藏", modifier = Modifier.weight(1f))
                 Switch(modifier = Modifier.semantics { contentDescription = "最近任务隐藏开关" },
                     checked = hiddenFromRecents, onCheckedChange = { if (it) confirmHide = true else onSetHidden(false) })
             }
-            recentsMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            recentsMessage?.let { Text("隐藏设置失败，请重试。", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error) }
             }
         }
     }
     if (confirmHide) AlertDialog(
         onDismissRequest = { confirmHide = false },
         title = { Text("隐藏 Guardian 任务？") },
-        text = { Text("仅隐藏最近任务卡片，保留桌面入口。需要锁定后台时，请先锁定再隐藏；效果以本机为准。可从桌面打开 Guardian 关闭隐藏。") },
+        text = { Text("请先锁定后台任务，再隐藏。隐藏后可从桌面打开 Guardian。") },
         confirmButton = { TextButton(onClick = { confirmHide = false; onSetHidden(true) }) { Text("确认隐藏") } },
         dismissButton = { TextButton(onClick = { confirmHide = false }) { Text("取消") } },
     )
@@ -180,15 +165,11 @@ internal fun AutomaticProtectionConfirmation(onConfirm: () -> Unit, onDismiss: (
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(packageName, style = MaterialTheme.typography.bodySmall,
+                if (packageName.isNotBlank()) Text(packageName, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("仅授权此应用的当前安装：被停止时尝试解除限制，不让应用常驻。")
-                Text("选择会保存。首页总开关控制运行；关闭总开关保留选择，关闭此应用开关移除授权。")
-                Text("约每 30 秒检查，休眠可能延后；无固定次数或间隔限制，不保证送达。")
-                Text("无法区分系统停止和主动强停。想保持停止，请先关总开关；已派发操作可能完成。")
-                Text("Shizuku 未就绪时等待，重启手机后需重新启动 Shizuku。")
+                Text("允许 Guardian 在此应用被停止时自动恢复后台唤醒。")
             }
         },
-        confirmButton = { Button(onClick = onConfirm) { Text("授权并选择") } },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("授权并选择") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }

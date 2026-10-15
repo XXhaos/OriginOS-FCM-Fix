@@ -62,7 +62,7 @@ internal fun confirmedInvalidTargetLeases(
         root.mode != ProtectionConsentMode.ACTIVE || expected.isEmpty() ||
         input.exitHistory != StartupExitHistoryStatus.CLEAR ||
         !validRuntimeFingerprint(input.fingerprint) || input.currentUser != 0 ||
-        expected.any { it.fingerprint != input.fingerprint } || !input.privilege.shellReady ||
+        expected.any { !it.acceptsRuntimeFingerprint(input.fingerprint) } || !input.privilege.shellReady ||
         input.journal != RestartJournalStatus.CLEAR ||
         (input.budget != AutomaticCheckDecision.Recover && input.budget !is AutomaticCheckDecision.Cooldown) ||
         targets.map { it.lease.consent } != expected || targets.any { it.lease.rootGeneration != root.generation }) return emptyList()
@@ -101,7 +101,7 @@ internal fun startupEligibility(input: StartupEligibilityInputs): StartupEligibi
         input.exitHistory == StartupExitHistoryStatus.CRASH_LOOP -> StartupEligibilityStatus.BLOCKED_CRASH_LOOP
         input.exitHistory != StartupExitHistoryStatus.CLEAR -> StartupEligibilityStatus.BLOCKED_STORAGE
         !validRuntimeFingerprint(input.fingerprint) || input.currentUser != 0 ||
-            targets.any { input.fingerprint != it.lease.consent.fingerprint ||
+            targets.any { !it.lease.consent.acceptsRuntimeFingerprint(input.fingerprint) ||
                 it.selectedIdentity != it.lease.consent.identity || (!input.targetReadUnavailable &&
                     (!it.qualified || it.freshIdentity != it.lease.consent.identity)) } ->
             StartupEligibilityStatus.BLOCKED_IDENTITY

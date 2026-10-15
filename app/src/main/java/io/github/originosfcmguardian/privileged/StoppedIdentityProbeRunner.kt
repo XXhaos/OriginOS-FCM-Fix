@@ -23,6 +23,8 @@ internal class StoppedIdentityProbeRunner(
         { runnable -> Thread(runnable, "guardian-telegram-identity-read").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
+    private val activity = PrivilegedWorkerActivity()
+    fun isQuiescent(): Boolean = activity.isQuiescent()
 
     fun read(requestId: Long, wasCancelled: () -> Boolean): StoppedTargetObservation = readInternal(requestId, null, wasCancelled)
 
@@ -40,16 +42,19 @@ internal class StoppedIdentityProbeRunner(
             else -> null
         }
         interruption()?.let { return unknown(it) }
+        val settlement = activity.track()
         val future = try {
             worker.submit<StoppedTargetObservation> {
+                if (!settlement.workerEntered()) return@submit unknown(StoppedObservationUnknown.CANCELLED)
                 try {
                     if (expected == null) observeStoppedTelegram(requestId, portFactory(), ::interruption)
                     else observeStoppedTarget(requestId, expected, portFactory(), ::interruption)
                 } catch (_: Throwable) {
                     unknown(interruption() ?: StoppedObservationUnknown.CAPABILITY_UNAVAILABLE)
-                }
+                } finally { settlement.workerEnded(false, null) }
             }
         } catch (_: RejectedExecutionException) {
+            settlement.abandonQueued()
             return unknown(StoppedObservationUnknown.BUSY)
         }
         return try {
@@ -72,6 +77,7 @@ internal class StoppedIdentityProbeRunner(
             unknown(interruption() ?: StoppedObservationUnknown.CAPABILITY_UNAVAILABLE)
         } finally {
             abandoned.set(true)
+            settlement.abandonQueued()
             future.cancel(true)
         }
     }

@@ -3,7 +3,7 @@ package io.github.originosfcmguardian.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,7 +31,7 @@ internal fun AppRecheckDetails(target: SelectedTargetUiState?, checking: Boolean
     onCheck: () -> Unit) {
     val result = appRecheckResult(target, checking)
     Column(Modifier.padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Button(onClick = onCheck, enabled = target != null && !checking && !blocked) {
+        OutlinedButton(onClick = onCheck, enabled = target != null && !checking && !blocked) {
             Text(if (checking) "复检中…" else "复检")
         }
         Text(result.text, color = result.tone.color(), style = MaterialTheme.typography.bodySmall)

@@ -22,6 +22,8 @@ internal interface GmsConnectionReadPort {
     fun reconnectReceivers(): GmsReceiverInspection
     fun elapsedRealtime(): Long
     fun recoverySenderQualified(): Boolean = false
+    fun disconnectedMcsQualified(): Boolean = false
+    fun usableInternet(): Boolean = false
 }
 
 internal fun gmsSignerDigest(certificates: List<ByteArray>): String {
@@ -87,6 +89,8 @@ internal class GmsConnectionProbeRunner(
     init { require(budgetMillis in 1..8_000) }
     private val worker = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),
         { task -> Thread(task, "guardian-gms-connection-read").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
+    private val activity = PrivilegedWorkerActivity()
+    fun isQuiescent(): Boolean = activity.isQuiescent()
     fun read(requestId: Long, wasCancelled: () -> Boolean): GmsConnectionObservation {
         fun unknown(reason: GmsUnknown) = GmsConnectionObservation.Unknown(requestId, reason)
         if (requestId <= 0) return unknown(GmsUnknown.INVALID_REQUEST)
@@ -98,10 +102,13 @@ internal class GmsConnectionProbeRunner(
             else -> null
         }
         interruption()?.let { return unknown(it) }
+        val settlement = activity.track()
         val future = try { worker.submit<GmsConnectionObservation> {
+            if (!settlement.workerEntered()) return@submit unknown(GmsUnknown.CANCELLED)
             try { observeGmsConnection(requestId, portFactory(), ::interruption) }
             catch (_: Throwable) { unknown(interruption() ?: GmsUnknown.CAPABILITY_UNAVAILABLE) }
-        } } catch (_: RejectedExecutionException) { return unknown(GmsUnknown.BUSY) }
+            finally { settlement.workerEnded(false, null) }
+        } } catch (_: RejectedExecutionException) { settlement.abandonQueued(); return unknown(GmsUnknown.BUSY) }
         try {
             while (true) {
                 interruption()?.let { return unknown(it) }
@@ -113,7 +120,7 @@ internal class GmsConnectionProbeRunner(
             }
         } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return unknown(GmsUnknown.CANCELLED) }
         catch (_: Throwable) { return unknown(interruption() ?: GmsUnknown.CAPABILITY_UNAVAILABLE) }
-        finally { abandoned.set(true); future.cancel(true) }
+        finally { abandoned.set(true); settlement.abandonQueued(); future.cancel(true) }
     }
     fun close() { worker.shutdownNow() }
 }

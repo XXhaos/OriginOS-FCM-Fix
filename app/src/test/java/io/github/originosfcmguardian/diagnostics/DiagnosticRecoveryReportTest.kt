@@ -3,8 +3,6 @@ package io.github.originosfcmguardian.diagnostics
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionTargetState
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
-import io.github.originosfcmguardian.fcm.FcmUiState
-import io.github.originosfcmguardian.fcm.SensitiveToken
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoverySource
 import io.github.originosfcmguardian.recovery.StoppedRecoveryStage
@@ -134,6 +132,18 @@ class DiagnosticRecoveryReportTest {
         assertTrue(json(defaults).contains("without new durable authorization or privilege checks"))
     }
 
+    @Test fun daemonDisplayProjectionHasItsOwnScopeWithoutClaimingLiveAuthority() {
+        val report = build(HomeUiState(automaticProtectionFromDaemon = true,
+            automaticProtection = AutomaticProtectionState(enabled = true, lastCheckedAtMillis = 8000)))
+        assertEquals(DiagnosticAutomaticProtectionEvidenceScope.DAEMON_PROJECTED_UI_SNAPSHOT,
+            report.automaticProtection.evidenceScope)
+        assertEquals(8000L, report.automaticProtection.lastCheckedAtEpochMillis)
+        assertTrue(json(report).contains("\"evidenceScope\":\"DAEMON_PROJECTED_UI_SNAPSHOT\""))
+        val markdown = encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8)
+        assertTrue(markdown.contains("独立核心投影显示快照"))
+        assertFalse(markdown.contains("DAEMON_LIVE"))
+    }
+
     @Test
     fun automaticRetainedOutcomeAndNewCheckTimeAreIndependent() {
         val automatic = AutomaticProtectionState(lastCheckedAtMillis = 8200, lastOutcome = "FLAG_CLEARED")
@@ -177,7 +187,7 @@ class DiagnosticRecoveryReportTest {
                     identity = identity("org.private.authorized"), savedAuthorization = true,
                     detail = "target-detail-private", lastOutcome = "target-outcome-private", lastCheckedAtMillis = 773355,
                 ))),
-            fcm = FcmUiState(token = SensitiveToken("token-private")),
+
         )
         val json = json(build(state))
         assertTrue(json.contains(PACKAGE_A))
@@ -201,13 +211,13 @@ class DiagnosticRecoveryReportTest {
         assertArrayEquals(encodeCombinedDiagnosticReport(before), ready.bytes)
         assertEquals(CombinedDiagnosticExportResult.Missing, prepared.consume(true))
         val json = ready.bytes.toString(Charsets.UTF_8)
-        listOf("environment", "shizukuStatus", "targets", "fcm",
-            "notificationFacts", "recentMonitor", "dailyProtection", "sourceAvailability", "unknowns", "limitations",
+        listOf("environment", "shizukuStatus", "targets", "fcmRecoveryTrial", "fcmProtection",
+            "protectionResources", "protectionLifecycle", "removedCapabilities", "dailyProtection", "sourceAvailability", "unknowns", "limitations",
             "stoppedRecovery", "automaticProtection")
             .forEach { key -> assertTrue(key, json.contains("\"$key\":")) }
         assertFalse(json.contains("\"gms\":"))
         assertFalse(json.contains("\"privilegedDetection\":"))
-        assertTrue(json.startsWith("{\"schema\":\"guardian.combined-diagnostic.v8\""))
+        assertTrue(json.startsWith("{\"schema\":\"guardian.combined-diagnostic.v13\""))
         assertTrue(ready.bytes.size <= MAX_REPORT_BYTES)
     }
 

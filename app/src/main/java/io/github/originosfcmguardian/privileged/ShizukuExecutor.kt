@@ -10,8 +10,6 @@ import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.core.CommandResult
 import io.github.originosfcmguardian.core.PrivilegedExecutor
 import io.github.originosfcmguardian.core.SafeCommand
-import io.github.originosfcmguardian.core.SafeCommand.GetTargetProcessEvents
-import io.github.originosfcmguardian.core.trace.ProcessTraceCodec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -38,9 +36,14 @@ import io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime
 import android.os.DeadObjectException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import rikka.shizuku.Shizuku
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Collections
+import java.util.WeakHashMap
 
 internal interface ShizukuBindingAdapter {
     fun bind(args: Shizuku.UserServiceArgs, connection: ServiceConnection)
@@ -65,14 +68,36 @@ class ShizukuExecutor private constructor(
     private val context: Context,
     private val bindingAdapter: ShizukuBindingAdapter,
     private val heartbeatOwner: Boolean = false,
+    private val observationLane: GmsRpcLane = GmsRpcLane.INTERACTIVE_OBSERVATION,
 ) : PrivilegedExecutor {
     constructor(context: Context) : this(context, RealShizukuBindingAdapter)
 
     private class BindingHandle(
         val args: Shizuku.UserServiceArgs,
         val deferred: CompletableDeferred<IGuardianUserService>,
+        private val cleanupLease: GmsBindingCleanup.Lease,
     ) {
         lateinit var connection: ServiceConnection
+        private var bindingStarted = false
+        private var retired = false
+        private val bindingFinished = CountDownLatch(1)
+
+        @Synchronized fun beginBinding(): Boolean {
+            if (retired) return false
+            bindingStarted = true
+            return true
+        }
+        fun finishBinding() = bindingFinished.countDown()
+        @Synchronized fun retire(unbind: () -> Unit) {
+            if (retired && !bindingStarted) return
+            retired = true
+            if (!bindingStarted) cleanupLease.unused()
+            else cleanupLease.cleanup {
+                // A late bind must finish registration before we remove that exact connection.
+                bindingFinished.await()
+                unbind()
+            }
+        }
     }
 
     private val operationMutex = Mutex()
@@ -80,48 +105,58 @@ class ShizukuExecutor private constructor(
     private val session = PrivilegedSessionState<IGuardianUserService, BindingHandle>()
     private val executorNamespace = newUserServiceNamespace()
     private val stoppedObservationRpc = StoppedObservationRpc()
-    private val gmsObservationRpc = GmsObservationRpc()
-    private val gmsHeartbeatRevokeRpc = GmsObservationRpc()
+    private val gmsObservationRpc = ProcessGmsRpcLanes.lane(observationLane)
+    private val gmsHeartbeatRevokeRpc = ProcessGmsRpcLanes.lane(GmsRpcLane.REVOKE)
+    private val gmsBindingCleanup = ProcessGmsRpcLanes.cleanup
     private val autoOwners = ConcurrentHashMap<Long, GmsAutoRemoteOwner>()
-    @Volatile private var fcmRecoveryCall: Pair<IGuardianUserService, Long>? = null
+    init { synchronized(instances) { instances.add(this) } }
 
     internal fun cancelFcmRecovery() {
-        fcmRecoveryCall?.let { (remote, id) -> gmsHeartbeatRevokeRpc.cleanupBestEffort { remote.cancel(id) } }
+        // Reject future binding/call admission before any remote cancellation can block.
+        retireObservationSession()
     }
 
-    internal suspend fun requestFcmRecovery(expectedBinding: String, authority: IFcmRecoveryAuthority):
+    internal suspend fun requestFcmRecovery(expectedBinding: String, authority: IFcmRecoveryAuthority,
+        operation: io.github.originosfcmguardian.core.gms.FcmRecoveryOperation = io.github.originosfcmguardian.core.gms.FcmRecoveryOperation.SERVICE_ABSENT_SEND):
         io.github.originosfcmguardian.core.gms.FcmRecoveryResult {
         val id = nextRequestId()
         fun unknown() = io.github.originosfcmguardian.core.gms.FcmRecoveryResult(id,
             io.github.originosfcmguardian.core.gms.FcmRecoveryStatus.UNKNOWN,
-            io.github.originosfcmguardian.core.gms.FcmRecoveryReason.BRIDGE_UNAVAILABLE)
+            io.github.originosfcmguardian.core.gms.FcmRecoveryReason.BRIDGE_UNAVAILABLE, operation)
+        if (migrationClosed) return unknown()
         if (!operationMutex.tryLock()) return io.github.originosfcmguardian.core.gms.FcmRecoveryResult(id,
             io.github.originosfcmguardian.core.gms.FcmRecoveryStatus.NOT_SENT,
-            io.github.originosfcmguardian.core.gms.FcmRecoveryReason.BUSY)
+            io.github.originosfcmguardian.core.gms.FcmRecoveryReason.BUSY, operation)
         var began = false
         return try {
             withTimeout(CLIENT_CALL_TIMEOUT_MILLIS) {
                 if (!session.isOpen() || !gmsObservationRpc.bounded { shellAvailable() }) return@withTimeout unknown()
                 val bound = ensureBound(gmsBounded = true)
                 if (!session.beginCall(bound, id)) return@withTimeout unknown()
-                began = true; fcmRecoveryCall = bound.remote to id
-                gmsObservationRpc.bounded {
-                    if (bound.remote.serviceUid != SHELL_UID) unknown()
-                    else io.github.originosfcmguardian.core.gms.FcmRecoveryCodec.decode(bound.remote
-                        .requestFcmRecovery(id, expectedBinding, authority).getString(
-                            io.github.originosfcmguardian.core.gms.FcmRecoveryCodec.KEY), id)
+                began = true
+                val invocation = currentCoroutineContext()
+                val result = gmsObservationRpc.bounded {
+                    if (migrationClosed || bound.remote.serviceUid != SHELL_UID || !invocation.isActive || session.currentBound() != bound) unknown()
+                    else {
+                        val result = if (operation == io.github.originosfcmguardian.core.gms.FcmRecoveryOperation.SERVICE_ABSENT_SEND)
+                            bound.remote.requestFcmRecovery(id, expectedBinding, authority)
+                        else bound.remote.requestDisconnectedFcmRecovery(id, expectedBinding, authority)
+                        io.github.originosfcmguardian.core.gms.FcmRecoveryCodec.decode(result.getString(
+                            io.github.originosfcmguardian.core.gms.FcmRecoveryCodec.KEY), id, operation)
+                    }
                 }
+                if (session.currentBound() != bound) unknown() else result
             }
         } catch (_: Throwable) { cancelFcmRecovery(); unknown() }
-        finally { fcmRecoveryCall = null; if (began) session.finishCall(id); operationMutex.unlock() }
+        finally { if (began) session.finishCall(id); operationMutex.unlock() }
     }
 
-    fun openSession() = session.open()
+    fun openSession() { if (!migrationClosed && io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime.localExecutionAllowed(context)) session.open() }
 
     /** Retire an FCM observation binding before bounded asynchronous cleanup. */
     internal fun retireObservationSession() {
         val teardown = session.close()
-        gmsObservationRpc.cleanupBestEffort { applyTeardown(teardown) }
+        enqueueTeardown(teardown)
     }
 
     private fun shellAvailable(): Boolean = session.isOpen() && Shizuku.pingBinder() &&
@@ -211,7 +246,7 @@ class ShizukuExecutor private constructor(
             invalidate(error)
             bridgeError(
                 command,
-                if (command is GetTargetProcessEvents) "Process trace unavailable" else safeMessage(error),
+                safeMessage(error),
             )
         } finally {
             session.finishCall(requestId)
@@ -321,7 +356,7 @@ class ShizukuExecutor private constructor(
             }
         } catch (_: Throwable) { unknown() }
         finally {
-            // Includes cancellation/timeout and uses the reader's independent cleanup worker.
+            // Includes cancellation/timeout; remote teardown uses the independent cleanup lane.
             retireGmsObservationBinding()
             if (began) session.finishCall(requestId)
             operationMutex.unlock()
@@ -330,6 +365,8 @@ class ShizukuExecutor private constructor(
 
     /** Caller must invoke for one explicit button press; never called by recovery or background checks. */
     suspend fun requestGmsHeartbeat(): GmsHeartbeatResult {
+        if (migrationClosed || !io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime.localExecutionAllowed(context))
+            return GmsHeartbeatResult.notSent(nextRequestId(), GmsHeartbeatReason.CANCELLED)
         if (!heartbeatOwner) return heartbeatTransport(context).requestGmsHeartbeat()
         GmsManualHeartbeatEvents.happened()
         val requestId = nextRequestId()
@@ -403,6 +440,7 @@ class ShizukuExecutor private constructor(
     }
 
     suspend fun armAutomaticGmsHeartbeat(generation: Long, expectedBindingDigest: String, lifetime: IBinder): GmsAutoArmResult {
+        if (migrationClosed) return GmsAutoArmResult(null, GmsAutoArmReason.NOT_ELIGIBLE)
         if (!heartbeatOwner) return heartbeatTransport(context).armAutomaticGmsHeartbeat(generation, expectedBindingDigest, lifetime)
         fun failure(reason: GmsAutoArmReason) = GmsAutoArmResult(null, reason)
         if (generation <= 0 || !expectedBindingDigest.matches(Regex("[a-f0-9]{64}"))) return failure(GmsAutoArmReason.INVALID_REQUEST)
@@ -430,7 +468,7 @@ class ShizukuExecutor private constructor(
                 if (!session.beginCall(bound, requestId)) { retained.closed.set(true); return@withTimeout failure(GmsAutoArmReason.BRIDGE_UNAVAILABLE) }
                 began = true
                 val result = gmsObservationRpc.bounded {
-                    if (!gate.begin()) { retained.closed.set(true); return@bounded failure(GmsAutoArmReason.TIMED_OUT) }
+                    if (migrationClosed || !gate.begin()) { retained.closed.set(true); return@bounded failure(GmsAutoArmReason.TIMED_OUT) }
                     retained.invoked.set(true)
                     GmsAutoArmCodec.decode(bound.remote.armAutomaticGmsHeartbeat(requestId, generation, expectedBindingDigest, lifetime)
                         .getString(GmsAutoArmCodec.BUNDLE_KEY), requestId)
@@ -450,7 +488,7 @@ class ShizukuExecutor private constructor(
             gate.failure(requestId, GmsHeartbeatReason.CANCELLED, abandon = true)
             owner?.let { retained ->
                 if (!retained.invoked.get()) retained.closed.set(true)
-                else if (retained.session == null) gmsObservationRpc.cleanupBestEffort { runCatching { retained.remote.cancel(requestId) } }
+                else if (retained.session == null) gmsHeartbeatRevokeRpc.cleanupBestEffort { runCatching { retained.remote.cancel(requestId) } }
             }
             if (began) session.finishCall(requestId)
             operationMutex.unlock()
@@ -458,6 +496,7 @@ class ShizukuExecutor private constructor(
     }
 
     suspend fun requestAutomaticGmsHeartbeat(session: GmsAutoSession, attemptId: String): GmsHeartbeatResult {
+        if (migrationClosed) return GmsHeartbeatResult.notSent(nextRequestId(), GmsHeartbeatReason.CANCELLED)
         if (!heartbeatOwner) return heartbeatTransport(context).requestAutomaticGmsHeartbeat(session, attemptId)
         val requestId = nextRequestId()
         val owner = autoOwners[session.generation]?.takeIf { it.session == session }
@@ -475,7 +514,7 @@ class ShizukuExecutor private constructor(
             return withTimeout(CLIENT_CALL_TIMEOUT_MILLIS) {
                 if (!gmsObservationRpc.bounded { shellAvailable() }) return@withTimeout GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.SHELL_UNAVAILABLE)
                 gmsObservationRpc.bounded {
-                    if (!gate.begin()) return@bounded gate.failure(requestId, GmsHeartbeatReason.CANCELLED)
+                    if (migrationClosed || !gate.begin()) return@bounded gate.failure(requestId, GmsHeartbeatReason.CANCELLED)
                     GmsHeartbeatCodec.decode(owner.remote.requestAutomaticGmsHeartbeat(requestId, session.id,
                         session.generation, session.bindingDigest, attemptId).getString(GmsHeartbeatCodec.BUNDLE_KEY), requestId)
                         .also { if (it.status == GmsHeartbeatStatus.UNKNOWN) owner.disabled.set(true) }
@@ -510,13 +549,13 @@ class ShizukuExecutor private constructor(
     private fun retireGmsObservationBinding() {
         val teardown = session.cleanup()
         teardown.pendingConnection?.deferred?.cancel()
-        gmsObservationRpc.cleanupBestEffort { applyTeardown(teardown) }
+        enqueueTeardown(teardown)
     }
 
     private fun retireStoppedObservationBinding() {
         val teardown = session.cleanup()
         teardown.pendingConnection?.deferred?.cancel()
-        stoppedObservationRpc.cleanupBestEffort { applyTeardown(teardown) }
+        enqueueTeardown(teardown)
     }
 
     /** Ends one detection session but deliberately permits a later fresh bind. */
@@ -526,41 +565,48 @@ class ShizukuExecutor private constructor(
 
     /** Ends one detection session from a callback without permanently closing the runtime. */
     fun cleanupBestEffort() {
-        applyTeardown(session.cleanup())
+        enqueueTeardown(session.cleanup())
     }
 
     /** Permanently fail-closes this runtime until [openSession] is explicitly called. */
     fun closePermanently() {
-        applyTeardown(session.close())
+        autoOwners.values.forEach { it.disabled.set(true) }
+        enqueueTeardown(session.close())
     }
 
     fun invalidate(cause: Throwable = IllegalStateException("Shizuku binder died")) {
         val teardown = session.cleanup()
         teardown.pendingConnection?.deferred?.completeExceptionally(cause)
-        applyTeardown(teardown)
+        enqueueTeardown(teardown)
     }
 
     private suspend fun ensureBound(gmsBounded: Boolean = false): PrivilegedSessionState.Bound<IGuardianUserService, BindingHandle> {
+        check(!migrationClosed) { "Local protection ownership is migrating" }
         session.currentBound()?.let { current ->
             val alive = if (gmsBounded) gmsObservationRpc.bounded { current.remote.asBinder().pingBinder() }
                 else current.remote.asBinder().pingBinder()
             if (alive) return current
             val teardown = session.disconnect(current.ticket) ?: session.cleanup()
-            if (gmsBounded) gmsObservationRpc.cleanupBestEffort { applyTeardown(teardown) } else applyTeardown(teardown)
+            enqueueTeardown(teardown)
         }
 
-        val ticket = session.beginBind()
-            ?: throw IllegalStateException("Privileged session is closed")
+        val cleanupLease = gmsBindingCleanup.acquire() ?: throw java.util.concurrent.RejectedExecutionException("Binding cleanup capacity occupied")
+        val ticket = session.beginBind() ?: run {
+            cleanupLease.unused()
+            throw IllegalStateException("Privileged session is closed")
+        }
         val deferred = CompletableDeferred<IGuardianUserService>()
-        val handle = BindingHandle(userServiceArgs(ticket.generation), deferred)
+        val handle = BindingHandle(userServiceArgs(ticket.generation), deferred, cleanupLease)
         handle.connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, binder: IBinder) {
                 val service = IGuardianUserService.Stub.asInterface(binder)
+                retainedEndpoints.removeIf { !it.asBinder().isBinderAlive }
+                retainedEndpoints.add(service)
                 if (session.acceptBind(ticket, handle, service)) {
                     deferred.complete(service)
                 } else {
                     deferred.completeExceptionally(IllegalStateException("Stale UserService callback"))
-                    if (gmsBounded) gmsObservationRpc.cleanupBestEffort { unbind(handle) } else unbind(handle)
+                    retireBinding(handle)
                 }
             }
 
@@ -568,12 +614,12 @@ class ShizukuExecutor private constructor(
                 val cause = IllegalStateException("UserService disconnected")
                 val teardown = session.disconnect(ticket) ?: return
                 teardown.pendingConnection?.deferred?.completeExceptionally(cause)
-                if (gmsBounded) gmsObservationRpc.cleanupBestEffort { applyTeardown(teardown, unbind = false) }
-                else applyTeardown(teardown, unbind = false)
+                enqueueTeardown(teardown)
             }
         }
         if (!session.attachConnection(ticket, handle)) {
             deferred.cancel()
+            retireBinding(handle)
             throw IllegalStateException("Privileged session closed during bind setup")
         }
 
@@ -582,11 +628,11 @@ class ShizukuExecutor private constructor(
                 gmsObservationRpc.bounded {
                     // Never hold the session monitor across an uninterruptible Binder call.
                     if (!session.isCurrentBind(ticket, handle)) error("Stale bind")
-                    bindingAdapter.bind(handle.args, handle.connection)
+                    bind(handle)
                 }
             } else withContext(Dispatchers.Main.immediate) {
                 val started = session.runIfCurrentBind(ticket, handle) {
-                    bindingAdapter.bind(handle.args, handle.connection)
+                    bind(handle)
                 }
                 if (!started) throw IllegalStateException("Privileged session closed before bind")
             }
@@ -598,31 +644,38 @@ class ShizukuExecutor private constructor(
         } catch (error: Throwable) {
             session.retireBind(ticket)?.let { retired ->
                 retired.deferred.completeExceptionally(error)
-                if (gmsBounded) gmsObservationRpc.cleanupBestEffort { unbind(retired) } else unbind(retired)
+                retireBinding(retired)
             }
             throw error
         }
     }
 
     private fun cleanupInternal(close: Boolean) {
-        applyTeardown(if (close) session.close() else session.cleanup())
+        enqueueTeardown(if (close) session.close() else session.cleanup())
     }
 
-    private fun applyTeardown(
+    private fun enqueueTeardown(
         teardown: PrivilegedSessionState.Teardown<IGuardianUserService, BindingHandle>,
-        unbind: Boolean = true,
     ) {
-        teardown.activeRequestId?.let { requestId ->
-            runCatching { teardown.bound?.remote?.cancel(requestId) }
-        }
+        // Local lifecycle completion must not wait behind a stuck cancel/unbind Binder.
         teardown.pendingConnection?.deferred?.cancel()
-        if (!unbind) return
-        teardown.bound?.connection?.let(::unbind)
-        teardown.pendingConnection?.let(::unbind)
+        teardown.activeRequestId?.let { requestId ->
+            teardown.bound?.remote?.let { remote ->
+                gmsHeartbeatRevokeRpc.cleanupBestEffort { remote.cancel(requestId) }
+            }
+        }
+        teardown.bound?.connection?.let(::retireBinding)
+        teardown.pendingConnection?.let(::retireBinding)
     }
 
-    private fun unbind(handle: BindingHandle) {
-        runCatching { bindingAdapter.unbind(handle.args, handle.connection, true) }
+    private fun bind(handle: BindingHandle) {
+        check(handle.beginBinding()) { "Retired UserService binding" }
+        try { bindingAdapter.bind(handle.args, handle.connection) }
+        finally { handle.finishBinding() }
+    }
+
+    private fun retireBinding(handle: BindingHandle) {
+        handle.retire { bindingAdapter.unbind(handle.args, handle.connection, true) }
     }
 
     private fun userServiceArgs(generation: Long): Shizuku.UserServiceArgs {
@@ -645,17 +698,14 @@ class ShizukuExecutor private constructor(
         }
     }
 
-    private fun Bundle.toCommandResult(command: SafeCommand): CommandResult =
-        sanitizeProcessTraceIpcResult(
-            CommandResult(
-                command = command,
-                exitCode = getInt(IpcContract.KEY_EXIT_CODE, IpcContract.EXIT_BRIDGE_ERROR),
-                stdout = getString(IpcContract.KEY_STDOUT).orEmpty(),
-                stderr = getString(IpcContract.KEY_STDERR).orEmpty(),
-                timedOut = getBoolean(IpcContract.KEY_TIMED_OUT, false),
-                outputTruncated = getBoolean(IpcContract.KEY_OUTPUT_TRUNCATED, false),
-            ),
-        )
+    private fun Bundle.toCommandResult(command: SafeCommand): CommandResult = CommandResult(
+        command = command,
+        exitCode = getInt(IpcContract.KEY_EXIT_CODE, IpcContract.EXIT_BRIDGE_ERROR),
+        stdout = getString(IpcContract.KEY_STDOUT).orEmpty(),
+        stderr = getString(IpcContract.KEY_STDERR).orEmpty(),
+        timedOut = getBoolean(IpcContract.KEY_TIMED_OUT, false),
+        outputTruncated = getBoolean(IpcContract.KEY_OUTPUT_TRUNCATED, false),
+    )
 
     private fun bridgeError(command: SafeCommand, detail: String) = CommandResult(
         command = command,
@@ -667,45 +717,56 @@ class ShizukuExecutor private constructor(
     private fun safeMessage(error: Throwable): String =
         error.message?.take(256) ?: error.javaClass.simpleName
 
-    private companion object {
+    companion object {
+        @Volatile private var migrationClosed = false
+        private val instances = Collections.newSetFromMap(WeakHashMap<ShizukuExecutor, Boolean>())
+        private val retainedEndpoints = ConcurrentHashMap.newKeySet<IGuardianUserService>()
+        internal fun prepareForDaemonMigration() { migrationClosed = true }
+
+        internal suspend fun awaitDaemonMigrationClientDrain() {
+            while (true) {
+                val old = synchronized(instances) { instances.toList() }
+                if (old.none { it.operationMutex.isLocked } && ProcessGmsRpcLanes.isQuiescent() &&
+                    StoppedObservationRpc.allQuiescent()) return
+                delay(25)
+            }
+        }
+
+        /** Samples only retained original endpoints after all local dispatch lanes have settled. */
+        internal suspend fun awaitDaemonMigrationDrain(): Boolean = withTimeoutOrNull(14_000) {
+            val old = synchronized(instances) { instances.toList() }
+            awaitDaemonMigrationClientDrain()
+            old.forEach { it.retireObservationSession() }
+            while (!ProcessGmsRpcLanes.isQuiescent() || !StoppedObservationRpc.allQuiescent()) delay(25)
+            for (remote in retainedEndpoints.toList()) {
+                var done = false
+                while (!done) {
+                    done = try {
+                        ProcessGmsRpcLanes.lane(GmsRpcLane.REVOKE).bounded { remote.isProtectionWorkQuiescent }
+                    } catch (_: DeadObjectException) { true }
+                    catch (_: Throwable) { false }
+                    if (!done) delay(50)
+                }
+                retainedEndpoints.remove(remote)
+            }
+            ProcessGmsRpcLanes.isQuiescent() && StoppedObservationRpc.allQuiescent()
+        } ?: false
+        internal fun backgroundObservation(context: Context): ShizukuExecutor = ShizukuExecutor(
+            context, RealShizukuBindingAdapter, observationLane = GmsRpcLane.BACKGROUND_OBSERVATION)
         private var sharedHeartbeat: ShizukuExecutor? = null
-        @Synchronized fun heartbeatTransport(context: Context): ShizukuExecutor = sharedHeartbeat ?: ShizukuExecutor(
-            context.applicationContext, RealShizukuBindingAdapter, heartbeatOwner = true).apply { openSession(); sharedHeartbeat = this }
-        const val SHELL_UID = 2_000
-        const val BIND_TIMEOUT_MILLIS = 5_000L
-        const val CLIENT_CALL_TIMEOUT_MILLIS = 11_000L
+        @Synchronized private fun heartbeatTransport(context: Context): ShizukuExecutor = sharedHeartbeat ?: ShizukuExecutor(
+            context.applicationContext, RealShizukuBindingAdapter, heartbeatOwner = true,
+            observationLane = GmsRpcLane.HEARTBEAT_WRITE).apply { openSession(); sharedHeartbeat = this }
+        private const val SHELL_UID = 2_000
+        private const val BIND_TIMEOUT_MILLIS = 5_000L
+        private const val CLIENT_CALL_TIMEOUT_MILLIS = 11_000L
     }
 }
 
 internal data class IpcArguments(val uid: Int, val packageName: String?)
 
-internal fun ipcArguments(command: SafeCommand): IpcArguments = when (command) {
-    is GetTargetProcessEvents -> IpcArguments(command.uid, command.packageName)
-    else -> IpcArguments(IpcContract.NO_UID_ARGUMENT, null)
-}
-
-internal fun sanitizeProcessTraceIpcResult(result: CommandResult): CommandResult {
-    if (result.command !is GetTargetProcessEvents) return result
-    if (result.completedCleanly && ProcessTraceCodec.decode(result.stdout) != null) return result
-    val timedOut = result.timedOut || result.exitCode == IpcContract.EXIT_TIMED_OUT
-    val cancelled = result.exitCode == IpcContract.EXIT_CANCELLED
-    return CommandResult(
-        command = result.command,
-        exitCode = when {
-            cancelled -> IpcContract.EXIT_CANCELLED
-            timedOut -> IpcContract.EXIT_TIMED_OUT
-            else -> IpcContract.EXIT_BRIDGE_ERROR
-        },
-        stdout = "",
-        stderr = when {
-            cancelled -> "Process trace cancelled"
-            timedOut -> "Process trace timed out"
-            else -> "Process trace unavailable"
-        },
-        timedOut = timedOut,
-        outputTruncated = false,
-    )
-}
+internal fun ipcArguments(@Suppress("UNUSED_PARAMETER") command: SafeCommand): IpcArguments =
+    IpcArguments(IpcContract.NO_UID_ARGUMENT, null)
 
 internal data class UserServiceIdentity(
     val tag: String,

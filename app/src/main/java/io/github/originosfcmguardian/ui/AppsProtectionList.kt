@@ -85,9 +85,6 @@ internal fun AppsProtectionList(
             item {
                 ApplicationSectionTitle(if (state.automaticProtection.configurationAvailable) "已保护"
                     else "上次已知选择", groups.protected.size)
-                Text("应用选择不代表当前状态；首页总开关控制运行。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 8.dp))
             }
             if (groups.protected.isEmpty()) item { Text(protectedAppsEmptyLabel(state.automaticProtection.configurationAvailable, query),
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp)) }
@@ -173,8 +170,8 @@ private fun ProtectionApplicationSheet(state: HomeUiState, row: ProtectionAppRow
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             TargetAppIcon(app.packageName, app.label, app.identity, size = 52.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(app.label, style = MaterialTheme.typography.headlineMedium)
-                Text(app.packageName, style = MaterialTheme.typography.bodyMedium,
+                Text(app.label, style = MaterialTheme.typography.titleLarge)
+                Text(app.packageName, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -182,9 +179,7 @@ private fun ProtectionApplicationSheet(state: HomeUiState, row: ProtectionAppRow
             .background(MaterialTheme.colorScheme.surfaceContainer)
             .padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("自动保护选择", style = MaterialTheme.typography.titleMedium)
-                Text("总开关开启时运行；关闭此开关移除选择。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("自动保护", style = MaterialTheme.typography.titleMedium)
             }
             AppProtectionSelection(configured, row.currentInstallation && canPrepareAppProtection(state, app),
                 { onClose(); onEnable(app.packageName) }, { app.identity?.let(onDisable) }, "${app.label} 详情内")
@@ -199,12 +194,8 @@ private fun ProtectionApplicationSheet(state: HomeUiState, row: ProtectionAppRow
         if (configured) {
             val counts = protectionAppRecoveryCounts(state, row)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(counts?.let { "今日 ${it.today} · 本周 ${it.week} 次确认解除" } ?: "确认次数暂不可用",
+                Text(counts?.let { "今日解除 ${it.today} 次 · 本周 ${it.week} 次" } ?: "解除次数暂不可用",
                     style = MaterialTheme.typography.bodyMedium)
-                Text("仅计解除限制，不代表消息送达。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (counts != null) Text(recoveryCountsSnapshotText(state.recoveryCounts.calculatedAtMillis, state.recoveryCounts.zoneId),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) { Text("关闭") }

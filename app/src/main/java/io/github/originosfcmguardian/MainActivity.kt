@@ -1,6 +1,5 @@
 package io.github.originosfcmguardian
 
-import android.Manifest
 import android.app.StatusBarManager
 import android.app.NotificationManager
 import android.content.ComponentName
@@ -17,32 +16,16 @@ import io.github.originosfcmguardian.ui.GuardianTheme
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.launch
 import io.github.originosfcmguardian.ui.HomeScreen
 import io.github.originosfcmguardian.ui.HomeViewModel
 import io.github.originosfcmguardian.ui.RecentsVisibility
 import io.github.originosfcmguardian.autostart.AutostartSettingsLauncher
-import io.github.originosfcmguardian.notification.NotificationFactsQuery
-import io.github.originosfcmguardian.monitoring.MonitorSessionQuery
 import io.github.originosfcmguardian.autoprotection.GuardianTileService
 import io.github.originosfcmguardian.autoprotection.GUARDIAN_TILE_LABEL
 import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
 
 class MainActivity : ComponentActivity() {
     private val viewModel: HomeViewModel by viewModels()
-    private val notificationPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) {
-        viewModel.refreshFcmStatus()
-        viewModel.refreshProtectionNotificationVisibility()
-    }
-    private val notificationFactsExportLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json"),
-    ) { uri -> viewModel.saveNotificationFactsExport(uri) }
-    private val monitorSessionExportLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json"),
-    ) { uri -> viewModel.saveMonitorSessionExport(uri) }
     private val combinedDiagnosticExportLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument(DiagnosticReportFormat.JSON.mimeType),
     ) { uri -> viewModel.saveCombinedDiagnosticReportExport(uri) }
@@ -70,27 +53,7 @@ class MainActivity : ComponentActivity() {
                     onCheckTarget = viewModel::checkSelectedTarget,
                     onCheckVisibleApp = viewModel::checkVisibleApp,
                     onRecheckSelectedApps = viewModel::checkSelectedApps,
-                    onRunDailyProtection = viewModel::runDailyProtectionNow,
                     onClearCorruptTargetSelection = viewModel::clearCorruptTargetSelection,
-                    onRequestFcmToken = viewModel::requestFcmToken,
-                    onToggleFcmTokenVisibility = viewModel::toggleFcmTokenVisibility,
-                    onCopyFcmToken = viewModel::copyFcmToken,
-                    onClearFcmToken = viewModel::clearFcmTokenFromUi,
-                    onRequestNotificationPermission = ::requestNotificationPermission,
-                    onSetNotificationFactsEnabled = viewModel::setNotificationFactsEnabled,
-                    onOpenNotificationListenerSettings = ::openNotificationListenerSettings,
-                    onClearNotificationFactsHistory = viewModel::clearNotificationFactsHistory,
-                    onExportNotificationFacts = ::exportNotificationFacts,
-                    onStartDeepMonitoring = { packageName ->
-                        lifecycleScope.launch {
-                            viewModel.startDeepMonitoring(packageName) {
-                                lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && !isFinishing && !isDestroyed
-                            }
-                        }
-                    },
-                    onStopDeepMonitoring = viewModel::stopDeepMonitoring,
-                    onClearDeepMonitoring = viewModel::clearDeepMonitoring,
-                    onExportMonitorSession = ::exportMonitorSession,
                     onExportCombinedDiagnosticReport = ::exportCombinedDiagnosticReport,
                     onOpenFcmDiagnostics = { io.github.originosfcmguardian.fcm.openGmsDiagnostics(this) },
                     onReadGmsConnection = viewModel::readGmsConnection,
@@ -127,7 +90,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshShizuku()
-        viewModel.refreshFcmStatus()
         viewModel.refreshProtectionNotificationVisibility()
         viewModel.onActivityResumed()
         viewModel.refreshRecentsPreference(RecentsVisibility.apply(this))
@@ -147,30 +109,6 @@ class MainActivity : ComponentActivity() {
         viewModel.onAutostartSettingsLaunchResult(AutostartSettingsLauncher.open(this))
     }
 
-    internal fun openNotificationListenerSettings() {
-        runCatching { startActivity(viewModel.notificationListenerSettingsIntent()) }
-            .onFailure { viewModel.onNotificationListenerSettingsOpenFailed() }
-    }
-
-    private fun exportNotificationFacts(query: NotificationFactsQuery) {
-        viewModel.prepareNotificationFactsExport(query) {
-            if (!isFinishing && !isDestroyed) {
-                notificationFactsExportLauncher.launch("guardian-notification-facts.json")
-            }
-        }
-    }
-
-    private fun exportMonitorSession(query: MonitorSessionQuery) {
-        viewModel.prepareMonitorSessionExport(query) {
-            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || isFinishing || isDestroyed) {
-                false
-            } else {
-                monitorSessionExportLauncher.launch("guardian-monitor-session.json")
-                true
-            }
-        }
-    }
-
     private fun exportCombinedDiagnosticReport(format: DiagnosticReportFormat) {
         viewModel.prepareCombinedDiagnosticReportExport(format) {
             if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || isFinishing || isDestroyed) {
@@ -182,14 +120,6 @@ class MainActivity : ComponentActivity() {
                 }
                 true
             }
-        }
-    }
-
-    private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            viewModel.refreshFcmStatus()
         }
     }
 

@@ -55,13 +55,13 @@ internal fun stoppedRecoveryActionPresentation(
 internal fun targetWakePresentation(target: SelectedTargetUiState, checking: Boolean = false): TargetStatusPresentation = when {
     checking -> TargetStatusPresentation("正在复检…", TargetStatusTone.NEUTRAL)
     target.status == TargetAutostartStatus.IDENTITY_CHANGED ->
-        TargetStatusPresentation("应用身份已变化，请重新选择", TargetStatusTone.UNCERTAIN)
+        TargetStatusPresentation("应用已变化，请重新选择", TargetStatusTone.UNCERTAIN)
     else -> when (target.stoppedSnapshot.status) {
-        TargetStoppedStatus.NOT_STOPPED -> TargetStatusPresentation("可被后台唤醒（未被停止）", TargetStatusTone.SUCCESS)
-        TargetStoppedStatus.STOPPED -> TargetStatusPresentation("后台唤醒受限（已被停止）", TargetStatusTone.FAILURE)
-        TargetStoppedStatus.IDENTITY_CHANGED -> TargetStatusPresentation("应用身份已变化，请重新选择", TargetStatusTone.UNCERTAIN)
-        TargetStoppedStatus.NOT_CHECKED -> TargetStatusPresentation("后台唤醒状态尚未检查", TargetStatusTone.NEUTRAL)
-        TargetStoppedStatus.UNKNOWN -> TargetStatusPresentation("后台唤醒状态未知，请复检", TargetStatusTone.UNCERTAIN)
+        TargetStoppedStatus.NOT_STOPPED -> TargetStatusPresentation("允许后台唤醒", TargetStatusTone.SUCCESS)
+        TargetStoppedStatus.STOPPED -> TargetStatusPresentation("后台唤醒受限", TargetStatusTone.FAILURE)
+        TargetStoppedStatus.IDENTITY_CHANGED -> TargetStatusPresentation("应用已变化，请重新选择", TargetStatusTone.UNCERTAIN)
+        TargetStoppedStatus.NOT_CHECKED -> TargetStatusPresentation("尚未检查", TargetStatusTone.NEUTRAL)
+        TargetStoppedStatus.UNKNOWN -> TargetStatusPresentation("状态未知，请复检", TargetStatusTone.UNCERTAIN)
     }
 }
 
@@ -76,37 +76,37 @@ internal fun stoppedRecoveryReceiptPresentation(
     return when {
         recovery.recordStage == StoppedRecoveryStage.RECONCILED && !recovery.needsReconcile && !recovery.storageBlocked -> {
             val observation = when (recovery.receiptOutcome) {
-                StoppedRecoveryOutcome.STILL_STOPPED -> "上次只读复检：停止限制仍存在；原操作结果未确认"
-                StoppedRecoveryOutcome.FLAG_CLEARED -> "上次只读复检：未被停止；不代表原操作成功"
-                else -> "上次只读复检：无法确认原操作结果"
+                StoppedRecoveryOutcome.STILL_STOPPED -> "上次复检：仍受限，恢复结果待确认"
+                StoppedRecoveryOutcome.FLAG_CLEARED -> "上次复检：允许后台唤醒，恢复结果待确认"
+                else -> "上次复检：恢复结果待确认"
             }
             TargetStatusPresentation(
-                if (sameIdentity) observation else "$observation；不代表当前安装的状态",
+                observation,
                 TargetStatusTone.NEUTRAL,
             )
         }
         recovery.phase == StoppedRecoveryPhase.IDLE && !recovery.needsReconcile && !recovery.storageBlocked &&
             recovery.receiptOutcome != null && recovery.receiptOutcome != StoppedRecoveryOutcome.UNCONFIRMED -> {
             val history = when (recovery.receiptOutcome) {
-                StoppedRecoveryOutcome.FLAG_CLEARED -> "上次操作成功：已解除停止限制（历史）"
-                StoppedRecoveryOutcome.STILL_STOPPED -> "上次操作未成功：停止限制仍存在（历史）"
-                StoppedRecoveryOutcome.NO_WRITE_NEEDED -> "上次核对：无需恢复（历史）"
-                else -> "上次操作被阻止（历史）"
+                StoppedRecoveryOutcome.FLAG_CLEARED -> "上次恢复：已解除限制"
+                StoppedRecoveryOutcome.STILL_STOPPED -> "上次恢复：仍受限"
+                StoppedRecoveryOutcome.NO_WRITE_NEEDED -> "上次核对：无需恢复"
+                else -> "上次恢复：未完成"
             }
             TargetStatusPresentation(
-                if (sameIdentity) history else "$history；不代表当前安装的状态",
+                history,
                 TargetStatusTone.NEUTRAL,
             )
         }
         sameIdentity && recovery.phase == StoppedRecoveryPhase.SUCCESS && !recovery.needsReconcile &&
-            target!!.hasKnownClearedFlag() &&
+            target.hasKnownClearedFlag() &&
             recovery.receiptOutcome == StoppedRecoveryOutcome.FLAG_CLEARED ->
             TargetStatusPresentation("操作成功：已解除停止限制", TargetStatusTone.SUCCESS)
         sameIdentity && recovery.phase == StoppedRecoveryPhase.SUCCESS && !recovery.needsReconcile &&
-            target!!.hasKnownClearedFlag() &&
+            target.hasKnownClearedFlag() &&
             recovery.receiptOutcome == StoppedRecoveryOutcome.NO_WRITE_NEEDED ->
             TargetStatusPresentation("无需恢复：当前未被停止", TargetStatusTone.SUCCESS)
-        sameIdentity && target!!.stoppedSnapshot.status == TargetStoppedStatus.STOPPED &&
+        sameIdentity && target.stoppedSnapshot.status == TargetStoppedStatus.STOPPED &&
             recovery.phase == StoppedRecoveryPhase.FAILED ->
             TargetStatusPresentation("恢复失败：停止限制仍存在", TargetStatusTone.FAILURE)
         recovery.receiptOutcome != null || recovery.needsReconcile || recovery.storageBlocked ||

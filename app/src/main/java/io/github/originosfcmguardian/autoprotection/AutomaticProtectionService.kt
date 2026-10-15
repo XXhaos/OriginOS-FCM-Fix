@@ -22,6 +22,7 @@ import io.github.originosfcmguardian.recovery.StoppedRecoveryController
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoveryRecord
 import io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime
+import io.github.originosfcmguardian.daemon.DaemonAppRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -76,6 +77,15 @@ class AutomaticProtectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!AutomaticProtectionRuntime.localExecutionAllowed(this)) {
+            activeController?.cancel()
+            activeJob?.cancel()
+            if (intent?.action == ACTION_STOP) DaemonAppRuntime.stop(applicationContext)
+            else DaemonAppRuntime.restore(applicationContext)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.SERVICE_START)
         stopRequestRecorded = false
         latestStartId = startId
@@ -169,6 +179,8 @@ class AutomaticProtectionService : Service() {
             Handler(Looper.getMainLooper()).post { retire(grant.id) }
         }
         activeJob = job
+        synchronized(migrationJobs) { migrationJobs.add(job) }
+        job.invokeOnCompletion { synchronized(migrationJobs) { migrationJobs.remove(job) } }
         if (AutomaticProtectionRuntime.authorized(grant)) job.start() else {
             job.cancel()
             retire(grant.id)
@@ -180,6 +192,7 @@ class AutomaticProtectionService : Service() {
     }
 
     private suspend fun collect(grant: AutomaticProtectionGrant, publishController: (StoppedRecoveryController) -> Unit) {
+        AutomaticProtectionRuntime.started(grant)
         var controller: StoppedRecoveryController? = null
         var selectionListener: AutoCloseable? = null
         val connectionEvents = Channel<Unit>(Channel.CONFLATED)
@@ -265,6 +278,7 @@ class AutomaticProtectionService : Service() {
                 delay(POLL_MILLIS)
             }
             sessionLoop@ while (AutomaticProtectionRuntime.authorized(grant)) {
+                ProtectionLifecycleDiagnostics.offerResourceSample()
                 val iterationConnection = connectionGeneration.current()
                 val privilege = ProtectionStartupProbe.privilegeEvidence()
                 // A negative read across a Binder replacement is obsolete, never durable revocation.
@@ -693,7 +707,8 @@ class AutomaticProtectionService : Service() {
                                 AutomaticProtectionRuntime.update(grant.id,
                                     "等待下次检测；标准停止标记已解除，消息接收尚未验证", outcome = result.outcome.name, identity = identity)
                             StoppedRecoveryOutcome.STILL_STOPPED -> {
-                                if (!mayContinueAfterStoppedRecovery(result, finalReceipt.getOrNull(), previousRequestId, lease.consent)) {
+                                if (!mayContinueAfterStoppedRecovery(result, finalReceipt.getOrNull(), previousRequestId,
+                                        lease.consent, Build.FINGERPRINT)) {
                                     AutomaticProtectionRuntime.pause(grant.id, "恢复回执无法确认，请先只读复检", result.outcome.name)
                                     break@sessionLoop
                                 }
@@ -822,6 +837,14 @@ class AutomaticProtectionService : Service() {
     }
 
     companion object {
+        private val migrationJobs = mutableSetOf<Job>()
+        internal suspend fun awaitDaemonMigrationDrain(): Boolean {
+            while (true) {
+                val pending = synchronized(migrationJobs) { migrationJobs.toList() }
+                if (pending.isEmpty()) return true
+                pending.forEach { it.join() }
+            }
+        }
         internal const val ACTION_START = "io.github.originosfcmguardian.autoprotection.START"
         internal const val ACTION_RESTORE = "io.github.originosfcmguardian.autoprotection.RESTORE"
         internal const val ACTION_STOP = "io.github.originosfcmguardian.autoprotection.STOP"

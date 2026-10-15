@@ -30,33 +30,12 @@ class SafeCommandTest {
             ),
             SafeCommand.GetTargetAutostartRow("org.telegram.messenger").argv(),
         )
-        assertEquals(
-            listOf(
-                "cmd", "package", "list", "packages", "--user", "0", "--uid", "10434", "-U",
-            ),
-            SafeCommand.GetTargetPackage("org.telegram.messenger").uidOwnersArgv(10_434),
-        )
-        assertEquals(
-            listOf(
-                "logcat", "-b", "events", "-d", "-t", "256", "-v", "epoch",
-                "am_proc_start:I", "am_uid_active:I", "am_uid_idle:I",
-                "am_uid_running:I", "am_uid_stopped:I", "*:S",
-            ),
-            SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger").argv(),
-        )
     }
 
     @Test
     fun `factory reconstructs only exact allowlisted operations`() {
-        assertEquals(
-            SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger"),
-            SafeCommandFactory.fromIpc(
-                SafeCommand.GetTargetProcessEvents(10_000, "example.valid").operationId,
-                uid = 10_434,
-                packageName = "org.telegram.messenger",
-            ),
-        )
-
+        assertNull(SafeCommandFactory.fromIpc("get_selected_target_process_events_user_0",
+            uid = 10_434, packageName = "org.telegram.messenger"))
         assertNull(SafeCommandFactory.fromIpc("run_arbitrary_shell", 10_208))
         assertNull(SafeCommandFactory.fromIpc(SafeCommand.GetGuardianAutostartRow.operationId, 10_362))
         assertNull(
@@ -67,14 +46,14 @@ class SafeCommandTest {
         )
         assertNull(
             SafeCommandFactory.fromIpc(
-                SafeCommand.GetTargetProcessEvents(10_000, "example.valid").operationId,
+                "get_selected_target_process_events_user_0",
                 uid = 10_434,
                 packageName = "org.telegram.messenger;id",
             ),
         )
         assertNull(
             SafeCommandFactory.fromIpc(
-                SafeCommand.GetTargetProcessEvents(10_000, "example.valid").operationId,
+                "get_selected_target_process_events_user_0",
                 uid = 110_434,
                 packageName = "org.telegram.messenger",
             ),

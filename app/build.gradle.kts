@@ -3,11 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val hasGoogleServicesConfig = file("google-services.json").isFile
-if (hasGoogleServicesConfig) {
-    apply(plugin = "com.google.gms.google-services")
-}
-
 android {
     namespace = "io.github.originosfcmguardian"
     compileSdk = 37
@@ -16,11 +11,10 @@ android {
         applicationId = "io.github.originosfcmguardian"
         minSdk = 30
         targetSdk = 37
-        versionCode = 68
-        versionName = "0.1.0-lean-runtime"
+        versionCode = 88
+        versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("boolean", "FIREBASE_CONFIG_INCLUDED", hasGoogleServicesConfig.toString())
     }
 
     buildFeatures {
@@ -32,7 +26,6 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
-            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -53,19 +46,12 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 
-
     // Retain explicit redistribution license texts in both APK variants.
     sourceSets.getByName("main").assets.srcDir(rootProject.file("licenses"))
 }
 
 dependencies {
     implementation(project(":core"))
-
-    constraints {
-        implementation("androidx.fragment:fragment:1.9.1") {
-            because("Firebase Play services brings Fragment 1.1.0, incompatible with ActivityResult permission APIs")
-        }
-    }
 
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.activity:activity-compose:1.13.0")
@@ -76,9 +62,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
-
-    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
-    implementation("com.google.firebase:firebase-messaging")
 
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")

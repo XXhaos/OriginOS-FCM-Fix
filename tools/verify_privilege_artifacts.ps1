@@ -28,6 +28,9 @@ foreach ($variant in @('debug', 'release')) {
         if ($component -match 'priv\.kit|InternalActivation|PairingNotification|AppOwnedRecovery') {
             throw "$variant contains cancelled internal component $component."
         }
+        if ($component -match '\.(monitoring|notification)\.|GuardianFirebaseMessagingService|com\.google\.firebase\.') {
+            throw "$variant contains archived advanced diagnostic component $component."
+        }
     }
     if ($manifest.manifest.application.GetAttribute('allowBackup', $androidNamespace) -ne 'false') {
         throw "$variant must keep backup disabled."
@@ -100,6 +103,9 @@ foreach ($variant in @('debug', 'release')) {
     if ($defined -match 'io\.github\.originosfcmguardian\.(doze|gmsconfig|data\.journal)|io\.github\.originosfcmguardian\.core\.(doze|journal)|ReadOnlyDetector|RepairPlanner') {
         throw "$variant must not contain removed standalone GMS protection/configuration classes."
     }
+    if ($defined -match 'io\.github\.originosfcmguardian\.(monitoring|notification)|io\.github\.originosfcmguardian\.core\.trace|com\.google\.firebase|FcmRegistrationClient|GuardianFirebaseMessagingService|DeepMonitoringCard|RetainedTimelineCard') {
+        throw "$variant must not package archived advanced tools or Firebase runtime."
+    }
     $results += [pscustomobject]@{
         variant = $variant
         externalProvider = 'PASS'
@@ -109,6 +115,7 @@ foreach ($variant in @('debug', 'release')) {
         heartbeatDriverDebugOnlyDumpBoundary = 'PASS'
         lifecycleDriverDebugOnlyDumpBoundary = 'PASS'
         noStandaloneGmsProtectionOrNative = 'PASS'
+        noArchivedAdvancedCollectorsOrFirebase = 'PASS'
         apkSha256 = (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
@@ -118,6 +125,9 @@ if ($mapping -match '(?m)^(priv\.kit\.|io\.github\.originosfcmguardian\.(activat
 }
 if ($mapping -match '(?m)^io\.github\.originosfcmguardian\.(doze|gmsconfig|data\.journal|core\.(doze|journal))\.') {
     throw 'Release mapping must not originate from removed standalone GMS protection code.'
+}
+if ($mapping -match '(?m)^(io\.github\.originosfcmguardian\.(monitoring|notification|core\.trace)\.|com\.google\.firebase\.)') {
+    throw 'Release mapping must not originate from archived advanced tools or Firebase runtime.'
 }
 $seeds = Get-Content -LiteralPath (Join-Path $Repository 'app/build/outputs/mapping/release/seeds.txt') -Raw
 $entryPoints = @(

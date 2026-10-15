@@ -56,7 +56,7 @@ class AppsProtectionListTest {
         compose.setContent { MaterialTheme { AppsProtectionList(state, query.value, { query.value = it }, {},
             { error("Unexpected enable") }, { stopped = it }, {}, {}, Modifier.fillMaxSize()) } }
         compose.onNodeWithContentDescription("已保护（1）").assertExists()
-        compose.onNodeWithText("等待恢复检测").assertDoesNotExist()
+        compose.onNodeWithText("等待恢复").assertDoesNotExist()
         compose.onNodeWithContentDescription("First 自动保护选择").assertIsOn().assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(first, stopped) }
         compose.onNodeWithContentDescription("搜索名称或包名").performTextInput("EXAMPLE.SEC")
@@ -167,7 +167,7 @@ class AppsProtectionListTest {
         compose.runOnIdle {
             state.value = ready.copy(visibleApps = listOf(ready.visibleApps.first().copy(identity = first.copy(uid = 10223))))
         }
-        compose.onNodeWithText("应用已卸载或安装身份变化").assertExists()
+        compose.onNodeWithText("应用已卸载或更新，请刷新").assertExists()
         compose.onNodeWithText("false installation fixture").assertExists()
         compose.onNodeWithContentDescription("First 详情内 自动保护选择").assertIsOff().assertIsNotEnabled()
         compose.runOnIdle { assertEquals(0, enables) }

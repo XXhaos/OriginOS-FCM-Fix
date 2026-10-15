@@ -1,5 +1,15 @@
 # AGENTS.md — OriginOS FCM Guardian
 
+## Latest backup exception — cross-device resumption (2026-10-15)
+
+The user explicitly requested this backup to be resumable on another computer. For this backup,
+update README, setup, current progress/plans and the current handoff documents; this overrides the
+older local-only/no-handoff rule below. Preserve original signing credentials and raw device evidence
+outside Git; document required private transfer without copying or publishing secrets. Use the
+user-selected existing `${GITEA_SSH_KEY}` SSH identity for this push, with agent use disabled
+and host-key verification retained. This one-off path override does not change the global `~/.ssh`
+preference or authorize future pushes. Finish the requested UI change and device check before pushing.
+
 ## Latest commit identity rule — user attribution (2026-10-10)
 
 For every authorized commit, both author and committer must be
@@ -21,11 +31,41 @@ and this rule does not authorize future automatic commits/pushes. Local-only/no-
 
 ## Latest optimization rule — core functionality first (2026-10-10)
 
+The user's survival target is continuous actual protection without system interruption; successful
+process/service reconstruction is a fallback, not acceptance of that target. Every subsequent
+field investigation must also inspect the FCM branch's actual observation/maintenance/recovery
+records and current readiness, not merely its configured switch or a currently connected GMS.
+Report pending confirmation, loss of observation and unverified heartbeat/recovery effects explicitly.
+
 Resource/lifecycle optimization must preserve protection behavior, detection frequency, bounded
 concurrency, durable selections/authority and diagnostic usefulness. Do not trade functionality
 for APK size, memory or battery figures. Verify affected release paths; fix or roll back a concrete
 functional regression before accepting resource benefits. APK shrinkage alone is not RAM, battery
 or survival evidence. Do not add unrelated system-bound roles solely to claim higher priority.
+
+## Latest product posture — resident privileged tool (2026-10-15)
+
+Guardian is a long-running privileged protection tool, not a screen-bound diagnostic app.
+The intended architecture separates UI/configuration from actual protection ownership: leaving
+the UI or ordinary app-process LOW_MEMORY must not itself revoke consent or interrupt protection
+when a verified independent privileged backend can continue. Treat that independence as unfinished
+until actual recovery during app absence and reliable OFF/revocation have passed, not merely a
+surviving shell process or continued read-only samples. Privilege still comes from Shizuku; this
+posture does not confer Root/system identity, immunity from termination, or permission to add fake
+system roles. Explicit master/per-app OFF, system user-stop and permission revocation remain binding.
+
+## Latest resumption rule — persistent running intent (2026-10-15)
+
+The Home master switch is persistent user intent. Ordinary UI/app-process exit, LOW_MEMORY,
+recent-task removal, reboot, OTA and temporary Shizuku unavailability must not turn that intent OFF
+or delete configured apps. When externally started Shizuku and Guardian permission become ready,
+reconnect/reconcile the existing authority automatically; Quick Settings onStartListening is an
+additional recovery trigger, never a grant or a MasterOn command. Respect explicit Home OFF and
+independent per-app/FCM OFF. Do not interpret missing processes as user OFF. External Shizuku
+startup is user-managed; Guardian does not toggle wireless debugging or start Shizuku itself.
+This does not permit ignoring explicit revocation, system user-stop, invalid identities,
+corrupt/unknown storage or unsettled writes; those block execution without pretending the desired
+switch was manually turned off. Preserve and resolve their actual evidence rather than erasing it.
 
 ## Latest device-UI override — autonomous unlock and screen care (2026-10-06)
 

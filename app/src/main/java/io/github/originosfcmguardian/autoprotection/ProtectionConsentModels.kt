@@ -7,6 +7,7 @@ internal enum class ProtectionConsentMode { DISABLED, ACTIVE, SUSPENDED, USER_PA
 internal enum class ProtectionSuspensionReason { PREREQUISITES_LOST, IDENTITY_CHANGED, PENDING_RECEIPT, RECOVERY_BUSY, SERVICE_UNAVAILABLE, BUDGET_UNAVAILABLE }
 internal const val RESTART_CONSENT_POLICY_VERSION = 2
 internal const val RECIPIENT_CONSENT_POLICY_VERSION = 4
+private val consentIdPattern = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 /** Explicit automatic consent; manual recovery receipts and legacy sessions are never inputs. */
 internal data class DurableConsentToken(
@@ -20,7 +21,7 @@ internal data class DurableConsentToken(
     val userId: Int = 0,
 ) {
     init {
-        require(id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
+        require(consentIdPattern.matches(id))
         require(generation > 0 && consentedAtMillis > 0)
         require(identity.packageName == "org.telegram.messenger" && identity.signerSha256.size <= 16)
         require(validRuntimeFingerprint(fingerprint))
@@ -39,7 +40,7 @@ internal data class RecipientConsentToken(
     val userId: Int = 0,
 ) {
     init {
-        require(id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
+        require(consentIdPattern.matches(id))
         require(generation > 0 && consentedAtMillis > 0 && identity.signerSha256.size <= 16)
         require(validRuntimeFingerprint(fingerprint) && policyVersion == RECIPIENT_CONSENT_POLICY_VERSION && userId == 0)
     }
@@ -76,6 +77,10 @@ internal fun TargetConsent.restartConsented(): Boolean = when (this) {
     is TargetConsent.Legacy -> policyVersion == RESTART_CONSENT_POLICY_VERSION
     is TargetConsent.Recipient -> policyVersion == RECIPIENT_CONSENT_POLICY_VERSION
 }
+
+/** Recipient firmware is consent provenance; legacy consent retains its exact firmware scope. */
+internal fun TargetConsent.acceptsRuntimeFingerprint(current: String?): Boolean =
+    validRuntimeFingerprint(current) && (this is TargetConsent.Recipient || fingerprint == current)
 
 /** Budget is mandatory even when disabled, and survives every consent generation. */
 internal data class ProtectionAuthoritySnapshot(

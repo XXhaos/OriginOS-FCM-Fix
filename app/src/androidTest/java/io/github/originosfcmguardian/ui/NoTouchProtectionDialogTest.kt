@@ -18,8 +18,8 @@ class NoTouchProtectionDialogTest {
             NoTouchProtectionDialog({}, { callback -> requests++; callback("系统添加入口暂不可用") })
         } }
         compose.runOnIdle { assertEquals(0, requests) }
-        compose.onNodeWithText("也可手动添加：控制中心 → 编辑 → 推送保护。").assertExists()
-        compose.onNodeWithText("先连接特权服务并开启自动保护。亮起表示检测运行中；点击按钮可打开 Guardian。手动关闭的保护不会自动开启。").assertExists()
+        compose.onNodeWithText("将“推送保护”添加到控制中心，下拉显示时可恢复意外中断的保护。").assertExists()
+        compose.onNodeWithText("请保持 Shizuku 和自动保护开启。手动关闭保护后不会自动开启。").assertExists()
         compose.onNodeWithText("添加磁贴").performClick()
         compose.runOnIdle { assertEquals(1, requests) }
         compose.onNodeWithText("系统添加入口暂不可用").assertExists()

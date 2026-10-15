@@ -17,11 +17,17 @@ class FcmRecoveryRunnerTest {
         var signer = FcmRecoveryPolicy.SIGNER
         var senderReads = 0
         var loseSenderOnSecondRead = false
+        var mcsQualified = true
+        var network = true
+        var mcsReads = 0
+        var mcsDuringTarget: (() -> Unit)? = null
+        var socketCompleteness = SourceCompleteness.COMPLETE
+        var socketMatched = false
         override fun environment() = GmsProbeEnvironment(0, 2000, "12345678-1234-1234-1234-123456789abc")
         override fun gmsPackage() = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
             uid, version, 100, 900, signer)
         override fun packagesForUid(uid: Int) = listOf(if (uid == 10333) "io.github.originosfcmguardian" else GMS_OBSERVATION_PACKAGE)
-        override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(SourceCompleteness.COMPLETE, false)
+        override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(socketCompleteness, socketMatched)
         override fun gcmService(interrupted: () -> Boolean) = GcmServiceSource(state,
             if (state == GcmConnectionState.UNKNOWN) SourceCompleteness.MALFORMED else SourceCompleteness.COMPLETE)
         override fun reconnectReceivers() = GmsReceiverInspection(true, emptyList())
@@ -30,9 +36,15 @@ class FcmRecoveryRunnerTest {
             senderReads++
             return qualified && !(loseSenderOnSecondRead && senderReads >= 2)
         }
+        override fun disconnectedMcsQualified(): Boolean {
+            mcsReads++; mcsDuringTarget?.invoke(); return mcsQualified
+        }
+        override fun usableInternet() = network
     }
-    private class Child : Process() {
-        private val out = ByteArrayInputStream(("Broadcasting: Intent { act=com.google.android.gcm.intent.SEND flg=0x400000 cmp=com.google.android.gms/.gcm.GcmSenderProxy }\nBroadcast completed: result=0\n").toByteArray())
+    private class Child(mcs: Boolean = false) : Process() {
+        private val out = ByteArrayInputStream((if (mcs)
+            "Broadcasting: Intent { act=com.google.android.intent.action.MCS_HEARTBEAT flg=0x400000 pkg=com.google.android.gms }\nBroadcast completed: result=0\n"
+            else "Broadcasting: Intent { act=com.google.android.gcm.intent.SEND flg=0x400000 cmp=com.google.android.gms/.gcm.GcmSenderProxy }\nBroadcast completed: result=0\n").toByteArray())
         private val err = ByteArrayInputStream(ByteArray(0))
         override fun getInputStream() = out
         override fun getErrorStream() = err
@@ -43,6 +55,64 @@ class FcmRecoveryRunnerTest {
         override fun destroy() {}
     }
     private fun binding(port: Port) = FcmRecoveryPolicy.binding(observeGmsConnection(1, port) as GmsConnectionObservation.Sample)
+    @Test fun `guarded preflight rejection never launches and settles actual worker`() {
+        val settled = CountDownLatch(1); val settledValue = AtomicReference<PrivilegedExecutionSettlement>()
+        val fence = object : PrivilegedExecutionFence {
+            override fun prepare() = false
+            override fun start(launch: () -> Process): Process? = error("No launch after denied prepare")
+            override fun workerSettled(value: PrivilegedExecutionSettlement) { settledValue.set(value); settled.countDown() }
+        }
+        val port = Port(); val runner = FcmRecoveryRunner({ port }, { error("Must not launch") })
+        try {
+            val result = runner.requestGuarded(1, 10333, binding(port), { true }, { false },
+                FcmRecoveryOperation.SERVICE_ABSENT_SEND, fence)
+            assertEquals(FcmRecoveryStatus.NOT_SENT, result.status)
+            assertTrue(settled.await(1, TimeUnit.SECONDS))
+            assertEquals(PrivilegedExecutionSettlement.NOT_STARTED, settledValue.get())
+        } finally { runner.close() }
+    }
+    @Test fun `caller timeout cannot report settlement before a blocked actual worker exits`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1); val settled = CountDownLatch(1)
+        val port = Port(); val settledValue = AtomicReference<PrivilegedExecutionSettlement>()
+        val fence = object : PrivilegedExecutionFence {
+            override fun prepare() = true
+            override fun start(launch: () -> Process): Process? = error("Cancelled validation must not reach launch")
+            override fun workerSettled(value: PrivilegedExecutionSettlement) { settledValue.set(value); settled.countDown() }
+        }
+        val runner = FcmRecoveryRunner({ port }, { error("No launch") }, 200)
+        try {
+            val caller = Thread { runner.requestGuarded(1, 10333, binding(port), {
+                entered.countDown()
+                while (release.count > 0) { try { release.await() } catch (_: InterruptedException) {} }
+                true
+            }, { false }, FcmRecoveryOperation.SERVICE_ABSENT_SEND, fence) }
+            caller.start(); assertTrue(entered.await(2, TimeUnit.SECONDS))
+            caller.join(2000); assertFalse(caller.isAlive)
+            assertEquals(1L, settled.count)
+            assertFalse(runner.isQuiescent())
+            release.countDown(); assertTrue(settled.await(2, TimeUnit.SECONDS))
+            assertEquals(PrivilegedExecutionSettlement.NOT_STARTED, settledValue.get())
+        } finally { release.countDown(); runner.close() }
+    }
+    @Test fun `GMS changes while ownership prepare runs are rechecked before launch`() {
+        val changes: List<(Port) -> Unit> = listOf({ it.version++ }, { it.qualified = false },
+            { it.state = GcmConnectionState.REPORTED_CONNECTED })
+        for (change in changes) {
+            val port = Port(); var launches = 0
+            val fence = object : PrivilegedExecutionFence {
+                override fun prepare(): Boolean { change(port); return true }
+                override fun start(launch: () -> Process) = launch()
+                override fun workerSettled(value: PrivilegedExecutionSettlement) {}
+            }
+            val runner = FcmRecoveryRunner({ port }, { launches++; Child() })
+            try {
+                val result = runner.requestGuarded(1, 10333, binding(port), { true }, { false },
+                    FcmRecoveryOperation.SERVICE_ABSENT_SEND, fence)
+                assertEquals(FcmRecoveryStatus.NOT_SENT, result.status)
+                assertEquals(0, launches)
+            } finally { runner.close() }
+        }
+    }
     @Test fun `only exact absent qualified installation uses fixed no extras request`() {
         val port = Port(); var calls = 0
         fun request(id: Long): FcmRecoveryResult {
@@ -131,5 +201,43 @@ class FcmRecoveryRunnerTest {
             text.replace("    User 0:", "  Package [other] (def):\n    User 0:"),
             text + "    User 0: installed=true hidden=false suspended=false stopped=false vStopped=false enabled=1\n",
             text.trimEnd(), text + "Permission Denial\n").forEach { assertFalse(FcmPackageStateReader.parse(it.toByteArray())) }
+    }
+    @Test fun `disconnected branch uses fixed MCS and rechecks source network identity and capability twice`() {
+        val port = Port().also { it.version = FcmRecoveryPolicy.MCS_VERSION; it.state = GcmConnectionState.REPORTED_DISCONNECTED }
+        var mcs = 0; var send = 0
+        fun request(): FcmRecoveryResult {
+            val runner = FcmRecoveryRunner({ port }, { send++; Child() }, mcsLaunch = { mcs++; Child(true) })
+            return try { runner.request(1, 10333, binding(port), { true }, { false }, FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS) }
+            finally { runner.close() }
+        }
+        assertEquals(FcmRecoveryStatus.REQUESTED, request().status)
+        assertEquals(2, port.mcsReads); assertEquals(0, port.senderReads); assertEquals(0, send); assertEquals(1, mcs)
+        for (state in listOf(GcmConnectionState.SERVICE_ABSENT, GcmConnectionState.REPORTED_CONNECTED, GcmConnectionState.UNKNOWN)) {
+            port.state = state; assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
+        }
+        port.state = GcmConnectionState.REPORTED_DISCONNECTED
+        port.network = false; assertEquals(FcmRecoveryStatus.NOT_SENT, request().status); port.network = true
+        port.socketCompleteness = SourceCompleteness.DENIED
+        assertEquals(FcmRecoveryStatus.NOT_SENT, request().status); port.socketCompleteness = SourceCompleteness.COMPLETE
+        port.socketMatched = true; assertEquals(FcmRecoveryStatus.NOT_SENT, request().status); port.socketMatched = false
+        port.version++; assertEquals(FcmRecoveryStatus.REQUESTED, request().status); port.version--
+        port.mcsQualified = false; assertEquals(FcmRecoveryReason.TARGET_UNQUALIFIED, request().reason); port.mcsQualified = true
+        port.mcsDuringTarget = { port.state = GcmConnectionState.REPORTED_CONNECTED }
+        assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
+        port.state = GcmConnectionState.REPORTED_DISCONNECTED; port.mcsDuringTarget = { port.network = false }
+        assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
+        port.network = true; port.mcsDuringTarget = { if (port.mcsReads % 2 == 0) port.mcsQualified = false }
+        // Ensure the second qualification independently rejects receiver disappearance.
+        port.mcsReads = 0; assertEquals(FcmRecoveryReason.TARGET_UNQUALIFIED, request().reason)
+        port.mcsQualified = true
+        for (state in listOf(GcmConnectionState.REPORTED_CONNECTED, GcmConnectionState.SERVICE_ABSENT)) {
+            port.state = GcmConnectionState.REPORTED_DISCONNECTED; port.mcsReads = 0
+            port.mcsDuringTarget = { if (port.mcsReads == 2) port.state = state }
+            assertEquals(FcmRecoveryReason.NOT_DISCONNECTED, request().reason)
+        }
+        port.state = GcmConnectionState.REPORTED_DISCONNECTED; port.mcsReads = 0
+        port.mcsDuringTarget = { if (port.mcsReads == 2) port.uid++ }
+        assertEquals(FcmRecoveryReason.IDENTITY_CHANGED, request().reason)
+        assertEquals(2, mcs); assertEquals(0, send)
     }
 }

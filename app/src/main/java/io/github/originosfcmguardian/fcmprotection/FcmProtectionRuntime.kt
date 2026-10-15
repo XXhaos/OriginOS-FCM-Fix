@@ -5,6 +5,7 @@ import android.os.SystemClock
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionGrant
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime
 import io.github.originosfcmguardian.core.gms.*
+import io.github.originosfcmguardian.daemon.DaemonAppRuntime
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryRuntime
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEventAction
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryPreparation
@@ -58,8 +59,29 @@ object FcmProtectionRuntime {
     private var store: FcmProtectionStore? = null
     private var activation: Job? = null
     private var initialized = false
+    @Volatile private var migrationPrepared = false
+
+    @Synchronized internal fun publishDaemonState(value: FcmProtectionUiState) { mutable.value = value }
+
+    @Synchronized internal fun prepareForDaemonMigration() {
+        migrationPrepared = true
+        live.set(false); readiness.invalidate(); revision.incrementAndGet(); activation?.cancel()
+        FcmRecoveryRuntime.prepareForDaemonMigration()
+        GmsAutoHeartbeatRuntime.prepareForDaemonMigration()
+    }
+
+    internal suspend fun awaitDaemonMigrationDrain(context: Context): Boolean {
+        // Cancelled children are joined through their actual finally blocks before snapshot export.
+        scope.coroutineContext[Job]?.children?.toList()?.forEach { it.cancel() }
+        scope.coroutineContext[Job]?.children?.toList()?.forEach { it.join() }
+        io.withLock { }
+        if (!FcmRecoveryRuntime.awaitDaemonMigrationDrain(context)) return false
+        ShizukuExecutor.awaitDaemonMigrationClientDrain()
+        return GmsAutoHeartbeatRuntime.awaitDaemonMigrationDrain(context)
+    }
 
     @Synchronized fun initialize(context: Context) {
+        if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return
         if (initialized) return
         initialized = true; app = context.applicationContext
         val storage = FcmProtectionStore(AtomicFcmProtectionStorage(context.applicationContext)); store = storage
@@ -85,11 +107,12 @@ object FcmProtectionRuntime {
     private fun ready(): Boolean = host?.let { grant -> readiness.eligible && AutomaticProtectionRuntime.authorized(grant) &&
         AutomaticProtectionRuntime.isActuallyProtecting() && AutomaticProtectionRuntime.consentsAuthorized(grant) } == true
     private fun admission(sample: GmsConnectionObservation.Sample?, recovery: Boolean): Boolean {
-        if (!live.get() || !ready() || mutable.value.storageBlocked) return false
+        if (migrationPrepared || !live.get() || !ready() || mutable.value.storageBlocked) return false
         val current = runCatching { store?.read() }.getOrNull() ?: return false
         return current.epoch == consent.epoch && current.admits(sample, recovery)
     }
     private fun refresh() {
+        if (migrationPrepared) return
         val failure = confirmationFailure
         val heartbeat = GmsAutoHeartbeatRuntime.state.value
         val recovery = FcmRecoveryRuntime.state.value
@@ -122,18 +145,21 @@ object FcmProtectionRuntime {
             })
     }
     private fun blocked() {
+        if (migrationPrepared) return
         live.set(false); revision.incrementAndGet()
         runCatching { store?.disable()?.let { consent = it } }
         app?.let { FcmRecoveryRuntime.disable(it); GmsAutoHeartbeatRuntime.disable(it) }
         mutable.value = mutable.value.copy(storageBlocked = true, busy = false, detail = "统一授权无法安全保存，已暂停。")
     }
     @Synchronized internal fun attachHost(context: Context, grant: AutomaticProtectionGrant) {
+        if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return
         initialize(context); masterOff(); host = grant
         readiness.attach(grant.id)
         GmsAutoHeartbeatRuntime.attachHost(context, grant); FcmRecoveryRuntime.attachHost(context, grant)
         live.set(consent.configured && !mutable.value.storageBlocked); refresh()
     }
     @Synchronized internal fun hostEligible(id: String) {
+        if (migrationPrepared) return
         if (host?.id != id) return
         readiness.poll(id, { FcmRecoveryRuntime.updateHostReadiness(id) },
             { GmsAutoHeartbeatRuntime.updateHostReadiness(id) }, { consent.configured && live.get() }) {
@@ -143,11 +169,13 @@ object FcmProtectionRuntime {
         refresh()
     }
     @Synchronized internal fun hostEnded(id: String) {
+        if (migrationPrepared) return
         if (host?.id != id) return
         readiness.end(id); revision.incrementAndGet(); activation?.cancel()
         FcmRecoveryRuntime.hostEnded(id); GmsAutoHeartbeatRuntime.hostEnded(id); host = null; refresh()
     }
     @Synchronized internal fun privilegeLost(id: String) {
+        if (migrationPrepared) return
         if (host?.id != id) return
         readiness.invalidate(); revision.incrementAndGet(); activation?.cancel()
         FcmRecoveryRuntime.privilegeLost(id); GmsAutoHeartbeatRuntime.privilegeLost(id); refresh()
@@ -156,11 +184,27 @@ object FcmProtectionRuntime {
         privilegeLost(id); GmsAutoHeartbeatRuntime.securityLost(id)
     }
     @Synchronized internal fun masterOff() {
+        if (migrationPrepared) return
         readiness.invalidate(); revision.incrementAndGet(); activation?.cancel()
         FcmRecoveryRuntime.masterOff(); host?.id?.let(GmsAutoHeartbeatRuntime::hostEnded)
         refresh()
     }
-    @Synchronized fun disable(context: Context) {
+    fun disable(context: Context) {
+        if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) {
+            DaemonAppRuntime.disableFcm(context)
+            return
+        }
+        val forward = synchronized(this) {
+            if (migrationPrepared || DaemonAppRuntime.remoteOwnershipClaimed()) true else {
+                disableLocal(context)
+                false
+            }
+        }
+        // May persist an OFF before waiting for migration; no old FCM monitor is held here.
+        if (forward) DaemonAppRuntime.disableFcm(context)
+    }
+    /** Existing local transaction only; caller owns the FCM monitor and checked the handoff latch. */
+    private fun disableLocal(context: Context) {
         initialize(context)
         confirmationFailure = null
         live.set(false); revision.incrementAndGet(); activation?.cancel()
@@ -169,11 +213,16 @@ object FcmProtectionRuntime {
         FcmRecoveryRuntime.disable(context); GmsAutoHeartbeatRuntime.disable(context); refresh()
     }
     suspend fun confirm(context: Context): Boolean = io.withLock {
+        if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return@withLock false
         initialize(context)
         var parentCommitted = false
         var writingAuthority = false
         fun decline(reason: FcmProtectionConfirmationFailure): Boolean {
-            if (parentCommitted) disable(context)
+            if (migrationPrepared) return false
+            if (parentCommitted) synchronized(this) {
+                // Internal rollback is not a new user OFF and must not forward under the IO mutex.
+                if (!migrationPrepared && !DaemonAppRuntime.remoteOwnershipClaimed()) disableLocal(context)
+            }
             confirmationFailure = reason; refresh(); return false
         }
         confirmationFailure = null
@@ -219,6 +268,7 @@ object FcmProtectionRuntime {
         finally { mutable.value = mutable.value.copy(busy = false); refresh() }
     }
     @Synchronized private fun provisionIfConnected(observation: GmsConnectionObservation) {
+        if (migrationPrepared) return
         val sample = observation as? GmsConnectionObservation.Sample ?: return
         if (!admission(sample, false) || !FcmRecoveryPolicy.connected(sample, SystemClock.elapsedRealtime()) ||
             activation?.isCompleted == false || GmsAutoHeartbeatRuntime.state.value.busy) return

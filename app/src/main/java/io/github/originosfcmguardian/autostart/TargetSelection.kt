@@ -3,6 +3,7 @@ package io.github.originosfcmguardian.autostart
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import io.github.originosfcmguardian.core.GuardianAutostartRead
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
@@ -10,6 +11,18 @@ import io.github.originosfcmguardian.core.isUserZeroTargetAppUid
 import java.security.MessageDigest
 
 internal const val MAX_TARGET_SELECTION_BYTES = 256 * 1024
+private val signerSha256Pattern = Regex("[0-9a-f]{64}")
+private const val LOWER_HEX_DIGITS = "0123456789abcdef"
+
+internal fun lowerHexDigest(bytes: ByteArray): String {
+    val chars = CharArray(bytes.size * 2)
+    bytes.forEachIndexed { index, byte ->
+        val value = byte.toInt() and 0xff
+        chars[index * 2] = LOWER_HEX_DIGITS[value ushr 4]
+        chars[index * 2 + 1] = LOWER_HEX_DIGITS[value and 15]
+    }
+    return String(chars)
+}
 
 data class SelectedTargetIdentity(
     val packageName: String,
@@ -23,7 +36,7 @@ data class SelectedTargetIdentity(
         require(firstInstallTime > 0)
         require(signerSha256.isNotEmpty())
         require(signerSha256 == signerSha256.distinct().sorted())
-        require(signerSha256.all { it.matches(Regex("[0-9a-f]{64}")) })
+        require(signerSha256.all(signerSha256Pattern::matches))
     }
 }
 
@@ -207,10 +220,40 @@ class TargetSelectionStore internal constructor(
     fun registerListener(listener: () -> Unit): AutoCloseable = preferences.registerListener(listener)
 }
 
+internal data class RecoveryCandidatePackageEvidence(
+    val identity: SelectedTargetIdentity?,
+    val qualifications: RecoveryTargetQualifications,
+)
+
+/** One fresh signed package read supplies both qualification and identity; no retained cache. */
+internal fun readRecoveryCandidate(
+    expected: SelectedTargetIdentity,
+    readPackage: () -> RecoveryCandidatePackageEvidence?,
+    readUidMembers: (Int) -> List<String>?,
+): Boolean = runCatching {
+    if (!isRecoveryTargetPackage(expected.packageName)) return@runCatching false
+    val evidence = readPackage() ?: return@runCatching false
+    evidence.qualifications.eligible && evidence.identity == expected &&
+        validTargetUidMembers(expected.packageName, readUidMembers(expected.uid))
+}.getOrDefault(false)
+
+/** Same package/UID/install/signer validation for qualification and stopped-flag observations. */
+internal fun targetPackageIdentity(
+    requestedPackage: String, packageName: String?, applicationPackageName: String?, uid: Int,
+    firstInstallTime: Long, certificates: List<ByteArray>?,
+): SelectedTargetIdentity? = runCatching {
+    require(isSafeAndroidPackageName(requestedPackage) && packageName == requestedPackage &&
+        applicationPackageName == requestedPackage)
+    require(isUserZeroTargetAppUid(uid) && firstInstallTime > 0)
+    val digests = requireNotNull(certificates).map { certificate ->
+        lowerHexDigest(MessageDigest.getInstance("SHA-256").digest(certificate))
+    }.distinct().sorted()
+    SelectedTargetIdentity(requestedPackage, uid, firstInstallTime, digests)
+}.getOrNull()
+
 class TargetPackageProbe(private val context: Context) {
     @Suppress("DEPRECATION")
-    fun isRecoveryCandidate(expected: SelectedTargetIdentity): Boolean = runCatching {
-        if (!isRecoveryTargetPackage(expected.packageName)) return@runCatching false
+    fun isRecoveryCandidate(expected: SelectedTargetIdentity): Boolean = readRecoveryCandidate(expected, {
         val info = context.packageManager.getPackageInfo(expected.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
         val app = requireNotNull(info.applicationInfo)
         val qualifications = RecoveryTargetQualifications(
@@ -219,9 +262,9 @@ class TargetPackageProbe(private val context: Context) {
             app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
             app.flags and ApplicationInfo.FLAG_PERSISTENT != 0,
         )
-        qualifications.eligible && identity(expected.packageName) == expected &&
-            validTargetUidMembers(expected.packageName, context.packageManager.getPackagesForUid(expected.uid)?.toList())
-    }.getOrDefault(false)
+        RecoveryCandidatePackageEvidence(
+            if (qualifications.eligible) packageSnapshot(expected.packageName, info)?.identity else null, qualifications)
+    }, { uid -> context.packageManager.getPackagesForUid(uid)?.toList() })
 
     /** Kept for existing selection callers; candidates now include apps without a launcher. */
     fun launcherCandidates(selectedPackages: Set<String>): List<LauncherAppCandidate> =
@@ -272,22 +315,18 @@ class TargetPackageProbe(private val context: Context) {
                 packageName,
                 PackageManager.GET_SIGNING_CERTIFICATES,
             )
-            val applicationInfo = requireNotNull(info.applicationInfo)
-            require(info.packageName == packageName && applicationInfo.packageName == packageName)
-            val uid = applicationInfo.uid
-            if (!isUserZeroTargetAppUid(uid) || info.firstInstallTime <= 0) return null
-            val signingInfo = info.signingInfo ?: return null
-            val signers = signingInfo.apkContentsSigners.orEmpty()
-            val digests = signers.map { signature ->
-                MessageDigest.getInstance("SHA-256")
-                    .digest(signature.toByteArray())
-                    .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-            }.distinct().sorted()
-            TargetPackageSnapshot(
-                SelectedTargetIdentity(packageName, uid, info.firstInstallTime, digests),
-                applicationInfo.flags and ApplicationInfo.FLAG_STOPPED != 0,
-            )
+            packageSnapshot(packageName, info)
         }.getOrNull()
+    }
+
+    private fun packageSnapshot(packageName: String, info: PackageInfo): TargetPackageSnapshot? {
+        val app = info.applicationInfo ?: return null
+        if (info.packageName != packageName || app.packageName != packageName ||
+            !isUserZeroTargetAppUid(app.uid) || info.firstInstallTime <= 0) return null
+        val signing = info.signingInfo ?: return null
+        val identity = targetPackageIdentity(packageName, info.packageName, app.packageName, app.uid,
+            info.firstInstallTime, signing.apkContentsSigners.orEmpty().map { it.toByteArray() }) ?: return null
+        return TargetPackageSnapshot(identity, app.flags and ApplicationInfo.FLAG_STOPPED != 0)
     }
 
     @Suppress("DEPRECATION")

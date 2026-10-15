@@ -73,13 +73,6 @@ sealed interface SafeCommand {
             "pm", "list", "packages", "--user", "0", "-U", packageName,
         )
 
-        /** Native cmd entry point avoids an intermediary pm shell script in timed trace probes. */
-        fun uidOwnersArgv(uid: Int): List<String> {
-            require(isUserZeroTargetAppUid(uid)) { "Invalid target UID" }
-            return listOf(
-                "cmd", "package", "list", "packages", "--user", "0", "--uid", uid.toString(), "-U",
-            )
-        }
     }
 
     /** Historical fixture/parser descriptor only; retired from the IPC execution allowlist. */
@@ -101,20 +94,6 @@ sealed interface SafeCommand {
         )
     }
 
-    /** Bounded events-buffer snapshot for one freshly validated user-0 target. */
-    data class GetTargetProcessEvents(val uid: Int, val packageName: String) : SafeCommand {
-        init {
-            require(isUserZeroTargetAppUid(uid)) { "Invalid target UID" }
-            require(isSafeAndroidPackageName(packageName)) { "Invalid package name" }
-        }
-
-        override val operationId = "get_selected_target_process_events_user_0"
-        override fun argv() = listOf(
-            "logcat", "-b", "events", "-d", "-t", "256", "-v", "epoch",
-            "am_proc_start:I", "am_uid_active:I", "am_uid_idle:I",
-            "am_uid_running:I", "am_uid_stopped:I", "*:S",
-        )
-    }
 }
 
 fun isUserZeroAppId(uid: Int): Boolean = uid in 1 until 100_000
@@ -141,25 +120,13 @@ object SafeCommandFactory {
             noArguments(uid, packageName, SafeCommand.GetBuildFingerprint)
         SafeCommand.GetGuardianPackage.operationId ->
             noArguments(uid, packageName, SafeCommand.GetGuardianPackage)
-        SafeCommand.GetTargetProcessEvents(10_000, "example.valid").operationId ->
-            targetProcessEvents(uid, packageName)
         else -> null
     }
-
-    private fun targetProcessEvents(uid: Int?, packageName: String?): SafeCommand? =
-        if (uid != null && isUserZeroTargetAppUid(uid) &&
-            packageName != null && isSafeAndroidPackageName(packageName)
-        ) {
-            SafeCommand.GetTargetProcessEvents(uid, packageName)
-        } else {
-            null
-        }
 
     private fun noArguments(
         uid: Int?,
         packageName: String?,
         command: SafeCommand,
     ): SafeCommand? = command.takeIf { uid == null && packageName == null }
-
 
 }

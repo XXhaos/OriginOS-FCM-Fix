@@ -11,6 +11,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ProtectionBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action !in setOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED)) return
+        if (io.github.originosfcmguardian.daemon.DaemonAppRuntime.isRemoteOwned(context)) {
+            io.github.originosfcmguardian.daemon.DaemonAppRuntime.restore(context)
+            return
+        }
         val pending = goAsync()
         val live = AtomicBoolean(true)
         val main = Handler(Looper.getMainLooper())

@@ -40,20 +40,13 @@ internal fun StoppedRecoveryReceipt(
 ) {
     val presentation = stoppedRecoveryReceiptPresentation(state, target)
     presentation?.let { Text(it.text, color = it.tone.color(), style = MaterialTheme.typography.bodySmall) }
-    if (presentation?.tone != TargetStatusTone.SUCCESS) {
-        state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-    }
     state.recordedAtMillis?.let {
-        Text("上次操作记录：${formatRecordTime(it)}；不代表当前状态", style = MaterialTheme.typography.bodySmall)
-    }
-    state.recordSource?.let {
-        Text(if (it == io.github.originosfcmguardian.recovery.StoppedRecoverySource.AUTOMATIC) "操作来源：自动保护" else "操作来源：手动恢复",
-            style = MaterialTheme.typography.bodySmall)
+        Text("上次操作：${formatRecordTime(it)}", style = MaterialTheme.typography.bodySmall)
     }
     if (state.needsReconcile) {
         OutlinedButton(onClick = onReconcile,
             enabled = state.loaded && !state.busy && !state.storageBlocked && !reconcileBusy) {
-            Text(if (state.busy) "核对中…" else "核对上次结果（只读）")
+            Text(if (state.busy) "核对中…" else "核对上次结果")
         }
     }
 }
@@ -71,8 +64,8 @@ internal fun StoppedRecoveryConfirmation(onConfirm: () -> Unit, onDismiss: () ->
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("恢复 $targetLabel 接收？") },
-        text = { Text("$packageName\n仅解除这个应用当前安装的停止限制，可能允许后台运行和补收消息；不会打开应用，也不要求常驻。\n\n不保证通知送达。已触发的后台运行或消息处理无法精确撤销，也不会通过强行停止回滚。仅在你现在希望接收消息时确认。") },
-        confirmButton = { Button(onClick = onConfirm) { Text("确认恢复") } },
+        text = { Text("允许解除 $targetLabel 的后台唤醒限制，以恢复通知接收。") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("确认恢复") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

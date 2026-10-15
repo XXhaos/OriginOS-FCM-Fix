@@ -160,6 +160,19 @@ internal class ProtectionConsentStore(private val storage: ProtectionAuthoritySt
         storage.exclusive { matches(storage.read(), lease) }
     } catch (_: Exception) { false }
 
+    /** One current locked snapshot for a whole-group gate, never cached across calls or dispatched
+     * as write authority. Single-target checks immediately before recovery remain independent. */
+    fun verifyAllAuthorized(leases: List<TargetConsentLease>): Boolean {
+        // Preserve the previous List.all empty-list semantics; this does not create a grant.
+        if (leases.isEmpty()) return true
+        return try {
+            storage.exclusive {
+                val current = storage.read()
+                leases.all { matches(current, it) }
+            }
+        } catch (_: Exception) { false }
+    }
+
     /**
      * Fresh production admission under the authority lock. Reads the exact current root and consent,
      * without clocks, budget normalization or writes. Recover is eligibility only: dispatch must still

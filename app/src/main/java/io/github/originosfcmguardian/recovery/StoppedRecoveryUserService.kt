@@ -28,6 +28,9 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
     @Keep constructor(@Suppress("UNUSED_PARAMETER") context: Context) : super()
 
     private val closed = AtomicBoolean(false)
+    private val activity = io.github.originosfcmguardian.privileged.PrivilegedWorkerActivity()
+    private val callbackActivity = io.github.originosfcmguardian.privileged.PrivilegedWorkerActivity()
+    private val retainedChildren = java.util.concurrent.ConcurrentHashMap.newKeySet<Process>()
     private val running = AtomicReference<Process?>()
     private val gate = Any()
     private val executor = recoveryWorker("guardian-recovery-server")
@@ -38,6 +41,12 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
     }, lifetimeMillis = 45_000)
 
     override fun getServiceUid(): Int = Os.getuid()
+    override fun isWorkQuiescent(): Boolean {
+        retainedChildren.removeIf { runCatching { !it.isAlive }.getOrDefault(false) }
+        return getServiceUid() == 2000 && closed.get() && activity.isQuiescent() &&
+            callbackActivity.isQuiescent() && reader.isQuiescent() && retainedChildren.isEmpty() &&
+            PackageUnstopCapability.isQuiescent()
+    }
     override fun destroy() { expiry.terminateNow() }
     override fun cancel() = synchronized(gate) {
         closed.set(true)
@@ -65,7 +74,7 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
             val process = synchronized(gate) {
                 check(active())
                 ProcessBuilder(stoppedRecoveryArgv(identity)).redirectOutput(File("/dev/null")).redirectError(File("/dev/null")).start()
-                    .also { running.set(it); it.outputStream.close() }
+                    .also { retainedChildren.add(it); running.set(it); it.outputStream.close() }
             }
             try {
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
@@ -91,10 +100,13 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
         val active = { !closed.get() && System.nanoTime() < deadline }
         var linked = false
         var future: java.util.concurrent.Future<String>? = null
+        val settlement = activity.track()
         try {
             require(id > 0 && caller in 10_000..99_999 && Os.getuid() == 2000)
             binder.linkToDeath(death, 0); linked = true
             future = executor.submit<String> {
+                check(settlement.workerEntered())
+                try {
                 check(active())
                 // Fresh system PackageManager ownership, never accept merely an app-range caller UID.
                 check(SystemStoppedIdentityReadPort().packagesForUid(caller) == listOf(GUARDIAN_PACKAGE))
@@ -103,6 +115,7 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
                 body({ request -> reader.read(request) { !active() } },
                     { request, expected -> readTargetRecoveryObservation(reader, request, expected, active, sessionActive) },
                     sessionActive, active)
+                } finally { settlement.workerEnded(false, null) }
             }
             while (active()) {
                 try { return future.get(50, TimeUnit.MILLISECONDS) }
@@ -115,12 +128,13 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
             // Each service binding admits one operation at a time; a timeout closes it permanently.
             if (!active()) cancel()
             future?.cancel(true)
+            settlement.abandonQueued()
             if (linked) runCatching { binder.unlinkToDeath(death, 0) }
         }
     }
 
     private fun <T> callback(localActive: () -> Boolean, block: () -> T): T =
-        boundedRecoveryCallback(callbacks, localActive, ::cancel, block = block)
+        boundedRecoveryCallback(callbacks, localActive, ::cancel, activity = callbackActivity, block = block)
     private companion object {
         const val GUARDIAN_PACKAGE = "io.github.originosfcmguardian"
     }

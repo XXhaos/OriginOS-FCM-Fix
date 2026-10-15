@@ -45,6 +45,6 @@ class AppRecheckPresentationTest {
         val changed = target.copy(status = TargetAutostartStatus.IDENTITY_CHANGED,
             stoppedSnapshot = TargetStoppedSnapshot(TargetStoppedStatus.NOT_STOPPED, 10))
         assertEquals(TargetStatusTone.UNCERTAIN, appRecheckResult(changed, false).tone)
-        assertEquals("复检结果：应用身份已变化，请重新选择", appRecheckResult(changed, false).text)
+        assertEquals("复检结果：应用已变化，请重新选择", appRecheckResult(changed, false).text)
     }
 }

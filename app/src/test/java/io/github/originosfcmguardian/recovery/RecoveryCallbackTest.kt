@@ -13,6 +13,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class RecoveryCallbackTest {
+    @Test fun migrationSettlementDoesNotFollowFutureCancellationOfRunningCallback() {
+        val worker = recoveryCallbackWorker("migration-callback-test")
+        val activity = io.github.originosfcmguardian.privileged.PrivilegedWorkerActivity()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        try {
+            assertThrows(TimeoutException::class.java) {
+                boundedRecoveryCallback(worker, { true }, {}, 100, activity = activity) {
+                    entered.countDown()
+                    while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
+                    true
+                }
+            }
+            assertEquals(0L, entered.count)
+            assertFalse(activity.isQuiescent())
+            release.countDown()
+            worker.submit<Int> { 1 }.get(2, TimeUnit.SECONDS)
+            assertTrue(activity.isQuiescent())
+        } finally { release.countDown(); worker.shutdownNow() }
+    }
     /** Holds afterExecute after Future completion, reproducing the old handoff race exactly. */
     private class HeldHandoff : AutoCloseable {
         val held = CountDownLatch(1)

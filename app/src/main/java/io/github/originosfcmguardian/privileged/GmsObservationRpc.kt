@@ -7,13 +7,92 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlin.coroutines.resume
 
-internal class GmsObservationRpc(private val budgetMillis: Long = 11_000) {
+internal enum class GmsRpcLane {
+    BACKGROUND_OBSERVATION, INTERACTIVE_OBSERVATION, HEARTBEAT_WRITE, REVOKE,
+}
+
+/** Process lifetime ownership, not a pool per short-lived binding or polling cycle. */
+internal object ProcessGmsRpcLanes {
+    private val owner = GmsRpcLanes()
+    fun lane(lane: GmsRpcLane): GmsObservationRpc = owner.lane(lane)
+    val cleanup: GmsBindingCleanup get() = owner.cleanup
+    fun isQuiescent(): Boolean = GmsRpcLane.entries.all { lane(it).isQuiescent() }
+}
+
+/** Separately owned in tests so fault injection never poisons the process singleton. */
+internal class GmsRpcLanes(budgetMillis: Long = 11_000) : AutoCloseable {
+    val cleanup = GmsBindingCleanup()
+    private val lanes = GmsRpcLane.entries.associateWith {
+        GmsObservationRpc(budgetMillis, "guardian-gms-${it.name.lowercase()}")
+    }
+    fun lane(lane: GmsRpcLane): GmsObservationRpc = lanes.getValue(lane)
+    override fun close() { lanes.values.forEach { it.close() }; cleanup.close() }
+}
+
+/** Reserve cleanup capacity before binding, so healthy concurrent retirements cannot be dropped. */
+internal class GmsBindingCleanup(private val capacity: Int = 8) : AutoCloseable {
+    init { require(capacity > 0) }
+    private val worker = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, ArrayBlockingQueue(capacity),
+        { runnable -> Thread(runnable, "guardian-gms-cleanup").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
+    private val retained = mutableSetOf<Lease>()
+    private var closed = false
+
+    inner class Lease internal constructor() {
+        internal var action: (() -> Unit)? = null
+        internal var queued = false
+        /** May be called repeatedly by retirement and stale callbacks; only one cleanup runs. */
+        fun cleanup(action: () -> Unit) = synchronized(this@GmsBindingCleanup) {
+            if (this !in retained) return@synchronized
+            if (this.action == null) this.action = action
+            submit(this)
+        }
+        /** Valid only when binding never started, hence no manager connection needs removal. */
+        fun unused() = synchronized(this@GmsBindingCleanup) {
+            check(!queued && action == null)
+            retained.remove(this)
+            Unit
+        }
+    }
+
+    @Synchronized fun acquire(): Lease? {
+        if (closed) return null
+        // Retry a failed unbind only on a later external opportunity, never a hot loop.
+        retained.toList().forEach(::submit)
+        if (retained.size >= capacity) return null
+        return Lease().also { retained.add(it) }
+    }
+
+    private fun submit(lease: Lease) {
+        val action = lease.action ?: return
+        if (closed || lease.queued) return
+        lease.queued = true
+        try {
+            worker.execute {
+                var success = false
+                try { action(); success = true } catch (_: Throwable) { }
+                finally {
+                    synchronized(this) {
+                        lease.queued = false
+                        if (success) retained.remove(lease)
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) { lease.queued = false }
+    }
+
+    @Synchronized override fun close() { closed = true; worker.shutdownNow() }
+}
+
+internal class GmsObservationRpc(
+    private val budgetMillis: Long = 11_000,
+    workerName: String = "guardian-gms-observation-rpc",
+) {
     init { require(budgetMillis in 1..11_000) }
     // Capacity one is only a completion handoff: busy stays set through stuck actions, so
     // abandoned system calls cannot accumulate queued work. Release before continuation resume.
-    private val reader = worker("guardian-gms-observation-rpc", handoff = true)
+    private val reader = worker(workerName)
     private val readerBusy = AtomicBoolean(false)
-    private val cleanup = worker("guardian-gms-observation-cleanup")
+    internal fun isQuiescent(): Boolean = !readerBusy.get()
     /** Also bounds synchronous availability and binding Binder calls before the read endpoint. */
     suspend fun <T> bounded(action: () -> T): T = withTimeout(budgetMillis) {
         suspendCancellableCoroutine { continuation ->
@@ -65,11 +144,18 @@ internal class GmsObservationRpc(private val budgetMillis: Long = 11_000) {
             unknown(if (cancelled is TimeoutCancellationException) GmsUnknown.TIMED_OUT else GmsUnknown.CANCELLED)
         }
     }
-    fun cleanupBestEffort(action: () -> Unit) {
-        try { cleanup.execute { runCatching(action) } } catch (_: RejectedExecutionException) { }
+    /** Uses the same admission as bounded calls; production cleanup uses the independent REVOKE lane. */
+    fun cleanupBestEffort(action: () -> Unit): Boolean {
+        if (!readerBusy.compareAndSet(false, true)) return false
+        return try {
+            reader.execute {
+                try { runCatching(action) } finally { readerBusy.set(false) }
+            }
+            true
+        } catch (_: RejectedExecutionException) { readerBusy.set(false); false }
     }
-    fun close() { reader.shutdownNow(); cleanup.shutdown() }
-    private fun worker(name: String, handoff: Boolean = false) = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS,
-        if (handoff) ArrayBlockingQueue(1) else SynchronousQueue(),
+    fun close() { reader.shutdownNow() }
+    private fun worker(name: String) = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS,
+        ArrayBlockingQueue(1),
         { runnable -> Thread(runnable, name).apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
 }

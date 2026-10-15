@@ -36,7 +36,7 @@ internal fun GmsAutoHeartbeatControls(state: GmsAutoHeartbeatUiState, hostReady:
     onEnable: () -> Unit, onDisable: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("低频心跳（试用）", style = MaterialTheme.typography.titleSmall)
+            Text("低频心跳", style = MaterialTheme.typography.titleSmall)
             Text(gmsAutoHeartbeatHeadline(state), style = MaterialTheme.typography.bodySmall)
         }
         Switch(checked = state.configured,

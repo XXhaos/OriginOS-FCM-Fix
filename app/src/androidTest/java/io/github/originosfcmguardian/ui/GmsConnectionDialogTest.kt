@@ -53,7 +53,7 @@ class GmsConnectionDialogTest {
             networkBackground = "合成网络背景", networkTrackingAvailable = true))
         compose.setContent { MaterialTheme { GmsConnectionDialog(state.value, {}, {}, {}) } }
         assertStatus("FCM 状态未知，取样更新于")
-        compose.onNodeWithText("状态仅供参考，不代表消息送达。").assertExists()
+        compose.onNodeWithText("状态仅供参考，不代表消息送达。").assertDoesNotExist()
         assertDebugDataHidden()
         compose.runOnIdle { state.value = state.value.copy(observation = sample(partial = true)) }
         assertStatus("FCM 状态未知，取样更新于")
@@ -84,7 +84,7 @@ class GmsConnectionDialogTest {
         compose.runOnIdle { assertEquals(0, heartbeats) }
         compose.onNodeWithText("触发一次心跳").performClick()
         compose.runOnIdle { state.value = state.value.copy(heartbeatStatus = GmsHeartbeatStatus.REQUESTED) }
-        compose.onNodeWithText("已请求心跳；不代表连接已修复或通知送达。").assertExists()
+        compose.onNodeWithText("已请求心跳。").assertExists()
         compose.runOnIdle { assertEquals(1, heartbeats) }
     }
 

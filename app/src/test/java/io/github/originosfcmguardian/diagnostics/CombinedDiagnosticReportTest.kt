@@ -3,27 +3,6 @@ package io.github.originosfcmguardian.diagnostics
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
-import io.github.originosfcmguardian.core.trace.ProcessTraceEvent
-import io.github.originosfcmguardian.core.trace.ProcessTraceKind
-import io.github.originosfcmguardian.core.trace.ProcessTraceTarget
-import io.github.originosfcmguardian.fcm.FcmReceipt
-import io.github.originosfcmguardian.fcm.FcmUiState
-import io.github.originosfcmguardian.fcm.MessagePriority
-import io.github.originosfcmguardian.fcm.NetworkAvailability
-import io.github.originosfcmguardian.fcm.NotificationOutcome
-import io.github.originosfcmguardian.fcm.ObservedBoolean
-import io.github.originosfcmguardian.fcm.SensitiveToken
-import io.github.originosfcmguardian.monitoring.DeepMonitoringUiState
-import io.github.originosfcmguardian.monitoring.MonitorSession
-import io.github.originosfcmguardian.monitoring.MonitorSessionStatus
-import io.github.originosfcmguardian.notification.NotificationFact
-import io.github.originosfcmguardian.notification.NotificationFactKind
-import io.github.originosfcmguardian.notification.NotificationFactsUiState
-import io.github.originosfcmguardian.protection.DailyProtectionReport
-import io.github.originosfcmguardian.protection.ProtectionCheckReason
-import io.github.originosfcmguardian.protection.ProtectionCheckStatus
-import io.github.originosfcmguardian.protection.TargetCheckResult
-import io.github.originosfcmguardian.protection.TargetCheckStatus
 import io.github.originosfcmguardian.ui.HomeSourceLoadState
 import io.github.originosfcmguardian.ui.HomeUiState
 import org.junit.Assert.assertArrayEquals
@@ -86,38 +65,28 @@ class CombinedDiagnosticReportTest {
         assertTrue(json.contains("\"requestStatus\":\"UNKNOWN\""))
         assertTrue(json.contains("\"requestReason\":\"TIMED_OUT\""))
         assertFalse(json.contains("binding")); assertFalse(json.contains("SenderProxy"))
-        assertTrue(encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8).contains("FCM 恢复试用事件"))
+        assertTrue(encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8).contains("FCM 恢复事件"))
     }
     @Test
-    fun fcmFocusedExportPreservesPrivilegeStatusAndNamesTheNarrowDailyScope() {
+    fun fcmFocusedExportPreservesPrivilegeStatusAndRetiredInspectionTombstone() {
         val base = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9000)
         listOf("READY_SHELL", "NOT_RUNNING").forEach { status ->
             val json = encodeCombinedDiagnosticReport(base.copy(shizukuStatus = status)).toString(Charsets.UTF_8)
             assertTrue(json.contains("\"shizukuStatus\":\"$status\""))
             assertTrue(json.contains("\"scope\":\"SELECTED_APP_INSTALLATION_IDENTITY_ONLY\""))
-            assertTrue(json.contains("not stopped flags, FCM connectivity, or notification delivery"))
+            assertTrue(json.contains("\"retired\":true,\"status\":null,\"checkedAtEpochMillis\":null"))
             assertFalse(json.contains("\"gms\":"))
             assertFalse(json.contains("\"privilegedDetection\":"))
         }
     }
 
     @Test
-    fun retiredAutostartHistoryCannotExportCurrentHealthyOrNeedsActionStatus() {
-        listOf(ProtectionCheckStatus.HEALTHY_READ_ONLY, ProtectionCheckStatus.NEEDS_USER_ACTION).forEach { status ->
-            val historical = DailyProtectionReport(1000, ProtectionCheckReason.MANUAL, "known", status,
-                "historical", listOf(TargetCheckResult(PACKAGE_NAME, TargetCheckStatus.ALLOWED)))
-            val projected = buildCombinedDiagnosticReport(HomeUiState(
-                dailyProtectionLoadState = HomeSourceLoadState.LOADED,
-                dailyProtectionReport = historical,
-            ), environment(), 9000)
-            assertEquals("UNKNOWN", projected.dailyProtectionStatus)
-            assertEquals(1000L, projected.dailyProtectionCheckedAtEpochMillis)
-            assertEquals(DiagnosticSourceAvailability.PARTIAL, projected.sourceAvailability["dailyProtection"])
-            val json = encodeCombinedDiagnosticReport(projected).toString(Charsets.UTF_8)
-            assertFalse(json.contains("ALLOWED"))
-            assertFalse(json.contains(status.name))
-            assertEquals(status, historical.status)
-        }
+    fun retiredInspectionHasNoCurrentDataAndStaysUnavailable() {
+        val projected = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9000)
+        assertEquals(DiagnosticSourceAvailability.UNAVAILABLE, projected.sourceAvailability["dailyProtection"])
+        val json = encodeCombinedDiagnosticReport(projected).toString(Charsets.UTF_8)
+        assertTrue(json.contains("\"retired\":true,\"status\":null,\"checkedAtEpochMillis\":null"))
+        assertTrue(json.contains("SCHEDULED_READ_ONLY_INSPECTION"))
     }
 
     @Test
@@ -132,70 +101,17 @@ class CombinedDiagnosticReportTest {
                     status = TargetAutostartStatus.ALLOWED,
                 ),
             ),
-            fcm = FcmUiState(
-                token = SensitiveToken("secret-fcm-token"),
-                latestReceipt = FcmReceipt(
-                    testId = "sensitive-test-id",
-                    sentAtEpochMillis = 1_000,
-                    receivedAtEpochMillis = 2_000,
-                    receivedAtElapsedMillis = 8_000,
-                    messagePriority = MessagePriority.HIGH,
-                    deviceInteractive = ObservedBoolean.NO,
-                    deviceIdleMode = ObservedBoolean.YES,
-                    networkAvailability = NetworkAvailability.AVAILABLE,
-                    notificationOutcome = NotificationOutcome.POST_REQUESTED,
-                    handlerDurationMillis = 20,
-                    processStartedAtElapsedMillis = 7_500,
-                ),
-            ),
-            fcmEvidenceLoadState = HomeSourceLoadState.LOADED,
-            notificationFacts = NotificationFactsUiState(
-                enabled = true,
-                accessGranted = true,
-                connected = true,
-                targetCount = 1,
-                events = listOf(
-                    NotificationFact(PACKAGE_NAME, 4_000, NotificationFactKind.POSTED_OR_UPDATED),
-                    NotificationFact(PACKAGE_NAME, 3_000, NotificationFactKind.REMOVED),
-                ),
-            ),
-            notificationFactsLoadState = HomeSourceLoadState.LOADED,
-            deepMonitoring = DeepMonitoringUiState(
-                session = MonitorSession(
-                    id = "sensitive-session-id",
-                    identity = identity,
-                    startedAtEpochMillis = 2_500,
-                    deadlineEpochMillis = 32_500,
-                    status = MonitorSessionStatus.STOPPED,
-                    events = listOf(
-                        ProcessTraceEvent(
-                            timestampEpochMillis = 2_600,
-                            target = ProcessTraceTarget(PACKAGE_NAME, SENSITIVE_UID),
-                            kind = ProcessTraceKind.PROCESS_START,
-                            pid = SENSITIVE_PID,
-                        ),
-                        ProcessTraceEvent(2_601, ProcessTraceTarget(PACKAGE_NAME, SENSITIVE_UID), ProcessTraceKind.UID_RUNNING),
-                        ProcessTraceEvent(2_602, ProcessTraceTarget(PACKAGE_NAME, SENSITIVE_UID), ProcessTraceKind.UID_STOPPED),
-                    ),
-                    pollCount = 2,
-                ),
-            ),
-            deepMonitoringLoadState = HomeSourceLoadState.LOADED,
+
         )
 
         val report = buildCombinedDiagnosticReport(state, environment(), 9_000)
         val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
 
-        assertTrue(json.contains("guardian.combined-diagnostic.v8"))
+        assertTrue(json.contains("guardian.combined-diagnostic.v13"))
         assertFalse(json.contains("guardianAutostartStatus"))
         assertFalse(json.contains("autostartStatus"))
         assertFalse(json.contains("ALLOWED"))
         assertTrue(json.contains("Private \\\"App\\\"\\nName"))
-        assertTrue(json.contains("\"retainedCount\":2"))
-        assertTrue(json.contains("\"processStartCount\":1"))
-        assertTrue(json.contains("\"uidRunningCount\":1"))
-        assertTrue(json.contains("\"uidStoppedCount\":1"))
-        assertTrue(json.contains("\"retainedEventCount\":3"))
         assertTrue(json.contains("\"fcmToNotificationCausality\":\"UNKNOWN\""))
         assertFalse(json.contains("secret-fcm-token"))
         assertFalse(json.contains("sensitive-test-id"))
@@ -210,26 +126,14 @@ class CombinedDiagnosticReportTest {
     fun corruptAndMissingSourcesStayDistinctFromEmptySources() {
         val state = HomeUiState(
             targetSelectionStoreCorrupt = true,
-            fcm = FcmUiState(evidenceCorrupt = true),
-            notificationFacts = NotificationFactsUiState(
-                events = listOf(NotificationFact(PACKAGE_NAME, 4_000, NotificationFactKind.REMOVED)),
-                historyCorrupt = true,
-            ),
-            deepMonitoring = DeepMonitoringUiState(historyCorrupt = true),
+
         )
 
         val report = buildCombinedDiagnosticReport(state, environment(), 9_000)
 
         assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["targetSelection"])
-        assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["fcmEvidence"])
-        assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["notificationFacts"])
-        assertEquals(DiagnosticSourceAvailability.CORRUPT, report.sourceAvailability["recentMonitor"])
         assertNull(report.targets)
-        assertNull(report.latestFcmReceipt)
-        assertNull(report.notificationFacts)
-        assertNull(report.monitor)
         val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
-        assertTrue(json.contains("\"notificationFacts\":\"CORRUPT\""))
         assertTrue(json.contains("must not be interpreted as empty or healthy"))
     }
 
@@ -238,83 +142,38 @@ class CombinedDiagnosticReportTest {
         val pending = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9_000)
 
         assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["targetSelection"])
-        assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["fcmEvidence"])
-        assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["notificationFacts"])
-        assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["recentMonitor"])
-        assertEquals(DiagnosticSourceAvailability.LOADING, pending.sourceAvailability["dailyProtection"])
+        assertEquals(DiagnosticSourceAvailability.UNAVAILABLE, pending.sourceAvailability["dailyProtection"])
         assertNull(pending.targets)
-        assertNull(pending.notificationFacts)
-        assertNull(pending.monitor)
 
         val confirmedEmpty = buildCombinedDiagnosticReport(
             HomeUiState(
                 targetSelectionLoadState = HomeSourceLoadState.LOADED,
-                fcmEvidenceLoadState = HomeSourceLoadState.LOADED,
-                notificationFactsLoadState = HomeSourceLoadState.LOADED,
-                deepMonitoringLoadState = HomeSourceLoadState.LOADED,
-                dailyProtectionLoadState = HomeSourceLoadState.LOADED,
+
             ),
             environment(),
             9_000,
         )
         assertEquals(DiagnosticSourceAvailability.EMPTY, confirmedEmpty.sourceAvailability["targetSelection"])
-        assertEquals(DiagnosticSourceAvailability.EMPTY, confirmedEmpty.sourceAvailability["fcmEvidence"])
-        assertEquals(DiagnosticSourceAvailability.EMPTY, confirmedEmpty.sourceAvailability["notificationFacts"])
-        assertEquals(DiagnosticSourceAvailability.EMPTY, confirmedEmpty.sourceAvailability["recentMonitor"])
-        assertEquals(DiagnosticSourceAvailability.EMPTY, confirmedEmpty.sourceAvailability["dailyProtection"])
+        assertEquals(DiagnosticSourceAvailability.UNAVAILABLE, confirmedEmpty.sourceAvailability["dailyProtection"])
         assertEquals(emptyList<DiagnosticTarget>(), confirmedEmpty.targets)
-        assertEquals(0, confirmedEmpty.notificationFacts?.retainedCount)
 
         val failed = buildCombinedDiagnosticReport(
             HomeUiState(
                 targetSelectionLoadState = HomeSourceLoadState.FAILED,
-                fcmEvidenceLoadState = HomeSourceLoadState.FAILED,
-                notificationFactsLoadState = HomeSourceLoadState.FAILED,
-                deepMonitoringLoadState = HomeSourceLoadState.FAILED,
-                dailyProtectionLoadState = HomeSourceLoadState.FAILED,
+
             ),
             environment(),
             9_000,
         )
         assertTrue(failed.sourceAvailability.filterKeys {
-            it != "stoppedRecovery" && it != "automaticProtection"
+            it != "stoppedRecovery" && it != "automaticProtection" && it != "fcmRecoveryEpisodes"
         }.values.all { it == DiagnosticSourceAvailability.UNAVAILABLE || it == DiagnosticSourceAvailability.MISSING })
         assertEquals(DiagnosticSourceAvailability.LOADING, failed.sourceAvailability["stoppedRecovery"])
         assertEquals(DiagnosticSourceAvailability.AVAILABLE, failed.sourceAvailability["automaticProtection"])
         val json = encodeCombinedDiagnosticReport(failed).toString(Charsets.UTF_8)
         assertFalse(json.contains("stale-gms-version"))
         assertTrue(json.contains("\"targets\":null"))
-        assertTrue(json.contains("\"notificationFacts\":null"))
         assertTrue(json.contains("sampled independently and may be older"))
-    }
-
-    @Test
-    fun incompleteMonitorStatusesAreAlwaysPartial() {
-        val identity = identity()
-        val incomplete = setOf(
-            MonitorSessionStatus.RUNNING,
-            MonitorSessionStatus.INTERRUPTED,
-            MonitorSessionStatus.UNAVAILABLE,
-            MonitorSessionStatus.IDENTITY_CHANGED,
-            MonitorSessionStatus.LIMIT_REACHED,
-        )
-        incomplete.forEach { status ->
-            val state = HomeUiState(
-                deepMonitoringLoadState = HomeSourceLoadState.LOADED,
-                deepMonitoring = DeepMonitoringUiState(
-                    session = MonitorSession(
-                        id = "session-${status.name.lowercase()}",
-                        identity = identity,
-                        startedAtEpochMillis = 2_500,
-                        deadlineEpochMillis = 32_500,
-                        status = status,
-                        events = emptyList(),
-                    ),
-                ),
-            )
-            val report = buildCombinedDiagnosticReport(state, environment(), 9_000)
-            assertEquals(status.name, DiagnosticSourceAvailability.PARTIAL, report.sourceAvailability["recentMonitor"])
-        }
     }
 
     @Test
@@ -348,7 +207,7 @@ class CombinedDiagnosticReportTest {
 
     @Test
     fun exportFailsAtByteSafetyBoundInsteadOfSilentlyOmittingTargets() {
-        val selected = (0 until 1_000).map { index ->
+        val selected = (0 until MAX_REPORT_BYTES / 100 + 100).map { index ->
             SelectedTargetUiState(
                 identity = identity().copy(
                     packageName = "org.example.privateapp.p$index",
@@ -372,6 +231,26 @@ class CombinedDiagnosticReportTest {
         assertThrows(IllegalArgumentException::class.java) {
             encodeCombinedDiagnosticReport(report)
         }
+    }
+
+    @Test
+    fun removedCollectorsAreExplicitAndCannotBeReportedAsEmptyOrHealthy() {
+        val report = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9_000)
+        assertEquals(setOf("targetSelection", "dailyProtection", "stoppedRecovery", "automaticProtection", "fcmRecoveryEpisodes"),
+            report.sourceAvailability.keys)
+        val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
+        assertTrue(json.contains("\"schema\":\"guardian.combined-diagnostic.v13\""))
+        assertTrue(json.contains("\"removedCapabilities\":[\"DEEP_MONITORING\",\"NOTIFICATION_FACT_COLLECTION\",\"GUARDIAN_FIREBASE_SELF_TEST\",\"SCHEDULED_READ_ONLY_INSPECTION\"]"))
+        listOf("fcm", "notificationFacts", "recentMonitor").forEach { name ->
+            assertFalse(json.contains("\"$name\":"))
+        }
+        assertTrue(json.contains("\"fcmRecoveryTrial\":"))
+        assertTrue(json.contains("\"fcmProtection\":"))
+        assertTrue(json.contains("\"protectionLifecycle\":"))
+        assertTrue(json.contains("\"protectionResources\":"))
+        assertTrue(json.contains("No collection does not prove absence"))
+        assertTrue(encodeCombinedDiagnosticMarkdown(report).toString(Charsets.UTF_8)
+            .contains("未采集不代表没有事件"))
     }
 
     @Test

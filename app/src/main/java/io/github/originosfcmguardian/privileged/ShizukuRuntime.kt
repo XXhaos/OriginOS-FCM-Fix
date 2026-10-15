@@ -39,9 +39,9 @@ class ShizukuRuntime(
             }
         }
 
-    fun start() {
+    fun start(openObservationSession: Boolean = true) {
         if (!started.compareAndSet(false, true)) return
-        executor.openSession()
+        if (openObservationSession) executor.openSession()
         Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
         Shizuku.addBinderDeadListener(binderDeadListener)
         Shizuku.addRequestPermissionResultListener(permissionResultListener)

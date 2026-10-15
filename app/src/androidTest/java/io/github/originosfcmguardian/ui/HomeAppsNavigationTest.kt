@@ -27,8 +27,6 @@ import io.github.originosfcmguardian.autoprotection.AutomaticProtectionTargetSta
 import io.github.originosfcmguardian.autoprotection.masterOffAutomaticProtectionState
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
-import io.github.originosfcmguardian.monitoring.DeepMonitoringUiState
-import io.github.originosfcmguardian.monitoring.MonitorRunPhase
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatusSnapshot
 import org.junit.Assert.assertEquals
@@ -41,6 +39,25 @@ class HomeAppsNavigationTest {
     private val telegram = SelectedTargetUiState(
         SelectedTargetIdentity("org.telegram.messenger", 10123, 1L, listOf("a".repeat(64))), "Telegram")
     private val other = telegram.copy(identity = telegram.identity.copy(packageName = "example.other"), label = "Other")
+
+    @Test fun homeConnectionSettingsIsVisibleInTopCardAndNavigationHasNoProtectionSideEffects() {
+        var actions = 0
+        var starts = 0
+        var stops = 0
+        var checks = 0
+        val state = mutableStateOf(HomeUiState(shizuku = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "ready")))
+        compose.setContent { Fixture(state.value, shizukuAction = { actions++ },
+            startProtection = { starts++ }, stop = { stops++ }, check = { checks++ }) }
+        listOf(ShizukuStatus.READY_SHELL, ShizukuStatus.NOT_RUNNING).forEach { status ->
+            compose.runOnIdle { state.value = state.value.copy(shizuku = ShizukuStatusSnapshot(status, "fixture")) }
+            // No scroll: the shortcut belongs to the first card, not a separate bottom card.
+            compose.onNodeWithContentDescription("连接与后台设置").assertIsDisplayed().performClick()
+            compose.onNodeWithText("工作模式").assertIsDisplayed()
+            compose.onNodeWithText("返回").performClick()
+            compose.onNodeWithContentDescription("连接与后台设置").assertIsDisplayed()
+        }
+        compose.runOnIdle { assertEquals(0, actions); assertEquals(0, starts); assertEquals(0, stops); assertEquals(0, checks) }
+    }
 
     @Test fun homeMissingOrStoppedManagerUsesExistingExplicitActionWithoutAutomaticRequests() {
         var actions = 0
@@ -55,8 +72,8 @@ class HomeAppsNavigationTest {
         compose.onNodeWithText("获取 Shizuku").assertDoesNotExist()
         compose.onNodeWithText("打开 Shizuku").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(2, actions) }
-        compose.onNodeWithText("管理应用（0）").assertExists()
-        compose.onNodeWithText("连接与后台设置").assertExists()
+        compose.onNodeWithText("管理应用（0）").assertDoesNotExist()
+        compose.onNodeWithContentDescription("连接与后台设置").assertExists()
     }
 
     @Test fun homePermissionActionOnlyInvokesShizukuCallbackWithoutProtectionStopOrChecks() {
@@ -111,7 +128,7 @@ class HomeAppsNavigationTest {
 
     @Test fun settingsShowsGeneratedBuildVersionWithoutAddingPrimaryPageContentOrStoppingProtection() {
         var stops = 0
-        val version = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+        val version = BuildConfig.VERSION_NAME
         compose.setContent { Fixture(HomeUiState(), stop = { stops++ }) }
         compose.onNodeWithText("关于").assertDoesNotExist()
         compose.onNodeWithContentDescription("应用标签").performClick()
@@ -134,7 +151,7 @@ class HomeAppsNavigationTest {
         compose.onNodeWithText("原始状态记录").assertDoesNotExist()
         compose.onNodeWithText("定期巡检").assertDoesNotExist()
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("搜索名称或包名").performTextInput("Other")
+        compose.onNodeWithContentDescription("搜索名称或包名").performTextInput("Other")
         compose.onNodeWithTag("app-details:${other.identity.packageName}:true").assertExists()
         compose.onNodeWithText("Telegram").assertDoesNotExist()
         openSettings()
@@ -144,9 +161,9 @@ class HomeAppsNavigationTest {
         try {
             // Discriminate navigation/focus from search filtering before changing production.
             compose.onNodeWithText("返回").assertDoesNotExist()
-            compose.onNodeWithText("已选择（0）").assertExists()
+            compose.onNodeWithContentDescription("已保护（0）").assertExists()
             compose.onNodeWithContentDescription("应用标签").assertIsSelected()
-            compose.onNodeWithText("搜索名称或包名").assertTextContains("Other")
+            compose.onNodeWithContentDescription("搜索名称或包名").assertTextContains("Other")
             compose.onNodeWithTag("app-details:${other.identity.packageName}:true").assertExists()
         } catch (failure: AssertionError) {
             // Synthetic fixture only: contains no installed-app data or pairing secrets.
@@ -168,7 +185,7 @@ class HomeAppsNavigationTest {
         compose.onNodeWithText("移除").assertDoesNotExist()
         compose.onNodeWithText("详情").assertDoesNotExist()
         compose.onNodeWithText("复检").assertExists()
-        compose.onNodeWithText("复检结果：后台唤醒状态尚未检查").assertExists()
+        compose.onNodeWithText("复检结果：尚未检查").assertExists()
     }
 
     @Test fun platformBackReturnsFromSecondaryThenAppsToHome() {
@@ -183,7 +200,7 @@ class HomeAppsNavigationTest {
         compose.runOnIdle { checkNotNull(activity).onBackPressedDispatcher.onBackPressed() }
         compose.onNodeWithText("Shizuku").assertExists()
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("已选择（0）").assertExists()
+        compose.onNodeWithContentDescription("已保护（0）").assertExists()
         compose.runOnIdle { checkNotNull(activity).onBackPressedDispatcher.onBackPressed() }
         compose.onNodeWithText("Shizuku").assertExists()
     }
@@ -201,26 +218,16 @@ class HomeAppsNavigationTest {
         compose.onNodeWithContentDescription("自动保护总开关").assertIsOn().performClick()
         compose.onNodeWithContentDescription("自动保护总开关").assertIsOff()
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("已选择（1）").assertExists()
+        compose.onNodeWithContentDescription("已保护（1）").assertExists()
         compose.onNodeWithContentDescription("Telegram 自动保护选择").assertIsOn()
         openSettings()
         compose.onNodeWithText("诊断").performClick()
         compose.runOnIdle { assertEquals(1, stops); assertEquals(listOf(telegram.identity), state.value.automaticProtection.configuredIdentities) }
     }
 
-    @Test fun activeDiagnosticStopIsVisibleOnHomeAndApps() {
-        var stops = 0
-        compose.setContent { Fixture(HomeUiState(deepMonitoring = DeepMonitoringUiState(phase = MonitorRunPhase.RUNNING)),
-            stopMonitor = { stops++ }) }
-        compose.onNodeWithText("停止监控").assertIsDisplayed().assertIsEnabled().performClick()
-        compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("停止监控").assertIsDisplayed().performClick()
-        compose.runOnIdle { assertEquals(2, stops) }
-    }
-
     private fun openSettings() {
         compose.onNodeWithContentDescription("主页标签").performClick()
-        compose.onNodeWithText("连接与后台设置").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("连接与后台设置").performScrollTo().performClick()
     }
 
     @Composable private fun Fixture(state: HomeUiState, stop: () -> Unit = {}, stopMonitor: () -> Unit = {},
@@ -231,11 +238,9 @@ class HomeAppsNavigationTest {
         MaterialTheme { HomeScreen(state = visibleState, onShizukuAction = shizukuAction,
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = { check() },
-            onRunDailyProtection = check, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},
-            onToggleFcmTokenVisibility = {}, onCopyFcmToken = {}, onClearFcmToken = {},
-            onRequestNotificationPermission = {}, onSetNotificationFactsEnabled = {},
-            onOpenNotificationListenerSettings = {}, onClearNotificationFactsHistory = {},
-            onExportNotificationFacts = {}, onStopAutomaticProtection = stop, onStopDeepMonitoring = stopMonitor,
+            onClearCorruptTargetSelection = {},
+
+             onStopAutomaticProtection = stop,
             onRequestAutomaticProtection = startProtection, onConfirmAutomaticProtection = startProtection,
             onRequestAppAutomaticProtection = { startProtection() }) }
     }

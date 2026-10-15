@@ -50,6 +50,21 @@ internal data class HeartbeatHost(val id: String, val eligible: suspend () -> Bo
 
 internal enum class BundledHeartbeatProvision { DEFERRED, ASSOCIATED, BLOCKED }
 
+/** Migration does not normalize pending/UNKNOWN roots or manufacture fresh consent. */
+internal fun cleanHeartbeatDaemonMigrationRoot(saved: HeartbeatSnapshot?): Boolean = saved == null ||
+    saved.remoteSessionId == null && saved.pendingArm == null && saved.pendingAttempt == null &&
+        saved.pause != HeartbeatPause.OFF_PENDING && (!saved.configured ||
+        saved.pause == HeartbeatPause.WAITING_HOST && saved.resumeBlock == null &&
+            saved.durableConsent != null && saved.callerIdentity != null && !saved.currentEpochUnknown())
+
+/** Raw cold preference only. The daemon must independently qualify the previous process before arming. */
+internal fun inertColdHeartbeatDaemonMigrationRoot(saved: HeartbeatSnapshot?): Boolean = saved != null &&
+    saved.schemaVersion == 3 && saved.configured && saved.durableConsent?.version in 2..3 &&
+    saved.callerIdentity != null && saved.resumeBlock == null && saved.pendingArm == null &&
+    saved.pendingAttempt == null && saved.lastStatus != GmsHeartbeatStatus.UNKNOWN &&
+    (saved.pause == null && saved.remoteSessionId != null ||
+        saved.pause == HeartbeatPause.WAITING_HOST && saved.remoteSessionId == null)
+
 /** Monotonic, completion-based deadlines. A long sleep never creates historical catch-up attempts. */
 internal class HeartbeatDeadline {
     private var lastObserved: Long? = null
@@ -107,6 +122,62 @@ internal class GmsAutoHeartbeatController(
     private var resumeNotBefore = 0L // Survives host-event/job replacement in this process, not durable authority.
     private val resumeWake = Channel<Unit>(Channel.CONFLATED)
     private var attemptPending = false // synchronous acceptance-driver admission only
+    private var migrationPrepared = false
+    private var migrationClosureEpoch: String? = null
+
+    /** No storage or RPC here: original endpoint ownership is retained for the later drain. */
+    fun prepareForDaemonMigration() = synchronized(this) {
+        migrationPrepared = true
+        migrationClosureEpoch = null
+        host = null
+        closeLocal()
+    }
+
+    suspend fun awaitDaemonMigrationDrain(): Boolean {
+        if (!synchronized(this) { migrationPrepared }) return false
+        fun rememberObservedClosure(saved: HeartbeatSnapshot?) = synchronized(this) {
+            val epoch = saved?.durableConsent?.epoch
+            migrationClosureEpoch = epoch?.takeIf {
+                saved?.configured == true && closedEpoch == it && consentEpoch == it && !disabledLocally && !blockedLocally
+            }
+        }
+        fun localWorkSettled(): Boolean = synchronized(this) {
+            retained == null && armed == null && !uncertainArm && !attemptPending &&
+                schedule == null && resumeJob == null
+        } && scope.coroutineContext[Job]?.children?.none { !it.isCompleted } != false
+        val alreadyClean = try { io.withLock {
+            val saved = store.readForDaemonMigration()
+            val settled = localWorkSettled()
+            val clean = settled &&
+                saved?.lastStatus != GmsHeartbeatStatus.UNKNOWN && cleanHeartbeatDaemonMigrationRoot(saved) &&
+                (saved?.configured != true || inertColdHeartbeatDaemonMigrationRoot(saved))
+            if (clean) rememberObservedClosure(saved)
+            val inert = !clean && settled && inertColdHeartbeatDaemonMigrationRoot(saved)
+            // Inert export never supplies an original-endpoint ACK or a new process qualification.
+            if (inert) synchronized(this) { migrationClosureEpoch = null }
+            clean || inert
+        } } catch (_: Exception) { return false }
+        if (alreadyClean) return true
+        if (synchronized(this) { retained == null || uncertainArm }) return false
+        // Existing stop jobs may precede us. The mutex covers all original arm/request journaling.
+        val stopRevision = synchronized(this) { revision }
+        stopRemote(false, HeartbeatPause.HOST_LOST, false, null, stopRevision)
+        return try { io.withLock {
+            val saved = store.readForDaemonMigration()
+            val clean = localWorkSettled() &&
+                saved?.lastStatus != GmsHeartbeatStatus.UNKNOWN && cleanHeartbeatDaemonMigrationRoot(saved) &&
+                (saved?.configured != true || inertColdHeartbeatDaemonMigrationRoot(saved))
+            if (clean) rememberObservedClosure(saved)
+            clean
+        } } catch (_: Exception) { false }
+    }
+
+    /** Memory proof only; a reconstructed WAITING_HOST file never sets closedEpoch. */
+    fun migrationEndpointClosureAttested(): Boolean = synchronized(this) {
+        migrationPrepared && migrationClosureEpoch != null && migrationClosureEpoch == closedEpoch &&
+            migrationClosureEpoch == consentEpoch && retained == null && armed == null && !uncertainArm &&
+            !disabledLocally && !blockedLocally
+    }
 
     suspend fun initialize() = io.withLock {
         if (initialized) return@withLock
@@ -129,6 +200,7 @@ internal class GmsAutoHeartbeatController(
     }
 
     fun attachHost(next: HeartbeatHost) {
+        if (synchronized(this) { migrationPrepared }) return
         if (synchronized(this) { host?.id == next.id }) return
         val previous = synchronized(this) { host?.takeIf { it.id != next.id } }
         if (previous != null) endHost(previous.id)
@@ -149,6 +221,7 @@ internal class GmsAutoHeartbeatController(
     /** Cheap service readiness hint. Repeated ticks merge; fresh reads are limited to 15-minute attempts. */
     fun hostEligible(id: String) {
         synchronized(this) {
+            if (migrationPrepared) return
             if (host?.id != id || disabledLocally || blockedLocally || closedEpoch == null && coldEpoch == null || resumeJob?.isActive == true) return
             val token = Math.addExact(resumeToken, 1).also { resumeToken = it }
             resumeJob = scope.launch(start = CoroutineStart.LAZY) {
@@ -176,6 +249,7 @@ internal class GmsAutoHeartbeatController(
 
     /** Privilege loss/master OFF/service replacement synchronously invalidates local admission. */
     fun endHost(id: String) {
+        if (synchronized(this) { migrationPrepared }) return
         val shouldPause = synchronized(this) {
             if (host?.id != id) false else {
                 host = null; closeLocal(); true
@@ -186,6 +260,7 @@ internal class GmsAutoHeartbeatController(
 
     /** Host remains attached while paused, so a later explicit confirmation can freshly requalify it. */
     fun privilegeLost(id: String) {
+        if (synchronized(this) { migrationPrepared }) return
         val shouldPause = synchronized(this) {
             if (host?.id != id || armed == null && retained == null && !uncertainArm) false else { closeLocal(); true }
         }
@@ -193,11 +268,13 @@ internal class GmsAutoHeartbeatController(
     }
 
     fun securityLost(id: String) {
+        if (synchronized(this) { migrationPrepared }) return
         val matches = synchronized(this) { if (host?.id != id) false else { closeLocal(); true } }
         if (matches) queueStop(false, HeartbeatPause.RECONFIRM, block = HeartbeatResumeBlock.SECURITY_FAILURE)
     }
 
     fun disable() {
+        if (synchronized(this) { migrationPrepared }) return
         synchronized(this) { disabledLocally = true; consentEpoch = null; closedEpoch = null; coldEpoch = null; closeLocal(); mutable.value = mutable.value.copy(configured = false,
             manualBlocked = true,
             active = false, busy = true, detail = "正在关闭低频心跳；已获准请求仍可能生效") }
@@ -237,6 +314,7 @@ internal class GmsAutoHeartbeatController(
         return io.withLock {
             val entry = synchronized(this) {
                 val failure = when {
+                    migrationPrepared -> "保护执行权正在迁移"
                     mutable.value.busy -> "低频心跳正在处理，当前操作尚未结束"
                     armed != null -> "低频心跳已在当前保护会话确认"
                     retained != null -> "停止待确认：旧会话远端撤权尚未确认，未取得新的自动写权"
@@ -457,7 +535,7 @@ internal class GmsAutoHeartbeatController(
     }
 
     private fun current(owner: HeartbeatHost, expectedRevision: Long): Boolean = synchronized(this) {
-        host === owner && revision == expectedRevision
+        !migrationPrepared && host === owner && revision == expectedRevision
     }
     private fun live(value: Armed): Boolean = synchronized(this) {
         armed === value && current(value.host, value.revision)

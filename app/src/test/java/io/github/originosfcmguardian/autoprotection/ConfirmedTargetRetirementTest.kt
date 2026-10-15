@@ -92,7 +92,7 @@ class ConfirmedTargetRetirementTest {
         for (evidence in listOf(
             value.copy(authorityReadSuccessful = false), value.copy(userUnlocked = false),
             value.copy(exitHistory = StartupExitHistoryStatus.USER_STOPPED),
-            value.copy(exitHistory = StartupExitHistoryStatus.UNKNOWN), value.copy(fingerprint = "different"),
+            value.copy(exitHistory = StartupExitHistoryStatus.UNKNOWN), value.copy(fingerprint = "invalid|fingerprint"),
             value.copy(currentUser = 999), value.copy(privilege = RestartPrivilegeEvidence()),
             value.copy(journal = RestartJournalStatus.PENDING), value.copy(journal = RestartJournalStatus.CORRUPT),
             value.copy(journal = RestartJournalStatus.UNKNOWN), value.copy(budget = AutomaticCheckDecision.Pause("unknown")),

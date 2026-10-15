@@ -10,7 +10,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import io.github.originosfcmguardian.core.gms.*
 import io.github.originosfcmguardian.fcmprotection.*
 
 internal fun fcmProtectionObservationText(state: FcmProtectionUiState, now: Long): String {
@@ -19,18 +18,18 @@ internal fun fcmProtectionObservationText(state: FcmProtectionUiState, now: Long
 internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
     state.storageBlocked -> "记录异常 · 已暂停"
     state.maintenance == FcmMaintenanceState.STOP_PENDING -> "停止待确认"
-    state.busy -> "正在核对统一授权"
-    state.requiresConfirmation -> "部分分支需重新确认"
+    state.busy -> "处理中…"
+    state.requiresConfirmation -> "需要重新确认"
     !state.configured -> "尚未开启"
-    state.maintenance == FcmMaintenanceState.ACTIVE -> "已开启 · 低频维护"
-    state.maintenance == FcmMaintenanceState.WAITING_HOST -> "已保存 · 等待宿主"
-    else -> "已开启 · 维护等待完整连接"
+    state.maintenance == FcmMaintenanceState.ACTIVE -> "已开启"
+    state.maintenance == FcmMaintenanceState.WAITING_HOST -> "等待启动"
+    else -> "等待连接"
 }
 @Composable internal fun FcmProtectionControls(state: FcmProtectionUiState, hostReady: Boolean,
     onEnable: () -> Unit, onDisable: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("FCM 保护（试用）", style = MaterialTheme.typography.titleSmall)
+            Text("FCM 保护", style = MaterialTheme.typography.titleSmall)
             Text(fcmProtectionHeadline(state), style = MaterialTheme.typography.bodySmall)
         }
         Switch(checked = state.configured,
@@ -38,7 +37,8 @@ internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
             enabled = state.configured || hostReady && !state.busy && !state.storageBlocked && state.maintenance != FcmMaintenanceState.STOP_PENDING,
             modifier = Modifier.semantics { contentDescription = "FCM 保护开关" })
     }
-    Text(fcmProtectionGuidance(state), style = MaterialTheme.typography.bodySmall,
+    val guidance = fcmProtectionGuidance(state)
+    if (guidance.isNotEmpty()) Text(guidance, style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (state.requiresConfirmation && hostReady && !state.busy && state.maintenance != FcmMaintenanceState.STOP_PENDING)
         TextButton(onClick = onEnable) { Text("重新确认 FCM 保护") }
@@ -47,20 +47,27 @@ internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
 }
 internal fun fcmProtectionGuidance(state: FcmProtectionUiState): String = when {
     state.storageBlocked -> "记录无法确认，请关闭后重新检查。"
-    state.confirmationFailure != null -> state.confirmationFailure.detail
-    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "上次停止尚未确认，请重试；不会重复发送请求。"
-    state.requiresConfirmation -> "重启或权限变化后，请重新确认恢复授权。"
+    state.confirmationFailure != null -> when (state.confirmationFailure) {
+        FcmProtectionConfirmationFailure.HOST_UNAVAILABLE -> "请开启自动保护，并启动 Shizuku。"
+        FcmProtectionConfirmationFailure.BUSY -> "请稍后重试。"
+        FcmProtectionConfirmationFailure.STOP_PENDING -> "请先重试确认停止。"
+        FcmProtectionConfirmationFailure.READ_UNAVAILABLE -> "无法读取连接状态，请稍后重试。"
+        FcmProtectionConfirmationFailure.NOT_QUALIFIED -> "无法确认 Google Play 服务状态，请稍后重试。"
+        FcmProtectionConfirmationFailure.SHELL_UNAVAILABLE -> "请启动 Shizuku 并授权。"
+        FcmProtectionConfirmationFailure.NETWORK_UNAVAILABLE -> "请检查网络后重试。"
+        FcmProtectionConfirmationFailure.HOST_CHANGED -> "开启未完成，请重试。"
+    }
+    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "请重试确认停止。"
+    state.requiresConfirmation -> "请重新确认以继续保护。"
     state.maintenance == FcmMaintenanceState.WAITING_HOST -> "请开启自动保护，并启动 Shizuku。"
-    else -> "低频维护连接；确认服务缺失时尝试恢复，不保证消息送达。"
+    else -> ""
 }
 @Composable internal fun FcmProtectionConfirmation(onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("开启 FCM 保护试用？") },
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("开启 FCM 保护？") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("保存统一授权：连接正常时，最短每 15 分钟尝试维护一次。")
-            Text("自动保护、Shizuku、网络和当前 Google Play 服务版本与安装身份核验通过后，仅在完整确认服务缺失时发送一次公开空请求尝试恢复。已断连、未知或过期状态不触发恢复。")
-            Text("异常、超时或应用重启不会重发；只有新的完整连接记录才允许下一次恢复。维护等待连接，结果不明或停止待确认时暂停。")
-            Text("手机重启后需重新确认恢复授权。旧授权不自动升级，Guardian 不会启动 Shizuku。")
-            Text("仅保存少量无消息内容的事件、整机电量和主进程 CPU 参考，不代表本应用耗电量，也不保证修复或消息送达。")
+            Text("允许 Guardian 自动维护 FCM 连接，并在异常时尝试恢复。")
+            Text("使用前请开启自动保护，并启动和授权 Shizuku。")
+            Text("保存运行记录，不读取消息内容。")
         } },
         confirmButton = { TextButton(onClick = onConfirm) { Text("确认开启 FCM 保护") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })

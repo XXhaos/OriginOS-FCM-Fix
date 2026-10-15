@@ -9,6 +9,137 @@ import org.junit.Test
 import java.util.UUID
 
 class GmsHeartbeatColdControllerTest {
+    @Test fun migrationClosesMemoryFirstThenRequiresOriginalEndpointAcknowledgementWithoutNewConsent() = runBlocking {
+        Fixture(cold = false).use { f ->
+            assertTrue(f.controller.confirmDurable())
+            val before = f.store.read()!!
+            val exact = f.storage.read()
+            f.backend.revokeWait = CompletableDeferred()
+            f.controller.prepareForDaemonMigration()
+            assertEquals(exact, f.storage.read())
+            assertFalse(f.controller.state.value.active)
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+            val drain = async { f.controller.awaitDaemonMigrationDrain() }
+            yield()
+            assertFalse(drain.isCompleted)
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+            assertEquals(1, f.backend.revokes)
+            assertEquals(1, f.backend.arms)
+            f.backend.revokeWait!!.complete(Unit)
+            assertTrue(drain.await())
+            assertTrue(f.controller.migrationEndpointClosureAttested())
+            val after = f.store.read()!!
+            assertEquals(before.durableConsent, after.durableConsent)
+            assertEquals(before.callerIdentity, after.callerIdentity)
+            assertEquals(before.generation, after.generation)
+            assertEquals(before.lastStatus, after.lastStatus)
+            assertTrue(after.configured)
+            assertEquals(HeartbeatPause.WAITING_HOST, after.pause)
+            assertNull(after.remoteSessionId)
+            assertFalse(f.controller.confirmDurable())
+            assertEquals(1, f.backend.arms)
+        }
+    }
+
+    @Test fun migrationExportsColdActiveRootInertWithoutNormalizingOrQualifyingItsOldCaller() = runBlocking {
+        for (version in 2..3) Fixture(cold = true, consentVersion = version).use { f ->
+            val before = f.store.read()
+            f.controller.prepareForDaemonMigration()
+            assertTrue(f.controller.awaitDaemonMigrationDrain())
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+            assertEquals(before, f.store.read())
+            assertEquals(0, f.backend.revokes)
+            assertEquals(0, f.backend.arms)
+            assertEquals(0, f.backend.qualificationCount)
+        }
+    }
+
+    @Test fun coldMigrationWaitsForCurrentWorkersAndNeverReleasesDurableBarriers() = runBlocking {
+        Fixture(cold = true).use { f ->
+            val before = f.store.read()
+            val worker = f.scope.launch { awaitCancellation() }
+            f.controller.prepareForDaemonMigration()
+            assertFalse(f.controller.awaitDaemonMigrationDrain())
+            worker.cancelAndJoin()
+            for (barrier in 0..2) {
+                f.storage.haltPresent = barrier == 0
+                f.storage.interruptedAtomic = barrier == 1
+                f.storage.damagedPending = barrier == 2
+                val events = f.storage.events.toList()
+                assertFalse(f.controller.awaitDaemonMigrationDrain())
+                assertEquals(events, f.storage.events)
+                assertEquals(before, f.store.read())
+            }
+            f.storage.damagedPending = false
+            assertTrue(f.controller.awaitDaemonMigrationDrain())
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+        }
+    }
+
+    @Test fun coldMigrationRejectsEveryUnknownEpochPendingAndNonWaitingPauseWithoutChangingBytes() = runBlocking {
+        Fixture(cold = true).use { f ->
+            val active = f.store.read()!!
+            f.controller.prepareForDaemonMigration()
+            val rejected = listOf(
+                active.copy(lastStatus = GmsHeartbeatStatus.UNKNOWN, lastReason = GmsHeartbeatReason.BRIDGE_UNAVAILABLE,
+                    lastResultEpoch = UUID.randomUUID().toString()),
+                active.copy(pendingAttempt = UUID.randomUUID().toString()),
+                active.copy(pendingArm = UUID.randomUUID().toString()),
+                active.copy(resumeBlock = HeartbeatResumeBlock.UNCERTAIN_OWNER),
+                active.copy(pause = HeartbeatPause.OFF_PENDING),
+                active.copy(pause = HeartbeatPause.HOST_LOST),
+                active.copy(remoteSessionId = null),
+                active.copy(pause = HeartbeatPause.WAITING_HOST),
+                active.copy(pause = HeartbeatPause.WAITING_HOST, remoteSessionId = null,
+                    durableConsent = active.durableConsent!!.copy(version = 1)),
+            )
+            for (saved in rejected) {
+                f.storage.write(saved)
+                val events = f.storage.events.toList()
+                assertFalse(saved.toString(), f.controller.awaitDaemonMigrationDrain())
+                assertEquals(saved, f.store.read())
+                assertEquals(events, f.storage.events)
+                assertFalse(f.controller.migrationEndpointClosureAttested())
+            }
+            assertEquals(0, f.backend.qualificationCount)
+            assertEquals(0, f.backend.arms)
+            assertEquals(0, f.backend.revokes)
+        }
+    }
+
+    @Test fun migrationCannotAcknowledgeAnUnconfirmedOriginalRevoke() = runBlocking {
+        Fixture(cold = false).use { f ->
+            assertTrue(f.controller.confirmDurable())
+            val before = f.store.read()!!
+            f.backend.revokeConfirmed = false
+            f.controller.prepareForDaemonMigration()
+            assertFalse(f.controller.awaitDaemonMigrationDrain())
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+            val after = f.store.read()!!
+            assertTrue(after.configured)
+            assertEquals(before.durableConsent, after.durableConsent)
+            assertEquals(before.remoteSessionId, after.remoteSessionId)
+            assertEquals(HeartbeatPause.OFF_PENDING, after.pause)
+            assertEquals(1, f.backend.arms)
+        }
+    }
+
+    @Test fun cleanWaitingMigrationRootIsReadOnlyAndPendingCannotBecomeClean() = runBlocking {
+        Fixture(cold = true).use { f ->
+            val active = f.store.read()!!
+            val waiting = active.copy(pause = HeartbeatPause.WAITING_HOST, remoteSessionId = null)
+            f.storage.write(waiting)
+            f.controller.prepareForDaemonMigration()
+            assertTrue(f.controller.awaitDaemonMigrationDrain())
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+            assertEquals(waiting, f.store.read())
+            assertFalse(cleanHeartbeatDaemonMigrationRoot(active.copy(pendingAttempt = UUID.randomUUID().toString())))
+            assertFalse(cleanHeartbeatDaemonMigrationRoot(waiting.copy(resumeBlock = HeartbeatResumeBlock.UNKNOWN_RESULT)))
+            assertFalse(cleanHeartbeatDaemonMigrationRoot(waiting.copy(lastStatus = GmsHeartbeatStatus.UNKNOWN,
+                lastReason = GmsHeartbeatReason.BRIDGE_UNAVAILABLE, lastResultEpoch = waiting.durableConsent!!.epoch)))
+            assertEquals(0, f.backend.arms)
+        }
+    }
     private val digest = "c".repeat(64)
     private val oldOwner = GmsHeartbeatCallerIdentity(10123, 5001, 100L, "12345678-1234-1234-1234-123456789abc")
     private val newOwner = oldOwner.copy(pid = 5002, startTicks = 200L)
@@ -30,6 +161,7 @@ class GmsHeartbeatColdControllerTest {
         var beforeArm: (() -> Unit)? = null
         override var manualUnknownSerial = 0L
         var unknownDuringArm = false
+        var revokeConfirmed = true
         override suspend fun qualifyCaller(previous: GmsHeartbeatCallerIdentity?): GmsHeartbeatCallerQualification {
             qualifiedPrevious = previous; qualificationCount++
             return GmsHeartbeatCallerQualification(identity, if (previous == null) GmsHeartbeatCallerReason.CURRENT_ONLY else proof)
@@ -42,7 +174,7 @@ class GmsHeartbeatColdControllerTest {
             return GmsAutoArmResult(if (armReason == GmsAutoArmReason.ARMED) GmsAutoSession(UUID.randomUUID().toString(), generation, digest) else null, armReason)
         }
         override suspend fun request(session: GmsAutoSession, attempt: String): GmsHeartbeatResult { requests++; return result }
-        override suspend fun revoke(session: GmsAutoSession): Boolean { revokes++; revokeWait?.await(); return true }
+        override suspend fun revoke(session: GmsAutoSession): Boolean { revokes++; revokeWait?.await(); return revokeConfirmed }
     }
     private inner class Fixture(cold: Boolean = true, consentVersion: Int = 3, crossBoot: Boolean = false) : AutoCloseable {
         var now = 500_000L; var eligible = true

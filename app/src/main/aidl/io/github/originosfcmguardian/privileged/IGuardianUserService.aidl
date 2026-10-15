@@ -22,4 +22,8 @@ interface IGuardianUserService {
     Bundle qualifyHeartbeatCaller(long requestId, String previousIdentity) = 10;
     // Separate trial consent; exact fixed empty SenderProxy SEND only.
     Bundle requestFcmRecovery(long requestId, String expectedBinding, IFcmRecoveryAuthority authority) = 11;
+    // Separate fixed MCS candidate; preserves the legacy SEND transaction.
+    Bundle requestDisconnectedFcmRecovery(long requestId, String expectedBinding, IFcmRecoveryAuthority authority) = 12;
+    // Original endpoint only. No bind, cancellation, consent or journal mutation.
+    boolean isProtectionWorkQuiescent() = 13;
 }

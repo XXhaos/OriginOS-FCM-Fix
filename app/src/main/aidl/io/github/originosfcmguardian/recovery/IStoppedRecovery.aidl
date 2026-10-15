@@ -8,4 +8,6 @@ interface IStoppedRecovery {
     void cancel() = 4;
     String observeTarget(long requestId, String expectedIdentity, IStoppedRecoveryJournal journal) = 5;
     String recoverTarget(long requestId, String expectedIdentity, IStoppedRecoveryJournal journal) = 6;
+    // Read-only settlement proof from this original disposable endpoint, after cancel.
+    boolean isWorkQuiescent() = 7;
 }

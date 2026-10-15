@@ -29,12 +29,14 @@ class GmsAutomaticHeartbeatTest {
     }
     private inner class Port : GmsConnectionReadPort {
         var callerOwners = listOf("io.github.originosfcmguardian")
+        var versionOffset = 0L
+        var serviceState = sample.gcmService
         override fun environment() = GmsProbeEnvironment(0, 2000, sample.bootId)
         override fun gmsPackage() = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-            sample.uid, sample.versionCode, sample.firstInstallTime, sample.lastUpdateTime, sample.signerSha256)
+            sample.uid, sample.versionCode + versionOffset, sample.firstInstallTime, sample.lastUpdateTime, sample.signerSha256)
         override fun packagesForUid(uid: Int) = if (uid == sample.uid) listOf(GMS_OBSERVATION_PACKAGE) else callerOwners
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(SourceCompleteness.UNAVAILABLE, false)
-        override fun gcmService(interrupted: () -> Boolean) = sample.gcmService
+        override fun gcmService(interrupted: () -> Boolean) = serviceState
         override fun reconnectReceivers() = GmsReceiverInspection(false, emptyList())
         override fun elapsedRealtime() = 900L
     }
@@ -51,6 +53,34 @@ class GmsAutomaticHeartbeatTest {
         override fun waitFor(timeout: Long, unit: TimeUnit): Boolean { if (alive) Thread.sleep(unit.toMillis(timeout)); return !alive }
         override fun destroy() { destroyed = true; destruction.countDown() }
         override fun destroyForcibly(): Process { alive = false; return this }
+    }
+    @Test fun guardedHeartbeatRechecksConnectionAndIdentityAfterOwnershipReads() {
+        val changes: List<(Port) -> Unit> = listOf({ it.versionOffset++ },
+            { it.serviceState = GcmServiceSource(GcmConnectionState.REPORTED_DISCONNECTED, SourceCompleteness.COMPLETE) })
+        for (change in changes) {
+            var time = 0L; var launches = 0
+            val port = Port(); val workerThread = AtomicReference<Thread>()
+            val settled = CountDownLatch(1)
+            val runner = GmsHeartbeatRunner({ workerThread.set(Thread.currentThread()); port },
+                { launches++; Child(accepted) }, clock = { time })
+            val executorField = GmsHeartbeatRunner::class.java.getDeclaredField("worker").apply { isAccessible = true }
+            (executorField.get(runner) as ThreadPoolExecutor).setKeepAliveTime(1, TimeUnit.MILLISECONDS)
+            val fence = object : PrivilegedExecutionFence {
+                override fun prepare(): Boolean { change(port); return true }
+                override fun start(launch: () -> Process) = launch()
+                override fun workerSettled(value: PrivilegedExecutionSettlement) {
+                    assertEquals(PrivilegedExecutionSettlement.NOT_STARTED, value); settled.countDown()
+                }
+            }
+            try {
+                val session = runner.armAutomatic(1, caller, 1, gmsHeartbeatBindingDigest(sample), Lifetime()) { false }.session!!
+                val old = checkNotNull(workerThread.get()); old.join(5000); assertFalse(old.isAlive)
+                time = GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
+                val result = runner.requestAutomaticGuarded(2, caller, session, UUID.randomUUID().toString(), { false }, fence)
+                assertEquals(GmsHeartbeatStatus.NOT_SENT, result.status)
+                assertEquals(0, launches); assertTrue(settled.await(1, TimeUnit.SECONDS))
+            } finally { runner.close() }
+        }
     }
     @Test fun armRequiresExclusiveGuardianCallerAndExactFreshBinding() {
         val bad = Port().apply { callerOwners = listOf("other.pkg") }

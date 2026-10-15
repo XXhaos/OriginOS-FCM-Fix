@@ -51,7 +51,7 @@ class StartupEligibilityTest {
         invalid.forEach { assertEquals(StartupEligibilityStatus.BLOCKED_IDENTITY, startupEligibility(it)) }
     }
 
-    @Test fun `another valid firmware can start with matching consent but OTA requires fresh confirmation`() {
+    @Test fun `legacy policy2 can start on matching firmware but remains bound across OTA`() {
         val firmware = "another/product/device:17/BUILD/123:user/release-keys"
         val differentFirmware = ready.copy(fingerprint = firmware,
             authority = ready.authority!!.copy(token = token.copy(fingerprint = firmware)))

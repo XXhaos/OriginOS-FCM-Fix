@@ -16,9 +16,9 @@ class WorkModePresentationTest {
         assertEquals("打开 Shizuku", shizukuWorkModePresentation(ShizukuStatusSnapshot(ShizukuStatus.PERMISSION_REQUIRED, "", true)).actionLabel)
         val ready = shizukuWorkModePresentation(ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, ""))
         assertNull(ready.actionLabel)
-        assertEquals("已授权 · shell 就绪", ready.statusLabel)
-        assertTrue(ready.summary.contains("保护仍需单独开启"))
-        assertEquals("工作方式：外置 Shizuku", CURRENT_RECOVERY_BACKEND_LABEL)
+        assertEquals("已就绪", ready.statusLabel)
+        assertTrue(ready.summary.isBlank())
+        assertEquals("Shizuku", CURRENT_RECOVERY_BACKEND_LABEL)
     }
 
     @Test fun rootAndErrorAreActionableButNeverPresentedAsReady() {

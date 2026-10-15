@@ -13,9 +13,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import io.github.originosfcmguardian.core.gms.*
-import io.github.originosfcmguardian.protection.DailyProtectionReport
-import io.github.originosfcmguardian.protection.ProtectionCheckReason
-import io.github.originosfcmguardian.protection.ProtectionCheckStatus
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -65,27 +62,22 @@ class FcmInlineConnectionUiTest {
         compose.onNodeWithText("触发一次心跳").assertDoesNotExist()
     }
 
-    @Test fun historyIsShownOnlyInDiagnosticsSummaryNotInADuplicateHomeCard() {
-        val savedAt = 1_700_000_000_000L
-        val state = HomeUiState(dailyProtectionReport = DailyProtectionReport(savedAt,
-            ProtectionCheckReason.MANUAL, "fixture", ProtectionCheckStatus.HEALTHY_READ_ONLY, "fixture history"))
-        compose.setContent { HomeFixture(state) {} }
+    @Test fun retiredInspectionHasNoHomeOrDiagnosticEntry() {
+        compose.setContent { HomeFixture(HomeUiState()) {} }
         compose.onNodeWithText("上次检查").assertDoesNotExist()
-        val history = "已保存检查：${formatRecordTime(savedAt)}（历史记录）"
-        compose.onNodeWithText(history).assertDoesNotExist()
         compose.onNodeWithText("打开诊断信息").performScrollTo().performClick()
         compose.onNodeWithText("问题摘要").assertExists()
-        compose.onNodeWithText(history).assertExists()
+        compose.onNodeWithText("定期巡检").assertDoesNotExist()
+        compose.onNodeWithText("高级排查").assertDoesNotExist()
     }
 
     @Composable private fun HomeFixture(state: HomeUiState, onRead: () -> Unit) {
         MaterialTheme { HomeScreen(state = state, onShizukuAction = {},
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
-            onSetTargetSelected = { _, _ -> }, onCheckTarget = {}, onRunDailyProtection = {},
-            onClearCorruptTargetSelection = {}, onRequestFcmToken = {}, onToggleFcmTokenVisibility = {},
-            onCopyFcmToken = {}, onClearFcmToken = {}, onRequestNotificationPermission = {},
-            onSetNotificationFactsEnabled = {}, onOpenNotificationListenerSettings = {},
-            onClearNotificationFactsHistory = {}, onExportNotificationFacts = {}, onReadGmsConnection = onRead) }
+            onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
+            onClearCorruptTargetSelection = {},
+
+              onReadGmsConnection = onRead) }
     }
 
     private fun sample(): GmsConnectionObservation.Sample {

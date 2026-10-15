@@ -76,14 +76,17 @@ class BoundedAutomaticTargetReadTest {
                 }
                 assertEquals(2, entered.get())
                 assertTrue(publications.single().all { it.failure == AutomaticTargetReadFailure.TIMED_OUT })
+                assertEquals(AutomaticTargetReaderGauges(2, 2, 2, 0), reader.diagnosticGauges())
                 repeat(4) {
                     val rejected = reader.readChunk(listOf(3, 4)) { entered.incrementAndGet(); healthy }
                     assertTrue(rejected.all { it.failure == AutomaticTargetReadFailure.BUSY })
                 }
                 assertEquals(2, entered.get())
+                assertEquals(AutomaticTargetReaderGauges(2, 2, 2, 8), reader.diagnosticGauges())
                 release.countDown()
                 assertTrue(exited.await(2, TimeUnit.SECONDS))
                 delay(30)
+                assertEquals(0, reader.diagnosticGauges().actualActive)
                 assertEquals(1, publications.size)
                 assertTrue(publications.single().all { it.failure == AutomaticTargetReadFailure.TIMED_OUT })
             } finally { release.countDown() }

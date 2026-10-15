@@ -27,8 +27,11 @@ internal class StoppedObservationRpc(private val budgetMillis: Long = 11_000) {
         return try {
             withTimeout(budgetMillis) {
                 suspendCancellableCoroutine { continuation ->
+                    val settlement = activity.track()
                     val future = try {
                         reader.submit {
+                            if (!settlement.workerEntered()) return@submit
+                            try {
                             fun publish(result: StoppedTargetObservation) {
                                 if (continuation.isActive) continuation.resume(result)
                             }
@@ -47,12 +50,14 @@ internal class StoppedObservationRpc(private val budgetMillis: Long = 11_000) {
                             } catch (_: Throwable) {
                                 publish(unknown(StoppedObservationUnknown.BRIDGE_UNAVAILABLE))
                             }
+                            } finally { settlement.workerEnded(false, null) }
                         }
                     } catch (_: RejectedExecutionException) {
+                        settlement.abandonQueued()
                         continuation.resume(unknown(StoppedObservationUnknown.BUSY))
                         return@suspendCancellableCoroutine
                     }
-                    continuation.invokeOnCancellation { future.cancel(true) }
+                    continuation.invokeOnCancellation { future.cancel(true); settlement.abandonQueued() }
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -62,10 +67,18 @@ internal class StoppedObservationRpc(private val budgetMillis: Long = 11_000) {
 
     /** Cleanup may itself make Binder calls: no waiting, no queue, at most one cleanup worker. */
     fun cleanupBestEffort(action: () -> Unit) {
-        try { cleanup.execute { runCatching(action) } } catch (_: RejectedExecutionException) { }
+        val settlement = activity.track()
+        try { cleanup.execute {
+            if (settlement.workerEntered()) try { runCatching(action) }
+            finally { settlement.workerEnded(false, null) }
+        } } catch (_: RejectedExecutionException) { settlement.abandonQueued() }
     }
 
     fun close() { reader.shutdownNow(); cleanup.shutdownNow() }
+    internal companion object {
+        private val activity = PrivilegedWorkerActivity()
+        internal fun allQuiescent(): Boolean = activity.isQuiescent()
+    }
 
     private fun worker(name: String) = ThreadPoolExecutor(
         0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),

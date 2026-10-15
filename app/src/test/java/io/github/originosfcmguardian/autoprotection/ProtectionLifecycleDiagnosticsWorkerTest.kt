@@ -9,49 +9,64 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ProtectionLifecycleDiagnosticsWorkerTest {
+    @Test fun `resource sidecar failure remains outside lifecycle write failure and drop counters`() {
+        fun field(name: String) = ProtectionLifecycleDiagnostics::class.java.getDeclaredField(name).apply { isAccessible = true }
+        val failure = field("writeFailed")
+        val drops = field("dropped").get(null) as java.util.concurrent.atomic.AtomicLong
+        val availability = field("resourceAvailability")
+        val resourceFailures = field("resourceFailed").get(null) as java.util.concurrent.atomic.AtomicLong
+        val oldLifecycleFailure = failure.getBoolean(null)
+        val oldDrops = drops.get()
+        val oldAvailability = availability.get(null)
+        val oldResourceFailures = resourceFailures.get()
+        try {
+            val enqueue = ProtectionLifecycleDiagnostics::class.java.getDeclaredMethod("enqueueResource", kotlin.jvm.functions.Function0::class.java)
+                .apply { isAccessible = true }
+            enqueue.invoke(ProtectionLifecycleDiagnostics, { throw ProtectionResourceCorruption(IllegalArgumentException("fixture")) })
+            worker.submit {}.get(2, TimeUnit.SECONDS)
+            assertEquals(oldLifecycleFailure, failure.getBoolean(null))
+            assertEquals(oldDrops, drops.get())
+            val snapshot = ProtectionLifecycleDiagnostics.readResourceSnapshot()
+            assertEquals(ProtectionResourceAvailability.CORRUPT, snapshot.availability)
+            assertEquals(oldResourceFailures + 1, snapshot.failed)
+        } finally {
+            availability.set(null, oldAvailability)
+            resourceFailures.set(oldResourceFailures)
+        }
+    }
     // Exercise the actual process-shared executor without Android storage/clock calls or a
-    // production-only test accessor. Restore its keepalive and drain all work after the test.
+    // production-only test accessor. Drain all work without shutting down the shared executor.
     private val worker: ThreadPoolExecutor
         get() = ProtectionLifecycleDiagnostics::class.java.getDeclaredField("worker").let {
             it.isAccessible = true
             it.get(null) as ThreadPoolExecutor
         }
 
-    @Test fun `journal worker expires while idle and restarts with the same bounded FIFO`() {
+    @Test fun `journal core worker remains available with the same bounded FIFO`() {
         val executor = worker
-        val keepAlive = executor.getKeepAliveTime(TimeUnit.MILLISECONDS)
-        assertEquals(30_000L, keepAlive)
-        assertTrue(executor.allowsCoreThreadTimeOut())
+        assertEquals(0L, executor.getKeepAliveTime(TimeUnit.MILLISECONDS))
+        assertFalse(executor.allowsCoreThreadTimeOut())
         assertEquals(1, executor.corePoolSize)
         assertEquals(1, executor.maximumPoolSize)
         assertEquals(64, executor.queue.remainingCapacity())
-        try {
-            executor.setKeepAliveTime(20, TimeUnit.MILLISECONDS)
-            val first = executor.submit<Thread> { Thread.currentThread() }.get(2, TimeUnit.SECONDS)
-            first.join(2_000)
-            assertFalse("A drained journal worker must expire", first.isAlive)
-            assertEquals(0, executor.poolSize)
+        val first = executor.submit<Thread> { Thread.currentThread() }.get(2, TimeUnit.SECONDS)
+        first.join(100)
+        assertTrue("A drained journal core worker must remain available", first.isAlive)
+        assertEquals(1, executor.poolSize)
 
-            val second = executor.submit<Thread> { Thread.currentThread() }.get(2, TimeUnit.SECONDS)
-            assertNotSame(first, second)
-            second.join(2_000)
-            assertFalse("The restarted journal worker must expire again", second.isAlive)
-            assertEquals(64, executor.queue.remainingCapacity())
-        } finally {
-            executor.setKeepAliveTime(keepAlive, TimeUnit.MILLISECONDS)
-        }
+        val second = executor.submit<Thread> { Thread.currentThread() }.get(2, TimeUnit.SECONDS)
+        assertSame(first, second)
+        assertEquals(64, executor.queue.remainingCapacity())
     }
 
-    @Test fun `busy journal worker survives idle duration and queue saturation rejects overflow`() {
+    @Test fun `single journal worker preserves FIFO and queue saturation rejects overflow`() {
         val executor = worker
-        val keepAlive = executor.getKeepAliveTime(TimeUnit.MILLISECONDS)
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val drained = CountDownLatch(64)
         val executed = AtomicInteger()
         val observed = mutableListOf<Int>()
         try {
-            executor.setKeepAliveTime(20, TimeUnit.MILLISECONDS)
             val running = executor.submit<Thread> {
                 entered.countDown()
                 while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
@@ -62,7 +77,7 @@ class ProtectionLifecycleDiagnosticsWorkerTest {
                 executor.execute { observed.add(index); executed.incrementAndGet(); drained.countDown() }
             }
             assertThrows(RejectedExecutionException::class.java) { executor.execute { executed.incrementAndGet() } }
-            // A barrier timeout spans several idle periods while the one actual worker is busy.
+            // Queued diagnostics cannot execute while the single actual worker is busy.
             assertFalse(drained.await(100, TimeUnit.MILLISECONDS))
             assertEquals(1, executor.poolSize)
             assertEquals(0, executed.get())
@@ -70,16 +85,14 @@ class ProtectionLifecycleDiagnosticsWorkerTest {
             release.countDown()
             val actualWorker = running.get(2, TimeUnit.SECONDS)
             assertTrue(drained.await(2, TimeUnit.SECONDS))
-            actualWorker.join(2_000)
-            assertFalse(actualWorker.isAlive)
+            assertTrue(actualWorker.isAlive)
             assertEquals(64, executed.get())
             assertEquals((0 until 64).toList(), observed)
             assertEquals(64, executor.queue.remainingCapacity())
         } finally {
             release.countDown()
             // This does not shut down the process-shared executor used by other tests.
-            try { drained.await(2, TimeUnit.SECONDS) }
-            finally { executor.setKeepAliveTime(keepAlive, TimeUnit.MILLISECONDS) }
+            drained.await(2, TimeUnit.SECONDS)
         }
     }
 }

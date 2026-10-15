@@ -13,9 +13,6 @@ import io.github.originosfcmguardian.core.SafeCommand
 import io.github.originosfcmguardian.core.SafeCommandFactory
 import io.github.originosfcmguardian.core.isUserZeroAppId
 import io.github.originosfcmguardian.core.isUserZeroTargetAppUid
-import io.github.originosfcmguardian.core.trace.ProcessTraceCodec
-import io.github.originosfcmguardian.core.trace.ProcessTraceParser
-import io.github.originosfcmguardian.core.trace.ProcessTraceTarget
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -28,6 +25,7 @@ class GuardianUserService : IGuardianUserService.Stub {
     private val running = ConcurrentHashMap<Long, Process>()
     private val activeRequests = ConcurrentHashMap.newKeySet<Long>()
     private val cancelledRequests = ConcurrentHashMap.newKeySet<Long>()
+    private val retainedChildren = ConcurrentHashMap.newKeySet<Process>()
     private val stoppedIdentityReader = StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort)
     private val gmsConnectionReader = GmsConnectionProbeRunner(::SystemGmsConnectionReadPort)
     private val gmsHeartbeatCallerReader = GmsHeartbeatCallerProbeRunner(::SystemGmsHeartbeatCallerReadPort)
@@ -41,15 +39,30 @@ class GuardianUserService : IGuardianUserService.Stub {
 
     override fun getServiceUid(): Int = Os.getuid()
 
+    override fun isProtectionWorkQuiescent(): Boolean {
+        retainedChildren.removeIf { runCatching { !it.isAlive }.getOrDefault(false) }
+        return getServiceUid() == 2000 && activeRequests.isEmpty() && retainedChildren.isEmpty() &&
+            fcmRecoveryRunner.isQuiescent() && gmsHeartbeatRunner.isQuiescent() &&
+            gmsConnectionReader.isQuiescent() && gmsHeartbeatCallerReader.isQuiescent() &&
+            stoppedIdentityReader.isQuiescent()
+    }
+
     override fun requestFcmRecovery(requestId: Long, expectedBinding: String?, authority: IFcmRecoveryAuthority?): Bundle {
+        return requestRecovery(requestId, expectedBinding, authority, FcmRecoveryOperation.SERVICE_ABSENT_SEND)
+    }
+    override fun requestDisconnectedFcmRecovery(requestId: Long, expectedBinding: String?, authority: IFcmRecoveryAuthority?): Bundle {
+        return requestRecovery(requestId, expectedBinding, authority, FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS)
+    }
+    private fun requestRecovery(requestId: Long, expectedBinding: String?, authority: IFcmRecoveryAuthority?,
+        operation: FcmRecoveryOperation): Bundle {
         fun bundle(value: FcmRecoveryResult) = Bundle().apply { putString(FcmRecoveryCodec.KEY, FcmRecoveryCodec.encode(value)) }
         if (getServiceUid() != 2000 || requestId <= 0 || expectedBinding == null || authority == null)
-            return bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.NOT_SENT, FcmRecoveryReason.INVALID_REQUEST))
+            return bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.NOT_SENT, FcmRecoveryReason.INVALID_REQUEST, operation))
         val caller = Binder.getCallingUid()
-        if (!activeRequests.add(requestId)) return bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.NOT_SENT, FcmRecoveryReason.BUSY))
+        if (!activeRequests.add(requestId)) return bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.NOT_SENT, FcmRecoveryReason.BUSY, operation))
         return try { bundle(fcmRecoveryRunner.request(requestId, caller, expectedBinding,
-            { authority.asBinder().isBinderAlive && authority.authorizeDispatch() }, { requestId in cancelledRequests })) }
-        catch (_: Throwable) { bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.UNKNOWN, FcmRecoveryReason.BRIDGE_UNAVAILABLE)) }
+            { authority.asBinder().isBinderAlive && authority.authorizeDispatch() }, { requestId in cancelledRequests }, operation)) }
+        catch (_: Throwable) { bundle(FcmRecoveryResult(requestId, FcmRecoveryStatus.UNKNOWN, FcmRecoveryReason.BRIDGE_UNAVAILABLE, operation)) }
         finally { activeRequests.remove(requestId); cancelledRequests.remove(requestId) }
     }
 
@@ -190,53 +203,23 @@ class GuardianUserService : IGuardianUserService.Stub {
             if (requestId in cancelledRequests) {
                 return errorResult(IpcContract.EXIT_CANCELLED, "Command cancelled")
             }
-            if (command is SafeCommand.GetTargetProcessEvents) {
-                val verification = verifyFreshExclusiveSelectedTargetUid(
-                    packageName = command.packageName,
-                    requestedUid = command.uid,
-                    requestId = requestId,
-                    deadlineNanos = deadlineNanos,
-                )
-                if (verification.error != null) return verification.error
-            }
             val remainingMillis = remainingMillis(deadlineNanos)
             if (remainingMillis <= 0) {
-                return timedOutResult(
-                    if (command is SafeCommand.GetTargetProcessEvents) {
-                        "Process trace timed out"
-                    } else {
-                        "Command budget exhausted during validation"
-                    },
-                )
+                return timedOutResult("Command budget exhausted during validation")
             }
             val result = runner.run(
                 argv = argv,
                 timeoutMillis = remainingMillis,
                 wasCancelled = { requestId in cancelledRequests },
                 onProcessStarted = { process ->
+                    retainedChildren.removeIf { runCatching { !it.isAlive }.getOrDefault(false) }
+                    retainedChildren.add(process)
                     running[requestId] = process
                     if (requestId in cancelledRequests) terminateProcess(process)
                 },
             )
-            if (command is SafeCommand.GetTargetProcessEvents) {
-                val structured = structureTargetProcessTrace(command, result)
-                if (!structured.isSuccessfulTraceTransport()) {
-                    return remoteResult(structured)
-                }
-                val verification = verifyFreshExclusiveSelectedTargetUid(
-                    packageName = command.packageName,
-                    requestedUid = command.uid,
-                    requestId = requestId,
-                    deadlineNanos = deadlineNanos,
-                )
-                if (verification.error != null) return verification.error
-                return remoteResult(structured)
-            }
             return remoteResult(result)
         } catch (error: Throwable) {
-            if (command is SafeCommand.GetTargetProcessEvents) {
-                return errorResult(IpcContract.EXIT_BRIDGE_ERROR, TRACE_UNAVAILABLE)
-            }
             return errorResult(
                 IpcContract.EXIT_BRIDGE_ERROR,
                 error.message?.take(256) ?: error.javaClass.simpleName,
@@ -384,52 +367,6 @@ class GuardianUserService : IGuardianUserService.Stub {
         return FreshUidValidation(uid = uid)
     }
 
-    private fun verifyFreshExclusiveSelectedTargetUid(
-        packageName: String,
-        requestedUid: Int,
-        requestId: Long,
-        deadlineNanos: Long,
-    ): FreshUidValidation {
-        val remainingMillis = remainingMillis(deadlineNanos)
-        if (remainingMillis <= 0) {
-            return FreshUidValidation(error = timedOutResult("Target identity validation timed out"))
-        }
-        val command = SafeCommand.GetTargetPackage(packageName)
-        val argv = fixedSystemExecutable(command.uidOwnersArgv(requestedUid))
-            ?: return FreshUidValidation(
-                error = errorResult(IpcContract.EXIT_INVALID_REQUEST, "Target identity validation failed"),
-            )
-        val result = runner.run(
-            argv = argv,
-            timeoutMillis = remainingMillis,
-            wasCancelled = { requestId in cancelledRequests },
-            onProcessStarted = { process ->
-                running[requestId] = process
-                if (requestId in cancelledRequests) terminateProcess(process)
-            },
-        )
-        if (requestId in cancelledRequests || result.exitCode == IpcContract.EXIT_CANCELLED) {
-            return FreshUidValidation(
-                error = errorResult(IpcContract.EXIT_CANCELLED, "Process trace cancelled"),
-            )
-        }
-        if (result.timedOut) {
-            return FreshUidValidation(error = timedOutResult("Target identity validation timed out"))
-        }
-        if (
-            result.outputTruncated || result.exitCode != 0 || result.stderr.isNotBlank() ||
-            !verifiedExclusiveTargetUidOwner(result.stdout, packageName, requestedUid)
-        ) {
-            return FreshUidValidation(
-                error = errorResult(
-                    IpcContract.EXIT_PERMISSION_DENIED,
-                    "Fresh exclusive selected-target identity validation failed",
-                ),
-            )
-        }
-        return FreshUidValidation(uid = requestedUid)
-    }
-
     private fun remainingMillis(deadlineNanos: Long): Long =
         ((deadlineNanos - System.nanoTime()) / NANOS_PER_MILLISECOND).coerceAtLeast(0)
 
@@ -444,7 +381,6 @@ class GuardianUserService : IGuardianUserService.Stub {
     private companion object {
         const val COMMAND_BUDGET_MILLIS = 8_000L
         const val NANOS_PER_MILLISECOND = 1_000_000L
-        const val TRACE_UNAVAILABLE = "Process trace unavailable"
     }
 
     private data class FreshUidValidation(
@@ -500,51 +436,6 @@ internal fun verifiedExclusiveTargetUidOwner(
         match.groupValues[2].toIntOrNull() == expectedUid
 }
 
-internal fun structureTargetProcessTrace(
-    command: SafeCommand.GetTargetProcessEvents,
-    result: RemoteRunResult,
-): RemoteRunResult {
-    if (result.exitCode == IpcContract.EXIT_CANCELLED) {
-        return RemoteRunResult(
-            exitCode = IpcContract.EXIT_CANCELLED,
-            stdout = "",
-            stderr = "Process trace cancelled",
-            timedOut = false,
-            outputTruncated = false,
-        )
-    }
-    if (result.timedOut || result.exitCode == IpcContract.EXIT_TIMED_OUT) {
-        return RemoteRunResult(
-            exitCode = IpcContract.EXIT_TIMED_OUT,
-            stdout = "",
-            stderr = "Process trace timed out",
-            timedOut = true,
-            outputTruncated = false,
-        )
-    }
-    if (result.outputTruncated || result.exitCode != 0 || result.stderr.isNotBlank()) {
-        return RemoteRunResult(
-            exitCode = IpcContract.EXIT_BRIDGE_ERROR,
-            stdout = "",
-            stderr = "Process trace unavailable",
-            timedOut = false,
-            outputTruncated = false,
-        )
-    }
-    val target = ProcessTraceTarget(command.packageName, command.uid)
-    val payload = ProcessTraceCodec.encode(ProcessTraceParser.parse(result.stdout, target))
-    return RemoteRunResult(
-        exitCode = 0,
-        stdout = payload,
-        stderr = "",
-        timedOut = false,
-        outputTruncated = false,
-    )
-}
-
-private fun RemoteRunResult.isSuccessfulTraceTransport(): Boolean =
-    exitCode == 0 && !timedOut && !outputTruncated && stderr.isBlank()
-
 internal fun fixedSystemExecutable(argv: List<String>): List<String>? {
     if (argv.isEmpty()) return null
     val executable = when (argv.first()) {
@@ -552,7 +443,6 @@ internal fun fixedSystemExecutable(argv: List<String>): List<String>? {
         "cmd" -> "/system/bin/cmd"
         "getprop" -> "/system/bin/getprop"
         "id" -> "/system/bin/id"
-        "logcat" -> "/system/bin/logcat"
         "pm" -> "/system/bin/pm"
         "settings" -> "/system/bin/settings"
         else -> return null

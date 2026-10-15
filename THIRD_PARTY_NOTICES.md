@@ -122,7 +122,10 @@ Screenshot version is unknown. Xiaomi-specific commands are not adopted as vivo 
 
 ## Firebase Android messaging and Google Services plugin (Phase3)
 
-- Runtime dependency: `com.google.firebase:firebase-messaging`, version managed by
+- Historical/archived only as of v71 (2026-10-12): Firebase self-test and Google Services plugin
+  are no longer application dependencies or components. Prior source is retained in
+  `archive/20261012-advanced-tools`, outside build source sets, without private configuration.
+- Former runtime dependency: `com.google.firebase:firebase-messaging`, version managed by
   Firebase BoM34.19.0. Build plugin: `com.google.gms.google-services`4.5.0.
 - Upstream: https://github.com/firebase/firebase-android-sdk and
   https://github.com/google/play-services-plugins . Their repository LICENSE files are

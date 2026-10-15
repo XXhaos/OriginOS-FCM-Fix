@@ -38,9 +38,9 @@ class VisibleAppRecheckUiTest {
         compose.onNodeWithContentDescription("应用标签").performClick()
         compose.onNodeWithContentDescription("Fixture 自动保护选择").assertIsOff().assertIsNotEnabled()
         compose.onNodeWithTag("app-details:${identity.packageName}:true").performClick()
-        compose.onNodeWithText("复检结果：后台唤醒状态尚未检查").assertExists()
+        compose.onNodeWithText("复检结果：尚未检查").assertExists()
         compose.onNodeWithText("复检").assertIsEnabled().performClick()
-        compose.onNodeWithText("复检结果：后台唤醒受限（已被停止）").assertExists()
+        compose.onNodeWithText("复检结果：后台唤醒受限").assertExists()
         compose.onNodeWithContentDescription("Fixture 自动保护选择").assertIsOff()
         compose.onNodeWithText("系统设置").assertDoesNotExist()
         compose.onNodeWithText("恢复接收").assertDoesNotExist()
@@ -59,11 +59,11 @@ class VisibleAppRecheckUiTest {
                 stoppedSnapshot = TargetStoppedSnapshot(TargetStoppedStatus.NOT_STOPPED, 10))))
         compose.setContent { Fixture(state) { error("An old installation must never invoke a check callback") } }
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("搜索名称或包名").performTextInput("OldFixture")
+        compose.onNodeWithContentDescription("搜索名称或包名").performTextInput("OldFixture")
         compose.onNodeWithTag("app-details:${identity.packageName}:false").performClick()
         compose.onNodeWithText("复检").assertIsNotEnabled()
-        compose.onNodeWithText("复检结果：应用身份已变化，请重新选择").assertExists()
-        compose.onNodeWithText("复检结果：可被后台唤醒（未被停止）").assertDoesNotExist()
+        compose.onNodeWithText("复检结果：应用已变化，请重新选择").assertExists()
+        compose.onNodeWithText("复检结果：允许后台唤醒").assertDoesNotExist()
     }
 
     @Test fun failedRefreshSuppressesPriorClearResultAndBlocksRead() {
@@ -74,15 +74,15 @@ class VisibleAppRecheckUiTest {
         compose.onNodeWithContentDescription("应用标签").performClick()
         compose.onNodeWithTag("app-details:${identity.packageName}:true").performClick()
         compose.onNodeWithText("复检").assertIsNotEnabled()
-        compose.onNodeWithText("复检结果：后台唤醒状态未知，请复检").assertExists()
-        compose.onNodeWithText("复检结果：可被后台唤醒（未被停止）").assertDoesNotExist()
+        compose.onNodeWithText("复检结果：状态未知，请复检").assertExists()
+        compose.onNodeWithText("复检结果：允许后台唤醒").assertDoesNotExist()
     }
 
     @Test fun absentIdentityIsUnavailableAndCannotOfferRecheckOrProtection() {
         val state = HomeUiState(visibleApps = listOf(app.copy(identity = null)), visibleAppsLoadState = HomeSourceLoadState.LOADED)
         compose.setContent { Fixture(state) { error("An absent identity must not invoke a check") } }
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("应用身份不可用；请刷新应用列表").assertExists()
+        compose.onNodeWithText("无法读取应用，请刷新").assertExists()
         compose.onNodeWithTag("app-details:${identity.packageName}:true").assertDoesNotExist()
         compose.onNodeWithText("复检").assertDoesNotExist()
         compose.onNodeWithContentDescription("Fixture 自动保护选择").assertIsOff().assertIsNotEnabled()
@@ -92,10 +92,8 @@ class VisibleAppRecheckUiTest {
         MaterialTheme { HomeScreen(state = state, onShizukuAction = {},
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = { error("No package-only check expected") },
-            onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},
-            onToggleFcmTokenVisibility = {}, onCopyFcmToken = {}, onClearFcmToken = {},
-            onRequestNotificationPermission = {}, onSetNotificationFactsEnabled = {},
-            onOpenNotificationListenerSettings = {}, onClearNotificationFactsHistory = {},
-            onExportNotificationFacts = {}, onCheckVisibleApp = check) }
+            onClearCorruptTargetSelection = {},
+
+             onCheckVisibleApp = check) }
     }
 }

@@ -48,5 +48,5 @@ if ($taskDailyDigest -ne (Get-ApkSignerDigest $taskDebug)) {
     bytes = (Get-Item -LiteralPath $taskOutput).Length
     sha256 = (Get-FileHash -LiteralPath $taskOutput -Algorithm SHA256).Hash.ToLowerInvariant()
     signerSha256 = $taskDailyDigest
-    build = 'non-debug, R8 minified, resource-shrunk; original local development signer'
+    build = 'non-debug, R8 minified; original local development signer (v69-v72 daily comparison uses Debug instead)'
 } | ConvertTo-Json

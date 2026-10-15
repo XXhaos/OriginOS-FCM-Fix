@@ -19,17 +19,27 @@ import java.util.concurrent.atomic.AtomicLong
 /** Diagnostic-only FIFO. No main-thread disk/Binder IO, timers, restart or authority decisions. */
 internal object ProtectionLifecycleDiagnostics {
     private val dropped = AtomicLong(0)
-    private val worker = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, ArrayBlockingQueue(64),
+    private val worker = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "guardian-lifecycle-journal").apply { isDaemon = true } },
-        ThreadPoolExecutor.AbortPolicy()).apply { allowCoreThreadTimeOut(true) }
+        ThreadPoolExecutor.AbortPolicy())
     @Volatile private var storage: AtomicProtectionLifecycleStorage? = null
     @Volatile private var writeFailed = false
+    private val resourceSkipped = AtomicLong(0)
+    private val resourceFailed = AtomicLong(0)
+    private val pollIterations = AtomicLong(0)
+    private val resourceAdmission = ProtectionResourceAdmission()
+    @Volatile private var resourceAvailability = ProtectionResourceAvailability.EMPTY
+    // These values have a single owner: the existing diagnostics worker.
+    private var resourceStorage: AtomicProtectionResourceStorage? = null
+    private var resourceSampler: ProtectionResourceSampler? = null
+    private var resourceSnapshot = ProtectionResourceSnapshot()
 
     @Synchronized fun initialize(context: Context) {
         if (storage != null) return
         val app = context.applicationContext
         storage = AtomicProtectionLifecycleStorage(app.noBackupFilesDir)
         val start = event(ProtectionLifecycleEventKind.PROCESS_STARTED)
+        var resourceExits: List<ProtectionResourceExit>? = null
         enqueue {
             val current = requireNotNull(storage)
             val prior = current.read()
@@ -39,6 +49,14 @@ internal object ProtectionLifecycleDiagnostics {
                     .getHistoricalProcessExitReasons(app.packageName, 0, 64)
                     .filter { it.packageUid == Process.myUid() && it.processName == app.packageName &&
                         it.timestamp > 0 && it.timestamp <= now && it.pid > 0 && it.reason in 0..100 }
+                    .also { records ->
+                        // Enrichment shares the already-existing historical read. An enrichment
+                        // problem cannot change the lifecycle record or its failure flag.
+                        resourceExits = runCatching { records.map { record ->
+                            ProtectionResourceExit(record.pid, record.timestamp, record.reason, record.status,
+                                record.importance, record.rss.takeIf { it > 0 }, record.pss.takeIf { it > 0 })
+                        } }.getOrNull()
+                    }
                     .map { ProtectionLifecycleEvent(it.timestamp, 0, it.pid,
                         ProtectionLifecycleEventKind.SYSTEM_PROCESS_EXIT, systemExitReason = it.reason,
                         systemExitStatus = it.status) }
@@ -47,6 +65,19 @@ internal object ProtectionLifecycleDiagnostics {
             val pendingDrops = dropped.get()
             current.write(begun.copy(droppedEvents = Math.addExact(begun.droppedEvents, pendingDrops)))
             dropped.addAndGet(-pendingDrops)
+        }
+        enqueueResource {
+            val sidecar = AtomicProtectionResourceStorage(app.noBackupFilesDir)
+            resourceStorage = sidecar
+            val prior = sidecar.read()
+            resourceSkipped.updateAndGet { saturatedDiagnosticAdd(it, prior.skipped) }
+            resourceFailed.updateAndGet { saturatedDiagnosticAdd(it, prior.failed) }
+            val merged = mergeProtectionResourceExits(prior, resourceExits)
+                .copy(skipped = resourceSkipped.get(), failed = resourceFailed.get())
+            sidecar.write(merged)
+            resourceSnapshot = merged
+            resourceSampler = ProtectionResourceSampler(app)
+            resourceAvailability = merged.availability
         }
     }
 
@@ -96,6 +127,66 @@ internal object ProtectionLifecycleDiagnostics {
         } catch (_: Exception) {
             return ProtectionLifecycleSnapshot(availability = ProtectionLifecycleAvailability.UNAVAILABLE, droppedEvents = dropped.get())
         }
+    }
+
+    /** Existing session-loop opportunity only: no caller disk/Binder IO, suspension or new timer. */
+    fun offerResourceSample() {
+        pollIterations.incrementDiagnostic()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (!resourceAdmission.isDue(nowElapsed)) return
+        if (!resourceAdmission.offer(nowElapsed, worker.activeCount > 0 || worker.queue.isNotEmpty())) {
+            resourceSkipped.incrementDiagnostic()
+            return
+        }
+        try {
+            worker.execute {
+                try {
+                    if (resourceAvailability == ProtectionResourceAvailability.CORRUPT ||
+                        resourceAvailability == ProtectionResourceAvailability.UNAVAILABLE) {
+                        resourceSkipped.incrementDiagnostic(); return@execute
+                    }
+                    val sampler = resourceSampler ?: run { resourceSkipped.incrementDiagnostic(); return@execute }
+                    val sidecar = requireNotNull(resourceStorage)
+                    val next = updateProtectionResourceStorage(sidecar::read, sidecar::write,
+                        { sampler.capture(pollIterations.get()) }, resourceSkipped.get(), resourceFailed.get())
+                    resourceSnapshot = next
+                    resourceAvailability = next.availability
+                } catch (error: Exception) { resourceFailure(error) }
+                finally { resourceAdmission.finished() }
+            }
+        } catch (_: RejectedExecutionException) {
+            resourceSkipped.incrementDiagnostic()
+            resourceAdmission.finished()
+        }
+    }
+
+    /** Export IO caller only; same FIFO barrier/deadline without lifecycle failure coupling. */
+    fun readResourceSnapshot(): ProtectionResourceSnapshot {
+        val result = CompletableFuture<ProtectionResourceSnapshot>()
+        try {
+            worker.execute {
+                if (resourceAvailability == ProtectionResourceAvailability.AVAILABLE || resourceAvailability == ProtectionResourceAvailability.EMPTY) {
+                    try { resourceStorage?.read()?.let { resourceSnapshot = it; resourceAvailability = it.availability } }
+                    catch (error: Exception) { resourceFailure(error) }
+                }
+                result.complete(resourceSnapshot.copy(availability = resourceAvailability,
+                    skipped = resourceSkipped.get(), failed = resourceFailed.get()))
+            }
+            return result.get(2, TimeUnit.SECONDS)
+        } catch (_: Exception) {
+            return ProtectionResourceSnapshot(availability = ProtectionResourceAvailability.UNAVAILABLE,
+                skipped = resourceSkipped.get(), failed = resourceFailed.get())
+        }
+    }
+
+    private fun resourceFailure(error: Exception) {
+        resourceFailed.incrementDiagnostic()
+        resourceAvailability = if (error is ProtectionResourceCorruption)
+            ProtectionResourceAvailability.CORRUPT else ProtectionResourceAvailability.UNAVAILABLE
+    }
+    private fun enqueueResource(action: () -> Unit) {
+        try { worker.execute { try { action() } catch (error: Exception) { resourceFailure(error) } } }
+        catch (_: RejectedExecutionException) { resourceFailure(IllegalStateException()) }
     }
 
     private fun event(kind: ProtectionLifecycleEventKind, reason: ProtectionLifecycleReason = ProtectionLifecycleReason.NONE) =

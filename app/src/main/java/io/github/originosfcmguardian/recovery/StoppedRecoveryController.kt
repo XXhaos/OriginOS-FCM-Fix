@@ -21,6 +21,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
+import io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime
+import io.github.originosfcmguardian.privileged.PrivilegedWorkerActivity
+import kotlinx.coroutines.delay
 
 /** Manual actions and explicitly opted-in runtime requests. Unresolved requests are never replayed. */
 class StoppedRecoveryController internal constructor(context: Context, private val transport: RecoveryTransport) : AutoCloseable {
@@ -31,6 +34,7 @@ class StoppedRecoveryController internal constructor(context: Context, private v
     private val current = AtomicReference<Session?>()
     private val closed = AtomicBoolean(false)
     private val cancellationEpoch = AtomicLong(0)
+    init { synchronized(instances) { instances.add(this) } }
 
     fun loadLatest(): StoppedRecoveryRecord? = journal.load().latest
     fun storageHealthy(): Boolean = runCatching { journal.load(); true }.getOrDefault(false)
@@ -144,6 +148,8 @@ class StoppedRecoveryController internal constructor(context: Context, private v
 
     private suspend fun run(identity: SelectedTargetIdentity?, authorization: AutomaticRecoveryAuthorization? = null,
         action: (Session, IStoppedRecovery) -> StoppedRecoveryResult): StoppedRecoveryResult {
+        if (migrationClosed || !AutomaticProtectionRuntime.localExecutionAllowed(app)) return StoppedRecoveryResult(
+            StoppedRecoveryOutcome.BLOCKED, "保护执行权已迁移，旧恢复入口已关闭")
         val callerJob = currentCoroutineContext().job
         currentCoroutineContext().ensureActive()
         val epoch = cancellationEpoch.get()
@@ -155,8 +161,11 @@ class StoppedRecoveryController internal constructor(context: Context, private v
             try {
                 withTimeout(24_000) {
                     suspendCancellableCoroutine { continuation ->
+                        val settlement = rpcActivity.track()
                         val future = try {
                             rpc.submit {
+                                if (!settlement.workerEntered()) return@submit
+                                try {
                                 val result = try {
                                     check(continuation.isActive)
                                     check(session.active())
@@ -169,12 +178,14 @@ class StoppedRecoveryController internal constructor(context: Context, private v
                                     }
                                 } catch (_: Throwable) { fallback("恢复能力、身份或连接不可用；待确认操作须先只读复检") }
                                 if (continuation.isActive) continuation.resume(result)
+                                } finally { settlement.workerEnded(false, null) }
                             }
                         } catch (_: Throwable) {
+                            settlement.abandonQueued()
                             continuation.resume(fallback("上次连接仍未退出，请稍后只读复检"))
                             return@suspendCancellableCoroutine
                         }
-                        continuation.invokeOnCancellation { session.stop(); future.cancel(true) }
+                        continuation.invokeOnCancellation { session.stop(); future.cancel(true); settlement.abandonQueued() }
                     }
                 }
             } catch (_: CancellationException) {
@@ -196,9 +207,15 @@ class StoppedRecoveryController internal constructor(context: Context, private v
         private val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(24)
         val recordId = AtomicReference<Long?>(null)
         private val binding = RecoveryBindingLifecycle(transport.newBinding(), ::localActive, ::active,
-            ::stop, { action -> cleanup.execute { action() } })
+            ::stop, { action ->
+                val settlement = cleanupActivity.track()
+                try { cleanup.execute {
+                    if (settlement.workerEntered()) try { action() }
+                    finally { settlement.workerEnded(false, null) }
+                } } catch (failure: Throwable) { settlement.abandonQueued(); throw failure }
+            })
         private val listener = if (expected != null) selection.registerListener { stop() } else null
-        private fun localActive(): Boolean = callerJob.isActive && cancellationEpoch.get() == epoch && live.get() && !closed.get() && System.nanoTime() < deadline
+        private fun localActive(): Boolean = !migrationClosed && callerJob.isActive && cancellationEpoch.get() == epoch && live.get() && !closed.get() && System.nanoTime() < deadline
         fun active(): Boolean = localActive() && binding.isCurrent() &&
             (authorization?.active() != false) &&
             (expected == null || runCatching { selection.load().contains(expected) }.getOrDefault(false))
@@ -220,10 +237,24 @@ class StoppedRecoveryController internal constructor(context: Context, private v
             binding.close()
         }
     }
-    private companion object {
-        val singleFlight = RecoveryAdmission()
-        val rpc = recoveryWorker("guardian-recovery-rpc")
-        val cleanup = recoveryWorker("guardian-recovery-cleanup")
+    companion object {
+        @Volatile private var migrationClosed = false
+        private val instances = java.util.Collections.newSetFromMap(java.util.WeakHashMap<StoppedRecoveryController, Boolean>())
+        private val rpcActivity = PrivilegedWorkerActivity()
+        private val cleanupActivity = PrivilegedWorkerActivity()
+        internal fun prepareForDaemonMigration() { migrationClosed = true }
+        internal suspend fun awaitDaemonMigrationDrain(): Boolean {
+            synchronized(instances) { instances.toList() }.forEach { it.close() }
+            while (!rpcActivity.isQuiescent() || !cleanupActivity.isQuiescent() || singleFlight.isBusy()) delay(25)
+            if (synchronized(instances) { instances.toList() }.any {
+                    runCatching { it.journal.load().latest?.requiresReconcile == true }.getOrDefault(true)
+                }) return false
+            if (!ExternalShizukuRecoveryTransport.awaitDaemonMigrationDrain()) return false
+            return AndroidRecoveryCounts.awaitMigrationDrain()
+        }
+        private val singleFlight = RecoveryAdmission()
+        private val rpc = recoveryWorker("guardian-recovery-rpc")
+        private val cleanup = recoveryWorker("guardian-recovery-cleanup")
     }
 }
 

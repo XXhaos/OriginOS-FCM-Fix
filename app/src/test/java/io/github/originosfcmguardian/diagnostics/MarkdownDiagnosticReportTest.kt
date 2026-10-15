@@ -3,12 +3,6 @@ package io.github.originosfcmguardian.diagnostics
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
-import io.github.originosfcmguardian.fcm.FcmReceipt
-import io.github.originosfcmguardian.fcm.FcmUiState
-import io.github.originosfcmguardian.fcm.MessagePriority
-import io.github.originosfcmguardian.fcm.NetworkAvailability
-import io.github.originosfcmguardian.fcm.ObservedBoolean
-import io.github.originosfcmguardian.fcm.SensitiveToken
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoverySource
 import io.github.originosfcmguardian.recovery.StoppedRecoveryStage
@@ -28,35 +22,19 @@ class MarkdownDiagnosticReportTest {
         val report = base().copy(
             shizukuStatus = "READY_SHELL",
             targets = listOf(DiagnosticTarget("org.example.recipient", "目标名称")),
-            fcmConfiguration = "CONFIGURED_NOT_TESTED",
-            fcmRegistration = "TOKEN_READY",
-            notificationPermission = "GRANTED",
-            latestFcmReceipt = DiagnosticFcmReceipt(
-                2101, "HIGH", "POST_REQUESTED", "NO", "YES", "AVAILABLE", 27, 504,
-            ),
-            notificationFacts = DiagnosticNotificationFacts(true, false, true, 5, 3, 2, 4101, 1, true),
-            monitor = DiagnosticMonitorSummary(
-                "org.example.monitor", 2501, 32501, "STOPPED", 19, 6, 4, 3, 5, 1, 7,
-            ),
-            dailyProtectionStatus = "HEALTHY_READ_ONLY",
-            dailyProtectionCheckedAtEpochMillis = 5101,
-            sourceAvailability = mapOf("notificationFacts" to DiagnosticSourceAvailability.PARTIAL),
+
+            sourceAvailability = mapOf("targetSelection" to DiagnosticSourceAvailability.PARTIAL),
         )
         val markdown = render(report)
-        assertTrue(markdown.contains("仅已选应用安装身份；不代表停止标志、FCM 连接或通知送达"))
-        listOf("环境", "Shizuku", "目标应用", "FCM 本应用证据",
-            "通知观察摘要", "最近深度监测摘要", "日常只读检查", "来源可用性", "仍未知的关系", "局限")
+        assertFalse(markdown.contains("## 日常只读检查"))
+        listOf("环境", "Shizuku", "目标应用", "FCM 恢复事件",
+            "后台资源与中断分析", "保护停止与进程记录", "来源可用性", "仍未知的关系", "已移除的排查工具", "局限")
             .forEach { assertTrue(it, markdown.contains("## $it")) }
         listOf("当前显示名称：目标名称",
-            "最近回调时间（Unix 毫秒）：2101", "处理耗时（毫秒）：27", "回调时进程年龄（毫秒）：504",
-            "保留事件数：5", "发布或更新数：3", "移除数：2", "最近观察时间（Unix 毫秒）：4101",
-            "丢弃事件数：1", "停止后的持久化不确定：是（true）", "开始时间（Unix 毫秒）：2501",
-            "截止时间（Unix 毫秒）：32501", "保留事件数：19", "进程启动数：6", "UID 活跃事件数：4",
-            "UID 空闲事件数：3", "UID 运行事件数：5", "UID 停止事件数：1", "采样轮数：7",
-            "检查时间（Unix 毫秒）：5101", "部分记录（PARTIAL）", "未知（UNKNOWN）")
+            "部分记录（PARTIAL）", "未知（UNKNOWN）", "未采集不代表没有事件")
             .forEach { assertTrue(it, markdown.contains(it)) }
         assertTrue(markdown.contains("Shell 权限就绪（READY\\_SHELL）"))
-        assertTrue(markdown.contains("当次只读检查符合条件（HEALTHY\\_READ\\_ONLY）"))
+        assertTrue(markdown.contains("定期巡检已移除"))
         assertFalse(markdown.contains("自启动"))
     }
 
@@ -71,7 +49,6 @@ class MarkdownDiagnosticReportTest {
         states.forEach { assertTrue(it.name, markdown.contains("（${it.name}）")) }
         assertTrue(markdown.contains("目标应用数量：0"))
         assertFalse(markdown.contains("### 目标应用"))
-        assertTrue(markdown.contains("最近回调：未知或不可用（null）"))
         assertTrue(markdown.contains("must not be interpreted as empty or healthy"))
         val pending = render(base())
         assertTrue(pending.contains("加载中（LOADING）"))
@@ -81,9 +58,7 @@ class MarkdownDiagnosticReportTest {
     @Test
     fun nullsAreExplicitAndNeverRenderedAsHealthy() {
         val markdown = render(base())
-        assertTrue(markdown.contains("通知观察：未知或不可用（null）"))
-        assertTrue(markdown.contains("最近监测：未知或不可用（null）"))
-        assertTrue(markdown.contains("检查时间（Unix 毫秒）：未知或不可用（null）"))
+        assertFalse(markdown.contains("## 日常只读检查"))
         assertFalse(markdown.contains("当次只读检查符合条件"))
     }
 
@@ -124,9 +99,12 @@ class MarkdownDiagnosticReportTest {
 
     @Test
     fun oversizeUtf8ReportFailsInsteadOfReturningTruncatedTargetsOrLabels() {
-        val oversized = base().copy(targets = listOf(DiagnosticTarget("org.example.app", "字".repeat(25_000))))
+        // Exceed the shared UTF-8 byte budget even after a legitimate budget increase.
+        val oversized = base().copy(targets = listOf(
+            DiagnosticTarget("org.example.app", "字".repeat(MAX_REPORT_BYTES / 3 + 1)),
+        ))
         assertThrows(IllegalArgumentException::class.java) { encodeCombinedDiagnosticMarkdown(oversized) }
-        val manyTargets = base().copy(targets = (0 until 2_000).map {
+        val manyTargets = base().copy(targets = (0 until MAX_REPORT_BYTES / 40 + 100).map {
             DiagnosticTarget("org.example.p$it", "应用$it")
         })
         assertThrows(IllegalArgumentException::class.java) { encodeCombinedDiagnosticMarkdown(manyTargets) }
@@ -151,13 +129,7 @@ class MarkdownDiagnosticReportTest {
         val state = HomeUiState(
             targetSelectionLoadState = HomeSourceLoadState.LOADED,
             selectedTargets = listOf(SelectedTargetUiState(identity, "Recipient", TargetAutostartStatus.UNKNOWN)),
-            fcmEvidenceLoadState = HomeSourceLoadState.LOADED,
-            fcm = FcmUiState(
-                token = SensitiveToken("privateTokenSentinel"),
-                registrationDetail = "privateFreeTextSentinel",
-                latestReceipt = FcmReceipt("privateTestSentinel", 1000, 2000, 4000,
-                    MessagePriority.HIGH, ObservedBoolean.NO, ObservedBoolean.YES, NetworkAvailability.UNKNOWN),
-            ),
+
         )
         val report = buildCombinedDiagnosticReport(state, environment(), 9000)
         val markdown = render(report)
@@ -168,16 +140,16 @@ class MarkdownDiagnosticReportTest {
 
     @Test
     fun jsonAndMarkdownDescribeTheSameSnapshotAndLimitations() {
-        val report = base().copy(capturedAtEpochMillis = 123456789, dailyProtectionCheckedAtEpochMillis = 987654321)
+        val report = base().copy(capturedAtEpochMillis = 123456789)
         val markdown = render(report)
         val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
         assertTrue(json.contains("\"capturedAtEpochMillis\":123456789"))
         assertTrue(markdown.contains("导出快照时间（Unix 毫秒）：123456789"))
-        assertTrue(markdown.contains("检查时间（Unix 毫秒）：987654321"))
+        assertTrue(json.contains("\"retired\":true,\"status\":null,\"checkedAtEpochMillis\":null"))
         assertTrue(markdown.contains("sampled independently and may be older"))
         assertTrue(markdown.contains("does not perform new privileged reads"))
         assertTrue(markdown.contains("Temporal proximity does not prove FCM delivery"))
-        val unescaped = markdown.replace("\\.", ".").replace("\\,", ",").replace("\\-", "-").replace("\\;", ";")
+        val unescaped = markdown.replace("\\.", ".").replace("\\,", ",").replace("\\-", "-").replace("\\;", ";").replace("\\_", "_")
         assertTrue(unescaped.contains(DIAGNOSTIC_REPORT_SCHEMA))
         DIAGNOSTIC_REPORT_LIMITATIONS.forEach { assertTrue(it, unescaped.contains(it)) }
     }

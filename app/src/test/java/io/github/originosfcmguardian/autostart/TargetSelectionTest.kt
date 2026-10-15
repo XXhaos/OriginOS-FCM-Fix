@@ -7,8 +7,31 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import java.security.MessageDigest
 
 class TargetSelectionTest {
+    @Test fun lowercaseHexPreservesEveryUnsignedByteAndSignerValidation() {
+        val bytes = ByteArray(256) { it.toByte() }
+        assertEquals(bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }, lowerHexDigest(bytes))
+        assertEquals("", lowerHexDigest(byteArrayOf()))
+        assertEquals("000f107f80ff", lowerHexDigest(byteArrayOf(0, 15, 16, 127, 128.toByte(), 255.toByte())))
+        for (bad in listOf("A".repeat(64), "a".repeat(63), "a".repeat(65), "a".repeat(63) + "\n")) {
+            assertThrows(IllegalArgumentException::class.java) { identity.copy(signerSha256 = listOf(bad)) }
+            assertEquals(identity, identity.copy())
+        }
+    }
+
+    @Test fun signerDigestsKeepSortedDeduplicationAndFreshIdentityValidation() {
+        val certificates = listOf(byteArrayOf(0, 127, 128.toByte(), 255.toByte()), byteArrayOf(1, 2, 3))
+        val expected = certificates.map { certificate -> MessageDigest.getInstance("SHA-256").digest(certificate)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) } }.sorted()
+        val selected = targetPackageIdentity(identity.packageName, identity.packageName, identity.packageName,
+            identity.uid, identity.firstInstallTime, listOf(certificates[1], certificates[0], certificates[1]))
+        assertEquals(identity.copy(signerSha256 = expected), selected)
+        assertNull(targetPackageIdentity(identity.packageName, "different.package", identity.packageName,
+            identity.uid, identity.firstInstallTime, certificates))
+    }
+
     @Test
     fun currentUidMembershipAllowsSharedTargetButRejectsIncompleteOrMalformedEvidence() {
         val target = "com.google.android.calendar"

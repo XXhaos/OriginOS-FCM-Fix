@@ -49,8 +49,7 @@ class ShizukuWorkModeContentTest {
             assertEquals(1, actions)
             snapshot.value = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "synthetic shell UID 2000")
         }
-        compose.onNodeWithText("已授权 · shell 就绪").assertExists()
-        compose.onNodeWithText("保护仍需单独开启。").assertExists()
+        compose.onNodeWithText("已就绪").assertExists()
         compose.onNodeWithText("Shizuku 授权").assertDoesNotExist()
         compose.onNodeWithText("synthetic shell UID 2000").assertDoesNotExist()
         compose.onNodeWithText("连接详情").assertDoesNotExist()
@@ -67,7 +66,7 @@ class ShizukuWorkModeContentTest {
         compose.setContent {
             MaterialTheme { Column { ShizukuWorkModeContent(snapshot.value, { actions++ }, { refreshes++ }, {}, { help++ }) } }
         }
-        compose.onNodeWithText("Root 模式（不支持）").assertExists()
+        compose.onNodeWithText("启动方式不支持").assertExists()
         compose.onNodeWithText("打开 Shizuku").performClick()
         compose.runOnIdle { snapshot.value = ShizukuStatusSnapshot(ShizukuStatus.ERROR, "fixture") }
         compose.onNodeWithText("状态异常").assertExists()

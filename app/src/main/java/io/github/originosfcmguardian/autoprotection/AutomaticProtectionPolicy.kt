@@ -49,6 +49,7 @@ internal fun mayContinueAfterStoppedRecovery(
     latest: StoppedRecoveryRecord?,
     previousRequestId: Long,
     consent: TargetConsent,
+    currentFingerprint: String,
 ): Boolean {
     val record = result.record ?: return false
     return previousRequestId >= 0 && record.requestId > previousRequestId && record == latest &&
@@ -56,7 +57,8 @@ internal fun mayContinueAfterStoppedRecovery(
         record.outcome == StoppedRecoveryOutcome.STILL_STOPPED && record.stage == StoppedRecoveryStage.FINISHED &&
         record.source == StoppedRecoverySource.AUTOMATIC && record.identity == consent.identity &&
         record.consentId == consent.id && record.consentedAtMillis == consent.consentedAtMillis &&
-        record.consentVersion == consent.policyVersion && record.fingerprint == consent.fingerprint &&
+        record.consentVersion == consent.policyVersion && record.fingerprint == currentFingerprint &&
+        consent.acceptsRuntimeFingerprint(currentFingerprint) &&
         record.currentUser == 0 && record.baselineStopped && !record.confirmedManualAction &&
         record.acknowledgedRuntimeRisk
 }

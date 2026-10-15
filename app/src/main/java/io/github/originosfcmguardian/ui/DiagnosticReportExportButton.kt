@@ -1,6 +1,10 @@
 package io.github.originosfcmguardian.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -24,12 +28,12 @@ internal fun DiagnosticReportExportButton(busy: Boolean, onExport: (DiagnosticRe
             onDismissRequest = { choosingFormat = false },
             title = { Text("选择报告格式") },
             text = {
-                Column {
-                    TextButton(enabled = !busy, onClick = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
                         choosingFormat = false
                         onExport(DiagnosticReportFormat.JSON)
                     }) { Text("JSON（结构化）") }
-                    TextButton(enabled = !busy, onClick = {
+                    TextButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
                         choosingFormat = false
                         onExport(DiagnosticReportFormat.MARKDOWN)
                     }) { Text("Markdown（便于阅读）") }

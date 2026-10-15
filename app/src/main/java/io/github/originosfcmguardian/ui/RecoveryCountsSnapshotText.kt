@@ -6,6 +6,6 @@ internal fun recoveryCountsSnapshotText(calculatedAtMillis: Long?, zoneId: Strin
         java.time.Instant.ofEpochMilli(calculatedAtMillis).atZone(java.time.ZoneId.of(zoneId))
             .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
     }.getOrNull() else null
-    return if (timestamp != null) "统计截至 $timestamp（$zoneId）"
-        else "统计时间未知；请刷新"
+    return if (timestamp != null) "更新于 $timestamp"
+        else "更新时间未知"
 }

@@ -21,7 +21,7 @@ class GmsHeartbeatRunnerTest {
         var identityRead: () -> Unit = {}
         override fun environment() = environment
         override fun gmsPackage(): GmsPackageIdentity { reads++; identityRead(); return identity }
-        override fun packagesForUid(uid: Int) = owners
+        override fun packagesForUid(uid: Int) = if (uid == 10238) listOf("io.github.originosfcmguardian") else owners
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(SourceCompleteness.UNAVAILABLE, false)
         override fun gcmService(interrupted: () -> Boolean) = report
         override fun reconnectReceivers() = GmsReceiverInspection(false, emptyList())
@@ -101,6 +101,7 @@ class GmsHeartbeatRunnerTest {
         try {
             assertEquals(GmsHeartbeatResult.notSent(1, GmsHeartbeatReason.TIMED_OUT), runner.request(1) { false })
             assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertFalse(runner.isQuiescent())
             assertEquals(GmsHeartbeatReason.BUSY, runner.request(2) { false }.reason)
         } finally { release.countDown(); runner.close() }
         assertEquals(0, launches)
@@ -117,6 +118,7 @@ class GmsHeartbeatRunnerTest {
         try {
             assertEquals(GmsHeartbeatResult.unknown(1, GmsHeartbeatReason.TIMED_OUT), runner.request(1) { false })
             assertTrue(cleaning.await(1, TimeUnit.SECONDS)); assertTrue(child.destroyed)
+            assertFalse(runner.isQuiescent())
             assertEquals(GmsHeartbeatReason.BUSY, runner.request(2) { false }.reason)
         } finally { release.countDown(); runner.close() }
     }
@@ -127,5 +129,49 @@ class GmsHeartbeatRunnerTest {
         val started = GmsHeartbeatDispatchGate { null }
         assertTrue(started.begin())
         assertEquals(GmsHeartbeatStatus.UNKNOWN, started.failure(1, GmsHeartbeatReason.BRIDGE_UNAVAILABLE).status)
+    }
+
+    private fun lifetime() = object : GmsHeartbeatLifetime {
+        override fun alive() = true
+        override fun link(death: () -> Unit) = Unit
+        override fun unlink() = Unit
+    }
+
+    @Test fun failedArmRecordsOneBoundedDiagnosticAndNeverLaunchesAHeartbeat() {
+        val diagnostics = mutableListOf<GmsHeartbeatArmDiagnostic>()
+        var launches = 0
+        val runner = GmsHeartbeatRunner({ Port() }, { launches++; Child(accepted) }, armDiagnostic = diagnostics::add)
+        try {
+            val result = runner.armAutomatic(1, 10239, 1, "a".repeat(64), lifetime()) { false }
+            assertEquals(GmsAutoArmReason.CALLER_UNAVAILABLE, result.reason)
+            assertNull(result.session)
+            assertEquals(0, launches)
+            assertEquals(1, diagnostics.size)
+            assertEquals(GmsHeartbeatArmStage.CALLER, diagnostics.single().stage)
+            assertEquals(result.reason, diagnostics.single().reason)
+            assertTrue(diagnostics.single().durationMillis >= 0)
+        } finally { runner.close() }
+    }
+
+    @Test fun timedOutArmDiagnosticDoesNotPretendItsWorkerHasDrained() {
+        val release = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        val diagnostics = java.util.concurrent.CopyOnWriteArrayList<GmsHeartbeatArmDiagnostic>()
+        var launches = 0
+        val runner = GmsHeartbeatRunner({
+            entered.countDown()
+            while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
+            Port()
+        }, { launches++; Child(accepted) }, 100, armDiagnostic = diagnostics::add)
+        try {
+            assertEquals(GmsAutoArmReason.TIMED_OUT,
+                runner.armAutomatic(1, 10238, 1, "a".repeat(64), lifetime()) { false }.reason)
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertFalse(runner.isQuiescent())
+            assertEquals(1, diagnostics.size)
+            assertEquals(GmsHeartbeatArmStage.PORT, diagnostics.single().stage)
+            assertFalse(diagnostics.single().workerQuiescent)
+            assertEquals(0, launches)
+        } finally { release.countDown(); runner.close() }
     }
 }

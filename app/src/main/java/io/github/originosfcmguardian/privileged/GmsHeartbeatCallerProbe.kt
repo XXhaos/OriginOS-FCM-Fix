@@ -51,15 +51,20 @@ internal class GmsHeartbeatCallerProbeRunner(private val portFactory: () -> GmsH
     init { require(budgetMillis in 1..8_000) }
     private val worker = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),
         { task -> Thread(task, "guardian-heartbeat-caller-read").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
+    private val activity = PrivilegedWorkerActivity()
+    fun isQuiescent(): Boolean = activity.isQuiescent()
     fun read(callerUid: Int, callerPid: Int, previous: GmsHeartbeatCallerIdentity?, cancelled: () -> Boolean): GmsHeartbeatCallerQualification {
         fun unknown() = GmsHeartbeatCallerQualification(null, GmsHeartbeatCallerReason.UNKNOWN)
         val abandoned = AtomicBoolean(false)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis)
         fun stopped() = abandoned.get() || cancelled() || Thread.currentThread().isInterrupted || System.nanoTime() >= deadline
         if (stopped()) return unknown()
+        val settlement = activity.track()
         val future = try { worker.submit<GmsHeartbeatCallerQualification> {
-            qualifyGmsHeartbeatCaller(callerUid, callerPid, previous, portFactory(), ::stopped)
-        } } catch (_: RejectedExecutionException) { return unknown() }
+            if (!settlement.workerEntered()) return@submit unknown()
+            try { qualifyGmsHeartbeatCaller(callerUid, callerPid, previous, portFactory(), ::stopped) }
+            finally { settlement.workerEnded(false, null) }
+        } } catch (_: RejectedExecutionException) { settlement.abandonQueued(); return unknown() }
         return try {
             while (true) {
                 if (stopped()) return unknown()
@@ -71,7 +76,7 @@ internal class GmsHeartbeatCallerProbeRunner(private val portFactory: () -> GmsH
             @Suppress("UNREACHABLE_CODE") unknown()
         } catch (_: InterruptedException) { Thread.currentThread().interrupt(); unknown() }
         catch (_: Throwable) { unknown() }
-        finally { abandoned.set(true); future.cancel(true) }
+        finally { abandoned.set(true); settlement.abandonQueued(); future.cancel(true) }
     }
     fun close() { worker.shutdownNow() }
 }

@@ -103,6 +103,11 @@ internal object HeartbeatPendingCodec {
 
 internal class GmsAutoHeartbeatStore(private val storage: HeartbeatStorage) {
     fun read(): HeartbeatSnapshot? = storage.exclusive { storage.read() }
+    /** Inspection only: migration must not let AtomicFile repair an interrupted old owner. */
+    fun readForDaemonMigration(): HeartbeatSnapshot? = storage.exclusive {
+        check(storage.coldBarrier() == null && !storage.unsettledPending())
+        storage.read().also { check(it?.pendingArm == null && it?.pendingAttempt == null) }
+    }
     fun unsettledOperation(): Boolean = storage.exclusive {
         storage.unsettledPending() || storage.read()?.let { it.pendingAttempt != null || it.pendingArm != null } == true
     }

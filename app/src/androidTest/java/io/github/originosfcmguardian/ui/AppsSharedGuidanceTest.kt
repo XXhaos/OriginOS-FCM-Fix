@@ -3,7 +3,6 @@ package io.github.originosfcmguardian.ui
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
@@ -11,7 +10,6 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollToIndex
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionTargetState
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
@@ -30,7 +28,7 @@ class AppsSharedGuidanceTest {
     private val limits = "被停止时尝试恢复，无固定次数或间隔限制；不保证送达。"
     private val shared = "约每 30 秒检查；休眠可能延后，不保证送达。"
 
-    @Test fun twoExpandedAppsShareOneHintAndKeepTheirOwnEvidenceAndActions() {
+    @Test fun appSheetsKeepTheirOwnStatusAndActionsWithoutRepeatedGuidance() {
         val first = SelectedTargetUiState(
             SelectedTargetIdentity("example.guidance.first", 10123, 1L, listOf("a".repeat(64))), "First",
             stoppedSnapshot = TargetStoppedSnapshot(TargetStoppedStatus.NOT_STOPPED, 10))
@@ -52,65 +50,56 @@ class AppsSharedGuidanceTest {
             HomeScreen(state = state, onShizukuAction = {},
                 onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
                 onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
-                onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},
-                onToggleFcmTokenVisibility = {}, onCopyFcmToken = {}, onClearFcmToken = {},
-                onRequestNotificationPermission = {}, onSetNotificationFactsEnabled = {},
-                onOpenNotificationListenerSettings = {}, onClearNotificationFactsHistory = {},
-                onExportNotificationFacts = {})
+                onClearCorruptTargetSelection = {})
         } }
+        compose.onNodeWithText("已选 2 个应用").assertExists()
         compose.onNodeWithContentDescription("应用标签").performClick()
-        compose.onNodeWithText("已选 2 个应用 · 关闭总开关保留选择").assertExists()
-        assertOneSharedHint()
+        compose.onNodeWithContentDescription("已保护（2）").assertExists()
+        assertNoSharedHints()
         compose.onNodeWithTag("app-details:${first.identity.packageName}:true").performClick()
         compose.onNodeWithText("First fixture waiting reason").assertDoesNotExist()
         compose.onNodeWithText("上次检测：${formatRecordTime(firstTime)}").assertDoesNotExist()
         compose.onNodeWithText("上次自动恢复：停止限制已解除").assertDoesNotExist()
-        compose.onNodeWithText("复检结果：可被后台唤醒（未被停止）").assertExists()
+        compose.onNodeWithText("复检结果：允许后台唤醒").assertExists()
         assertDetailActions()
-        assertOneSharedHint()
+        assertNoSharedHints()
 
-        // Lazy rows may leave the viewport; keep both expansion states and inspect each identity.
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(2)
+        compose.onNodeWithText("关闭").performClick()
         compose.onNodeWithTag("app-details:${second.identity.packageName}:true").performClick()
         compose.onNodeWithText("Second fixture paused reason").assertDoesNotExist()
         compose.onNodeWithText("上次检测：${formatRecordTime(secondTime)}").assertDoesNotExist()
         compose.onNodeWithText("上次恢复未成功：限制仍存在").assertDoesNotExist()
-        compose.onNodeWithText("复检结果：后台唤醒受限（已被停止）").assertExists()
+        compose.onNodeWithText("复检结果：后台唤醒受限").assertExists()
         compose.onNodeWithText("撤销已保存授权").assertDoesNotExist()
         compose.onNodeWithText("恢复接收").assertDoesNotExist()
         assertDetailActions()
-        assertOneSharedHint()
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(1)
-        compose.onNodeWithText("复检结果：可被后台唤醒（未被停止）").assertExists()
-        assertOneSharedHint()
+        assertNoSharedHints()
+        compose.onNodeWithText("关闭").performClick()
+        compose.onNodeWithTag("app-details:${first.identity.packageName}:true").performClick()
+        compose.onNodeWithText("复检结果：允许后台唤醒").assertExists()
+        assertNoSharedHints()
     }
 
-    @Test fun standaloneCardKeepsConciseTimingAndRecoveryGuidance() {
+    @Test fun standaloneCardShowsStateWithoutTimingAndRecoveryDisclosures() {
         compose.setContent { MaterialTheme {
             AutomaticProtectionCard(AutomaticProtectionState(), false, false, null, {}, {}, {}, showPreferences = false)
         } }
-        compose.onAllNodesWithText(polling).assertCountEquals(1)
-        compose.onAllNodesWithText(limits).assertCountEquals(1)
-        compose.onNodeWithText(shared).assertDoesNotExist()
+        compose.onNodeWithText("保护未开启").assertExists()
+        assertNoSharedHints()
     }
 
-    @Test fun consentConfirmationKeepsScopeSelectionTimingAndShutdownDisclosures() {
+    @Test fun consentConfirmationNamesScopeAndKeepsExplicitActions() {
         compose.setContent { MaterialTheme {
             AutomaticProtectionConfirmation({}, {}, "Fixture", "example.guidance.consent")
         } }
-        listOf(
-            "仅授权此应用的当前安装：被停止时尝试解除限制，不让应用常驻。",
-            "选择会保存。首页总开关控制运行；关闭总开关保留选择，关闭此应用开关移除授权。",
-            "约每 30 秒检查，休眠可能延后；无固定次数或间隔限制，不保证送达。",
-            "无法区分系统停止和主动强停。想保持停止，请先关总开关；已派发操作可能完成。",
-            "Shizuku 未就绪时等待，重启手机后需重新启动 Shizuku。",
-        ).forEach { compose.onNodeWithText(it).assertExists() }
+        compose.onNodeWithText("example.guidance.consent").assertExists()
+        compose.onNodeWithText("允许 Guardian 在此应用被停止时自动恢复后台唤醒。").assertExists()
         compose.onNodeWithText("授权并选择").assertIsEnabled()
         compose.onNodeWithText("取消").assertIsEnabled()
     }
 
-    private fun assertOneSharedHint() {
-        compose.onAllNodesWithText(shared).assertCountEquals(1)
+    private fun assertNoSharedHints() {
+        compose.onAllNodesWithText(shared).assertCountEquals(0)
         compose.onAllNodesWithText(polling).assertCountEquals(0)
         compose.onAllNodesWithText(limits).assertCountEquals(0)
     }

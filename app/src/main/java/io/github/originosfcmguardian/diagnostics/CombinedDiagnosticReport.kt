@@ -1,8 +1,5 @@
 package io.github.originosfcmguardian.diagnostics
 
-import io.github.originosfcmguardian.core.trace.ProcessTraceKind
-import io.github.originosfcmguardian.monitoring.MonitorSessionStatus
-import io.github.originosfcmguardian.notification.NotificationFactKind
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoverySource
 import io.github.originosfcmguardian.recovery.StoppedRecoveryStage
@@ -11,6 +8,8 @@ import io.github.originosfcmguardian.ui.HomeUiState
 import io.github.originosfcmguardian.ui.StoppedRecoveryPhase
 import io.github.originosfcmguardian.ui.StoppedRecoveryUiState
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryUiState
+import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEpisodeSnapshot
+import io.github.originosfcmguardian.fcmrecovery.FcmEpisodeAvailability
 
 data class DiagnosticEnvironment(
     val sdkInt: Int,
@@ -41,43 +40,6 @@ data class DiagnosticTarget(
     val currentLabel: String,
 )
 
-data class DiagnosticFcmReceipt(
-    val receivedAtEpochMillis: Long,
-    val messagePriority: String,
-    val notificationOutcome: String,
-    val deviceInteractive: String,
-    val deviceIdleMode: String,
-    val networkAvailability: String,
-    val handlerDurationMillis: Long?,
-    val processAgeAtCallbackMillis: Long?,
-)
-
-data class DiagnosticNotificationFacts(
-    val enabled: Boolean,
-    val accessGranted: Boolean,
-    val connected: Boolean,
-    val retainedCount: Int,
-    val postedOrUpdatedCount: Int,
-    val removedCount: Int,
-    val latestObservedAtEpochMillis: Long?,
-    val droppedEvents: Int,
-    val stopPersistenceUncertain: Boolean,
-)
-
-data class DiagnosticMonitorSummary(
-    val packageName: String,
-    val startedAtEpochMillis: Long,
-    val deadlineEpochMillis: Long,
-    val status: String,
-    val retainedEventCount: Int,
-    val processStartCount: Int,
-    val uidActiveCount: Int,
-    val uidIdleCount: Int,
-    val uidRunningCount: Int,
-    val uidStoppedCount: Int,
-    val pollCount: Int,
-)
-
 /** Historical journal metadata only; creation time is not a completion or readback time. */
 data class DiagnosticRecoveryRecord(
     val packageName: String,
@@ -96,7 +58,7 @@ data class DiagnosticStoppedRecovery(
     val latestRecord: DiagnosticRecoveryRecord? = null,
 )
 
-enum class DiagnosticAutomaticProtectionEvidenceScope { APP_RUNTIME_SNAPSHOT }
+enum class DiagnosticAutomaticProtectionEvidenceScope { APP_RUNTIME_SNAPSHOT, DAEMON_PROJECTED_UI_SNAPSHOT }
 enum class DiagnosticRecoveryOutcome { FLAG_CLEARED, STILL_STOPPED, NO_WRITE_NEEDED, BLOCKED, UNCONFIRMED, UNKNOWN }
 
 /** Presentation flags already held in memory, without a new durable-authority check. */
@@ -117,20 +79,15 @@ data class CombinedDiagnosticReport(
     val environment: DiagnosticEnvironment,
     val shizukuStatus: String,
     val targets: List<DiagnosticTarget>?,
-    val fcmConfiguration: String,
-    val fcmRegistration: String,
-    val notificationPermission: String,
-    val latestFcmReceipt: DiagnosticFcmReceipt?,
-    val notificationFacts: DiagnosticNotificationFacts?,
-    val monitor: DiagnosticMonitorSummary?,
-    val dailyProtectionStatus: String?,
-    val dailyProtectionCheckedAtEpochMillis: Long?,
     val sourceAvailability: Map<String, DiagnosticSourceAvailability>,
     val stoppedRecovery: DiagnosticStoppedRecovery = DiagnosticStoppedRecovery(),
     val automaticProtection: DiagnosticAutomaticProtection = DiagnosticAutomaticProtection(),
     val fcmRecoveryTrial: FcmRecoveryUiState = FcmRecoveryUiState(),
+    val fcmRecoveryEpisodes: FcmRecoveryEpisodeSnapshot = FcmRecoveryEpisodeSnapshot(),
     val fcmProtection: io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(),
     val protectionLifecycle: io.github.originosfcmguardian.autoprotection.ProtectionLifecycleSnapshot = io.github.originosfcmguardian.autoprotection.ProtectionLifecycleSnapshot(),
+    val protectionResources: io.github.originosfcmguardian.autoprotection.ProtectionResourceSnapshot = io.github.originosfcmguardian.autoprotection.ProtectionResourceSnapshot(),
+    val daemonDiagnostics: io.github.originosfcmguardian.daemon.DaemonDiagnosticsSnapshot = io.github.originosfcmguardian.daemon.DaemonDiagnosticsSnapshot(),
 )
 
 /**
@@ -143,10 +100,6 @@ fun buildCombinedDiagnosticReport(
     capturedAtEpochMillis: Long,
 ): CombinedDiagnosticReport {
     require(capturedAtEpochMillis > 0)
-    val receipt = state.fcm.latestReceipt
-    val notifications = state.notificationFacts.events.take(MAX_NOTIFICATION_FACTS)
-    val monitorSession = state.deepMonitoring.session
-    val monitorEvents = monitorSession?.events?.take(MAX_MONITOR_EVENTS).orEmpty()
     val recovery = state.stoppedRecovery
     val recoveryRecord = if (recovery.loaded && !recovery.storageBlocked) {
         val identity = recovery.recordIdentity
@@ -166,6 +119,10 @@ fun buildCombinedDiagnosticReport(
         } else null
     } else null
     val automatic = state.automaticProtection
+    val episodeSource = state.fcmRecovery.episodesSnapshot
+    val episodeSnapshot = episodeSource.copy(episodes = java.util.Collections.unmodifiableList(
+        if (episodeSource.availability == FcmEpisodeAvailability.AVAILABLE)
+            episodeSource.episodes.map { it.copy() } else emptyList()))
 
     val sources = linkedMapOf(
         "targetSelection" to when {
@@ -177,49 +134,11 @@ fun buildCombinedDiagnosticReport(
             state.selectedTargets.isEmpty() -> DiagnosticSourceAvailability.EMPTY
             else -> DiagnosticSourceAvailability.AVAILABLE
         },
-        "fcmEvidence" to when {
-            state.fcm.evidenceCorrupt -> DiagnosticSourceAvailability.CORRUPT
-            state.fcmEvidenceLoadState == HomeSourceLoadState.LOADING ->
-                DiagnosticSourceAvailability.LOADING
-            state.fcmEvidenceLoadState == HomeSourceLoadState.FAILED ->
-                DiagnosticSourceAvailability.UNAVAILABLE
-            receipt == null -> DiagnosticSourceAvailability.EMPTY
-            else -> DiagnosticSourceAvailability.AVAILABLE
-        },
-        "notificationFacts" to when {
-            state.notificationFacts.historyCorrupt -> DiagnosticSourceAvailability.CORRUPT
-            state.notificationFactsLoadState == HomeSourceLoadState.LOADING ->
-                DiagnosticSourceAvailability.LOADING
-            state.notificationFactsLoadState == HomeSourceLoadState.FAILED ->
-                DiagnosticSourceAvailability.UNAVAILABLE
-            state.notificationFacts.droppedEvents > 0 || state.notificationFacts.stopPersistenceUncertain ->
-                DiagnosticSourceAvailability.PARTIAL
-            notifications.isEmpty() -> DiagnosticSourceAvailability.EMPTY
-            else -> DiagnosticSourceAvailability.AVAILABLE
-        },
-        "recentMonitor" to when {
-            state.deepMonitoring.historyCorrupt -> DiagnosticSourceAvailability.CORRUPT
-            state.deepMonitoringLoadState == HomeSourceLoadState.LOADING ->
-                DiagnosticSourceAvailability.LOADING
-            state.deepMonitoringLoadState == HomeSourceLoadState.FAILED ->
-                DiagnosticSourceAvailability.UNAVAILABLE
-            monitorSession == null -> DiagnosticSourceAvailability.EMPTY
-            monitorSession.status in PARTIAL_MONITOR_STATUSES -> DiagnosticSourceAvailability.PARTIAL
-            else -> DiagnosticSourceAvailability.AVAILABLE
-        },
-        "dailyProtection" to when (state.dailyProtectionLoadState) {
-            HomeSourceLoadState.LOADING -> DiagnosticSourceAvailability.LOADING
-            HomeSourceLoadState.FAILED -> DiagnosticSourceAvailability.UNAVAILABLE
-            HomeSourceLoadState.LOADED -> if (state.dailyProtectionReport == null) {
-                DiagnosticSourceAvailability.EMPTY
-            } else if (state.dailyProtectionReport.containsRetiredAutostartEvidence) {
-                DiagnosticSourceAvailability.PARTIAL
-            } else {
-                DiagnosticSourceAvailability.AVAILABLE
-            }
-        },
+        // Retired source remains a null/unavailable tombstone for existing report readers.
+        "dailyProtection" to DiagnosticSourceAvailability.UNAVAILABLE,
         "stoppedRecovery" to recoveryAvailability(recovery, recoveryRecord),
         "automaticProtection" to DiagnosticSourceAvailability.AVAILABLE,
+        "fcmRecoveryEpisodes" to episodeSourceAvailability(episodeSnapshot),
     )
 
     return CombinedDiagnosticReport(
@@ -244,65 +163,10 @@ fun buildCombinedDiagnosticReport(
                 )
             }
         },
-        fcmConfiguration = state.fcm.configuration.name,
-        fcmRegistration = state.fcm.registration.name,
-        notificationPermission = state.fcm.notificationPermission.name,
-        latestFcmReceipt = if (
-            state.fcm.evidenceCorrupt || state.fcmEvidenceLoadState != HomeSourceLoadState.LOADED
-        ) null else receipt?.let {
-            DiagnosticFcmReceipt(
-                receivedAtEpochMillis = it.receivedAtEpochMillis,
-                messagePriority = it.messagePriority.name,
-                notificationOutcome = it.notificationOutcome.name,
-                deviceInteractive = it.deviceInteractive.name,
-                deviceIdleMode = it.deviceIdleMode.name,
-                networkAvailability = it.networkAvailability.name,
-                handlerDurationMillis = it.handlerDurationMillis,
-                processAgeAtCallbackMillis = it.processAgeAtCallbackMillis,
-            )
-        },
-        notificationFacts = if (
-            state.notificationFacts.historyCorrupt ||
-            state.notificationFactsLoadState != HomeSourceLoadState.LOADED
-        ) null else DiagnosticNotificationFacts(
-            enabled = state.notificationFacts.enabled,
-            accessGranted = state.notificationFacts.accessGranted,
-            connected = state.notificationFacts.connected,
-            retainedCount = notifications.size,
-            postedOrUpdatedCount = notifications.count { it.kind == NotificationFactKind.POSTED_OR_UPDATED },
-            removedCount = notifications.count { it.kind == NotificationFactKind.REMOVED },
-            latestObservedAtEpochMillis = notifications.maxOfOrNull { it.observedAtEpochMillis },
-            droppedEvents = state.notificationFacts.droppedEvents.coerceAtLeast(0),
-            stopPersistenceUncertain = state.notificationFacts.stopPersistenceUncertain,
-        ),
-        monitor = if (
-            state.deepMonitoring.historyCorrupt ||
-            state.deepMonitoringLoadState != HomeSourceLoadState.LOADED
-        ) null else monitorSession?.let { session ->
-            DiagnosticMonitorSummary(
-                packageName = session.identity.packageName,
-                startedAtEpochMillis = session.startedAtEpochMillis,
-                deadlineEpochMillis = session.deadlineEpochMillis,
-                status = session.status.name,
-                retainedEventCount = monitorEvents.size,
-                processStartCount = monitorEvents.count { it.kind == ProcessTraceKind.PROCESS_START },
-                uidActiveCount = monitorEvents.count { it.kind == ProcessTraceKind.UID_ACTIVE },
-                uidIdleCount = monitorEvents.count { it.kind == ProcessTraceKind.UID_IDLE },
-                uidRunningCount = monitorEvents.count { it.kind == ProcessTraceKind.UID_RUNNING },
-                uidStoppedCount = monitorEvents.count { it.kind == ProcessTraceKind.UID_STOPPED },
-                pollCount = session.pollCount,
-            )
-        },
-        dailyProtectionStatus = if (state.dailyProtectionLoadState == HomeSourceLoadState.LOADED) {
-            state.dailyProtectionReport?.let {
-                if (it.containsRetiredAutostartEvidence) UNKNOWN else it.status.name
-            }
-        } else null,
-        dailyProtectionCheckedAtEpochMillis = if (
-            state.dailyProtectionLoadState == HomeSourceLoadState.LOADED
-        ) state.dailyProtectionReport?.checkedAtEpochMillis else null,
         sourceAvailability = sources,
-        fcmRecoveryTrial = state.fcmRecovery.copy(events = state.fcmRecovery.events.takeLast(64)),
+        fcmRecoveryTrial = state.fcmRecovery.copy(events = state.fcmRecovery.events.takeLast(64),
+            episodesSnapshot = FcmRecoveryEpisodeSnapshot()),
+        fcmRecoveryEpisodes = episodeSnapshot,
         fcmProtection = state.fcmProtection.copy(latestObservation = null),
         stoppedRecovery = DiagnosticStoppedRecovery(
             loaded = recovery.loaded,
@@ -313,6 +177,8 @@ fun buildCombinedDiagnosticReport(
             latestRecord = recoveryRecord,
         ),
         automaticProtection = DiagnosticAutomaticProtection(
+            evidenceScope = if (state.automaticProtectionFromDaemon) DiagnosticAutomaticProtectionEvidenceScope.DAEMON_PROJECTED_UI_SNAPSHOT
+                else DiagnosticAutomaticProtectionEvidenceScope.APP_RUNTIME_SNAPSHOT,
             enabled = automatic.enabled,
             busy = automatic.busy,
             savedAuthorization = automatic.savedAuthorization,
@@ -344,6 +210,18 @@ private fun recoveryAvailability(
     else -> DiagnosticSourceAvailability.EMPTY
 }
 
+internal fun episodeSourceAvailability(snapshot: FcmRecoveryEpisodeSnapshot): DiagnosticSourceAvailability =
+    when (snapshot.availability) {
+        FcmEpisodeAvailability.NOT_LOADED -> DiagnosticSourceAvailability.LOADING
+        FcmEpisodeAvailability.CORRUPT -> DiagnosticSourceAvailability.CORRUPT
+        FcmEpisodeAvailability.UNAVAILABLE -> DiagnosticSourceAvailability.UNAVAILABLE
+        FcmEpisodeAvailability.AVAILABLE -> when {
+            snapshot.writeFailures > 0 || snapshot.droppedUpdates > 0 -> DiagnosticSourceAvailability.PARTIAL
+            snapshot.episodes.isEmpty() -> DiagnosticSourceAvailability.EMPTY
+            else -> DiagnosticSourceAvailability.AVAILABLE
+        }
+    }
+
 /** Fixed JSON schema. It contains summaries only, never raw events, tokens or installation IDs. */
 fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray {
     val json = buildString {
@@ -370,58 +248,11 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             }
             append(']')
         } ?: append("null")
-        append(",\"fcm\":{")
-        field("configuration", report.fcmConfiguration)
-        field("registration", report.fcmRegistration)
-        field("notificationPermission", report.notificationPermission)
-        append("\"latestReceipt\":")
-        report.latestFcmReceipt?.let { receipt ->
-            append('{')
-            field("receivedAtEpochMillis", receipt.receivedAtEpochMillis)
-            field("messagePriority", receipt.messagePriority)
-            field("notificationOutcome", receipt.notificationOutcome)
-            field("deviceInteractive", receipt.deviceInteractive)
-            field("deviceIdleMode", receipt.deviceIdleMode)
-            field("networkAvailability", receipt.networkAvailability)
-            field("handlerDurationMillis", receipt.handlerDurationMillis)
-            field("processAgeAtCallbackMillis", receipt.processAgeAtCallbackMillis, comma = false)
-            append('}')
-        } ?: append("null")
-        append('}')
-        append(",\"notificationFacts\":")
-        report.notificationFacts?.let { facts ->
-            append('{')
-            field("enabled", facts.enabled)
-            field("accessGranted", facts.accessGranted)
-            field("connected", facts.connected)
-            field("retainedCount", facts.retainedCount)
-            field("postedOrUpdatedCount", facts.postedOrUpdatedCount)
-            field("removedCount", facts.removedCount)
-            field("latestObservedAtEpochMillis", facts.latestObservedAtEpochMillis)
-            field("droppedEvents", facts.droppedEvents)
-            field("stopPersistenceUncertain", facts.stopPersistenceUncertain, comma = false)
-            append('}')
-        } ?: append("null")
-        append(",\"recentMonitor\":")
-        report.monitor?.let { monitor ->
-            append('{')
-            field("packageName", monitor.packageName)
-            field("startedAtEpochMillis", monitor.startedAtEpochMillis)
-            field("deadlineEpochMillis", monitor.deadlineEpochMillis)
-            field("status", monitor.status)
-            field("retainedEventCount", monitor.retainedEventCount)
-            field("processStartCount", monitor.processStartCount)
-            field("uidActiveCount", monitor.uidActiveCount)
-            field("uidIdleCount", monitor.uidIdleCount)
-            field("uidRunningCount", monitor.uidRunningCount)
-            field("uidStoppedCount", monitor.uidStoppedCount)
-            field("pollCount", monitor.pollCount, comma = false)
-            append('}')
-        } ?: append("null")
         append(",\"dailyProtection\":{")
         field("scope", "SELECTED_APP_INSTALLATION_IDENTITY_ONLY")
-        field("status", report.dailyProtectionStatus)
-        field("checkedAtEpochMillis", report.dailyProtectionCheckedAtEpochMillis, comma = false)
+        field("retired", true)
+        field("status", null as String?)
+        field("checkedAtEpochMillis", null as Long?, comma = false)
         append('}')
         append(",\"stoppedRecovery\":{")
         with(report.stoppedRecovery) {
@@ -477,6 +308,10 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             }
             append("]}")
         }
+        append(",\"protectionResources\":")
+        appendProtectionResourceJson(report.protectionResources, report.daemonDiagnostics.availability.name)
+        append(",\"daemonDiagnostics\":")
+        appendDaemonDiagnosticsJson(report.daemonDiagnostics)
         append(",\"sourceAvailability\":{")
         report.sourceAvailability.entries.forEachIndexed { index, entry ->
             if (index > 0) append(',')
@@ -512,6 +347,7 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             field("eligibility", event.eligibility.name)
             field("requestStatus", event.status?.name)
             field("requestReason", event.reason?.name)
+            event.operation?.let { field("requestOperation", it.name) }
             field("observationUnknownReason", event.observationUnknownReason?.name)
             append("\"powerReference\":")
             event.power?.let { p ->
@@ -529,12 +365,57 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
             append('}')
         }
         append("]}")
+        append(",\"fcmRecoveryEpisodes\":{")
+        with(report.fcmRecoveryEpisodes) {
+            val visible = if (availability == FcmEpisodeAvailability.AVAILABLE)
+                episodes.takeLast(MAX_EPISODE_PREVIEW) else emptyList()
+            field("availability", availability.name)
+            field("retainedEpisodeCount", if (availability == FcmEpisodeAvailability.AVAILABLE) episodes.size.toLong() else null)
+            field("evictedEpisodes", evictedEpisodes)
+            field("writeFailures", writeFailures)
+            field("droppedUpdates", droppedUpdates)
+            field("previewLimit", MAX_EPISODE_PREVIEW)
+            field("omittedFromPreview", if (availability == FcmEpisodeAvailability.AVAILABLE)
+                (episodes.size - visible.size).toLong() else null)
+            field("previewTruncated", episodes.size > visible.size && availability == FcmEpisodeAvailability.AVAILABLE)
+            field("evidenceLimit", FCM_EPISODE_EVIDENCE_LIMIT)
+            append("\"episodes\":[")
+            visible.forEachIndexed { index, episode ->
+                if (index > 0) append(',')
+                append('{')
+                field("sequence", episode.sequence)
+                field("processId", episode.processId)
+                field("processStartedElapsedMillis", episode.processStartedElapsedMillis)
+                field("startedAtEpochMillis", episode.startedAtMillis)
+                field("startedElapsedMillis", episode.startedElapsedMillis)
+                field("kind", episode.kind.name)
+                field("lastObservedAtEpochMillis", episode.lastObservedAtMillis)
+                field("lastObservedElapsedMillis", episode.lastObservedElapsedMillis)
+                field("requestAtEpochMillis", episode.requestAtMillis)
+                field("requestElapsedMillis", episode.requestElapsedMillis)
+                field("requestPending", episode.requestPending)
+                field("requestStatus", episode.requestStatus?.name)
+                episode.requestOperation?.let { field("requestOperation", it.name) }
+                field("resultAtEpochMillis", episode.resultAtMillis)
+                field("resultElapsedMillis", episode.resultElapsedMillis)
+                field("requestReason", episode.reason?.name)
+                field("endedAtEpochMillis", episode.endedAtMillis)
+                field("endedElapsedMillis", episode.endedElapsedMillis)
+                field("outcome", episode.outcome.name)
+                field("timeoutObserved", episode.timeoutObserved)
+                field("lastBlock", episode.lastBlock.name, comma = false)
+                append('}')
+            }
+            append("]}")
+        }
         append(",\"unknowns\":{")
         field("fcmToNotificationCausality", UNKNOWN)
         field("appWakeCause", UNKNOWN)
         field("continuousFcmConnection", UNKNOWN)
         field("notificationInstallationContinuity", UNKNOWN, comma = false)
         append('}')
+        append(",\"removedCapabilities\":")
+        stringArray(REMOVED_DIAGNOSTIC_CAPABILITIES)
         append(",\"limitations\":")
         stringArray(DIAGNOSTIC_REPORT_LIMITATIONS)
         append('}')
@@ -627,12 +508,11 @@ internal sealed interface CombinedDiagnosticExportResult {
 }
 
 private const val UNKNOWN = "UNKNOWN"
-private const val MAX_NOTIFICATION_FACTS = 200
-private const val MAX_MONITOR_EVENTS = 500
 private const val MAX_LABEL_LENGTH = 80
 private const val MAX_TEXT_LENGTH = 128
-internal const val MAX_REPORT_BYTES = 64 * 1024
-internal const val DIAGNOSTIC_REPORT_SCHEMA = "guardian.combined-diagnostic.v8"
+// Finite reserve for operation attribution in at most 64 events and 8 episode previews.
+internal const val MAX_REPORT_BYTES = 1024 * 1024
+internal const val DIAGNOSTIC_REPORT_SCHEMA = "guardian.combined-diagnostic.v13"
 private const val LIMITATION_SUMMARY_ONLY =
     "This report contains bounded summaries of already known app state and no raw notification or process events."
 private const val LIMITATION_CAUSALITY =
@@ -650,7 +530,9 @@ internal val DIAGNOSTIC_REPORT_LIMITATIONS = listOf(
     LIMITATION_CORRUPT,
     LIMITATION_SAMPLE_TIMES,
     LIMITATION_LIVE_STATE,
-    "Daily protection checks selected app installation identity only, not stopped flags, FCM connectivity, or notification delivery; retired checks are UNKNOWN.",
+    FCM_EPISODE_EVIDENCE_LIMIT,
+    "Deep monitoring, notification fact collection and Guardian Firebase self-test are removed from this build. Historical files are not read or deleted. No collection does not prove absence of events or delivery failures.",
+    "Scheduled read-only inspection is removed. Its compatibility report fields are null and unavailable; historical inspection files are not read or deleted.",
     "Recovery record time is journal creation time, not command completion or readback time.",
     "RECONCILED describes a later read-only observation, not success of the original command.",
     "A historical package recovery record does not prove the current installation state or notification delivery.",
@@ -658,10 +540,10 @@ internal val DIAGNOSTIC_REPORT_LIMITATIONS = listOf(
     "Automatic last check time and retained outcome are independent; the check time is not an outcome timestamp.",
 )
 
-private val PARTIAL_MONITOR_STATUSES = setOf(
-    MonitorSessionStatus.RUNNING,
-    MonitorSessionStatus.UNAVAILABLE,
-    MonitorSessionStatus.IDENTITY_CHANGED,
-    MonitorSessionStatus.LIMIT_REACHED,
-    MonitorSessionStatus.INTERRUPTED,
+internal val REMOVED_DIAGNOSTIC_CAPABILITIES = listOf(
+    "DEEP_MONITORING", "NOTIFICATION_FACT_COLLECTION", "GUARDIAN_FIREBASE_SELF_TEST", "SCHEDULED_READ_ONLY_INSPECTION",
 )
+
+internal const val MAX_EPISODE_PREVIEW = 8
+internal const val FCM_EPISODE_EVIDENCE_LIMIT =
+    "CONNECTION_AFTER_REQUEST records a later qualified connection observation, not unique recovery causality or notification delivery. Request start, pending and returned result times are separate; missing legacy result times remain unknown. REQUESTED is command acceptance only. PRESENT_DISCONNECTED does not authorize service-absence recovery. Episode timestamps describe retained transition records, not every completed poll. Coverage gaps, unavailable storage, evictions and preview omissions leave missing history unknown; no incident record is not proof of uninterrupted connection."

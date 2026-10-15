@@ -6,6 +6,10 @@ import io.github.originosfcmguardian.autoprotection.ProtectionLifecycleDiagnosti
 class GuardianApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        if (getProcessName() == packageName) ProtectionLifecycleDiagnostics.initialize(this)
+        if (getProcessName() == packageName) {
+            io.github.originosfcmguardian.daemon.DaemonAppRuntime.onAppCreated(this)
+            io.github.originosfcmguardian.protection.LegacyInspectionCleanup.cancel(this)
+            ProtectionLifecycleDiagnostics.initialize(this)
+        }
     }
 }

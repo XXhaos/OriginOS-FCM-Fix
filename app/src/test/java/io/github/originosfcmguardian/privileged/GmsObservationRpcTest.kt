@@ -37,12 +37,15 @@ class GmsObservationRpcTest {
         val rpc = GmsObservationRpc(100); val release = CountDownLatch(1); val dispatched = CountDownLatch(1)
         try {
             assertEquals(GmsUnknown.TIMED_OUT, reason(rpc.read(1, { awaitUninterruptibly(release); 2000 }, { dispatched.countDown(); raw(1) })))
+            assertFalse(rpc.isQuiescent())
             assertEquals(GmsUnknown.BUSY, reason(rpc.read(2, { 2000 }, { raw(2) })))
             release.countDown(); assertFalse(dispatched.await(150, TimeUnit.MILLISECONDS))
+            assertTrue(rpc.isQuiescent())
         } finally { release.countDown(); rpc.close() }
     }
     @Test fun cancellationDiscardsStuckLatePayloadAndAllowsBoundedCleanup() = runBlocking {
         val rpc = GmsObservationRpc(); val release = CountDownLatch(1); val entered = CountDownLatch(1)
+        val revoke = GmsObservationRpc()
         val result = AtomicReference<GmsConnectionObservation>(); val cleaned = CountDownLatch(1)
         val call = launch(Dispatchers.Default) { result.set(rpc.read(1, { 2000 }, {
             entered.countDown(); awaitUninterruptibly(release); raw(1)
@@ -51,10 +54,10 @@ class GmsObservationRpcTest {
             assertTrue(entered.await(1, TimeUnit.SECONDS)); call.cancelAndJoin()
             assertEquals(GmsUnknown.CANCELLED, reason(result.get()))
             assertEquals(GmsUnknown.BUSY, reason(rpc.read(2, { 2000 }, { raw(2) })))
-            rpc.cleanupBestEffort { cleaned.countDown() }
+            revoke.cleanupBestEffort { cleaned.countDown() }
             assertTrue(cleaned.await(1, TimeUnit.SECONDS))
             release.countDown(); assertEquals(GmsUnknown.CANCELLED, reason(result.get()))
-        } finally { release.countDown(); rpc.close() }
+        } finally { release.countDown(); rpc.close(); revoke.close() }
     }
     @Test fun synchronousReadinessOrBindIsBoundedWithoutBlockingSessionMonitor() = runBlocking {
         val rpc = GmsObservationRpc(100); val release = CountDownLatch(1)

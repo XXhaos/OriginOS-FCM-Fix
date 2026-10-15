@@ -17,15 +17,20 @@ internal fun <T> boundedRecoveryCallback(
     localActive: () -> Boolean,
     cancel: () -> Unit,
     timeoutMillis: Long = 2_000,
+    activity: io.github.originosfcmguardian.privileged.PrivilegedWorkerActivity? = null,
     block: () -> T,
 ): T {
     var future: Future<T>? = null
+    val settlement = activity?.track()
     return try {
         check(localActive())
         val submitted = worker.submit<T> {
+            check(settlement?.workerEntered() != false)
+            try {
             // A queued callback must not enter Binder after cancellation or deadline expiry.
             check(localActive())
             block()
+            } finally { settlement?.workerEnded(false, null) }
         }
         future = submitted
         submitted.get(timeoutMillis, TimeUnit.MILLISECONDS).also { check(localActive()) }
@@ -34,6 +39,7 @@ internal fun <T> boundedRecoveryCallback(
         throw failure
     } finally {
         future?.cancel(true)
+        settlement?.abandonQueued()
     }
 }
 

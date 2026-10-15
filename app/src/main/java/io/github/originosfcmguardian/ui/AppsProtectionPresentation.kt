@@ -78,30 +78,30 @@ internal fun protectionAppStatus(state: HomeUiState, row: ProtectionAppRow): Str
     val configured = identity in state.automaticProtection.configuredIdentities
     val binding = state.automaticProtection.targets.firstOrNull { it.identity == identity }
     if (!row.currentInstallation) return if (configured)
-        "已保留选择；安装身份变化，请取消后重新确认" else "应用已卸载或安装身份变化"
-    if (identity == null) return "应用身份不可用；请刷新应用列表"
+        "应用已变化，请重新选择" else "应用已卸载或更新，请刷新"
+    if (identity == null) return "无法读取应用，请刷新"
     if (state.automaticPreparationPackage == row.app.packageName) return "正在核对应用…"
-    if (binding?.needsReconfirmation == true) return "已保留选择；请取消后重新确认当前安装"
+    if (binding?.needsReconfirmation == true) return "请重新选择此应用"
     if (configured && state.selectedTargets.any { it.identity == identity && it.status == TargetAutostartStatus.IDENTITY_CHANGED })
-        return "已保留选择；安装身份变化，请取消后重新确认"
-    if (configured && !state.automaticProtection.masterEnabled) return "已选择；自动保护总开关关闭或暂停"
+        return "应用已变化，请重新选择"
+    if (configured && !state.automaticProtection.masterEnabled) return "已选择 · 保护未开启"
     if (protection?.busy == true) return "启动或恢复中…"
-    if (protection?.waitingForReconciliation == true) return "等待只读复检"
-    if (protection?.waitingForPrivilege == true) return "等待 Shizuku；检测尚未运行"
-    if (protection?.enabled == true) return "停止限制检测已开启"
-    if (protection?.savedAuthorization == true) return "等待恢复检测"
+    if (protection?.waitingForReconciliation == true) return "等待复检"
+    if (protection?.waitingForPrivilege == true) return "等待 Shizuku"
+    if (protection?.enabled == true) return "保护已开启"
+    if (protection?.savedAuthorization == true) return "等待恢复"
     if (state.stoppedRecovery.recordIdentity == identity) when (state.stoppedRecovery.receiptOutcome) {
-        StoppedRecoveryOutcome.STILL_STOPPED -> return "上次核对仍有停止限制；保护未开启，请查看详情"
-        StoppedRecoveryOutcome.UNCONFIRMED -> return "上次恢复结果待确认；请查看详情"
+        StoppedRecoveryOutcome.STILL_STOPPED -> return "上次恢复未完成，请复检"
+        StoppedRecoveryOutcome.UNCONFIRMED -> return "上次恢复待确认，请复检"
         else -> Unit
     }
     val selected = state.selectedTargets.firstOrNull { it.identity == identity }
-    if (selected?.status == TargetAutostartStatus.IDENTITY_CHANGED) return "安装身份变化；请刷新应用列表"
+    if (selected?.status == TargetAutostartStatus.IDENTITY_CHANGED) return "应用已变化，请刷新"
     if (!row.app.supported) return "此应用不支持自动保护"
     if (state.automaticProtection.configuredIdentities.any { it.packageName == row.app.packageName })
-        return "请先关闭该应用旧安装的授权"
+        return "请重新选择此应用"
     if (state.shizuku.status != ShizukuStatus.READY_SHELL) return "需连接 Shizuku 后开启"
-    return "自动保护未开启"
+    return "保护未开启"
 }
 
 /** Token spans asynchronous enrollment and confirmation. Cancel/background invalidates both phases. */

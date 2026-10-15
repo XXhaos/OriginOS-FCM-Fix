@@ -23,6 +23,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import io.github.originosfcmguardian.daemon.DaemonAppRuntime
+import io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime
+import io.github.originosfcmguardian.privileged.ShizukuExecutor
+import io.github.originosfcmguardian.recovery.StoppedRecoveryController
+import kotlinx.coroutines.*
 
 data class AutomaticProtectionTargetState(
     val identity: SelectedTargetIdentity,
@@ -50,6 +55,9 @@ data class AutomaticProtectionState(
     val waitingForReconciliation: Boolean = false,
     val masterEnabled: Boolean = false,
     val configurationAvailable: Boolean = true,
+    /** This process's live core session, never persisted or inferred from saved master ON. */
+    val coreSessionStartedAtElapsedMillis: Long? = null,
+    val waitingForService: Boolean = false,
 ) {
     val authorizedIdentities: List<SelectedTargetIdentity> get() = targets.filter { it.savedAuthorization }.map { it.identity }
     val configuredIdentities: List<SelectedTargetIdentity> get() = targets.filter { it.configuredSelection }.map { it.identity }
@@ -58,6 +66,9 @@ data class AutomaticProtectionState(
 /** Saved choices are presentation, never live write authority. */
 internal fun configuredAutomaticProtectionState(previous: AutomaticProtectionState,
     snapshot: ProtectionAuthoritySnapshot?, detail: String): AutomaticProtectionState = previous.copy(
+    coreSessionStartedAtElapsedMillis = previous.coreSessionStartedAtElapsedMillis.takeIf {
+        snapshot?.mode == ProtectionConsentMode.ACTIVE && !snapshot.storageBlocked
+    },
     configurationAvailable = true,
     masterEnabled = snapshot?.mode == ProtectionConsentMode.ACTIVE && !snapshot.storageBlocked,
     savedAuthorization = snapshot?.runnableConsents()?.isNotEmpty() == true,
@@ -72,6 +83,7 @@ internal fun configuredAutomaticProtectionState(previous: AutomaticProtectionSta
 
 internal fun masterOffAutomaticProtectionState(previous: AutomaticProtectionState, detail: String): AutomaticProtectionState =
     previous.copy(masterEnabled = false, enabled = false, busy = false, savedAuthorization = false,
+        coreSessionStartedAtElapsedMillis = null,
         waitingForPrivilege = false, waitingForReconciliation = false, detail = detail,
         targets = previous.targets.map { it.copy(savedAuthorization = false, enabled = false, busy = false,
             waitingForPrivilege = false, detail = if (it.needsReconfirmation) it.detail else detail) })
@@ -124,6 +136,16 @@ internal class AutomaticProtectionGrant(
     var reconciliationRefresh: ((Boolean) -> Unit)? = null
 }
 
+/** Presentation only: called at actual core entry, after the live owner has been claimed. */
+internal fun startedAutomaticProtectionSessionState(previous: AutomaticProtectionState,
+    current: AutomaticProtectionGrant, activeOwner: AutomaticProtectionGrant?, sessionActive: Boolean,
+    elapsedMillis: Long): AutomaticProtectionState {
+    if (activeOwner !== current || !sessionActive || !current.live.get() || current.cancel == null ||
+        previous.coreSessionStartedAtElapsedMillis != null) return previous
+    val startedAt = elapsedMillis.takeIf { it >= 0 } ?: return previous
+    return previous.copy(coreSessionStartedAtElapsedMillis = startedAt)
+}
+
 /** Unexpected host loss retires every live capability without modifying persistent intent. */
 internal fun interruptAutomaticProtectionGrant(current: AutomaticProtectionGrant,
     gate: AutomaticSessionGate, previous: AutomaticProtectionState, detail: String): AutomaticProtectionState {
@@ -131,6 +153,7 @@ internal fun interruptAutomaticProtectionGrant(current: AutomaticProtectionGrant
     current.live.set(false)
     gate.revoke(current.id)
     return previous.copy(enabled = false, busy = false, waitingForPrivilege = false,
+        coreSessionStartedAtElapsedMillis = null,
         waitingForReconciliation = false, detail = detail,
         targets = previous.targets.map { it.copy(enabled = false, busy = false,
             waitingForPrivilege = false, detail = detail) })
@@ -139,6 +162,26 @@ internal fun interruptAutomaticProtectionGrant(current: AutomaticProtectionGrant
 /** A tile observation cannot cross an intervening OFF, pause or replacement operation. */
 internal fun recoveryRevisionMatches(expected: Long?, current: Long): Boolean =
     expected == null || expected == current
+
+internal enum class LegacyNegativeAdmission { LOCAL, REMOTE, STALE }
+
+/** A retired original notification may carry OFF across migration, never across local replacement. */
+internal fun matchesLegacyNotificationStop(id: String, pendingSessionId: String?, activeSessionId: String?,
+    remoteClaimed: Boolean, migrationRetiredSessionId: String?): Boolean =
+    id == pendingSessionId || id == activeSessionId || remoteClaimed && id == migrationRetiredSessionId
+
+/** Notification identity was matched before this boundary; a handoff cannot discard its OFF. */
+internal fun legacyNegativeAdmission(remoteClaimed: Boolean, expectedSessionId: String?, expectedRevision: Long?,
+    currentRevision: Long, pendingSessionId: String?, activeSessionId: String?,
+    migrationRetiredSessionId: String? = null): LegacyNegativeAdmission = when {
+    remoteClaimed && expectedSessionId != null && expectedSessionId != migrationRetiredSessionId &&
+        (expectedRevision != currentRevision ||
+            pendingSessionId != expectedSessionId && activeSessionId != expectedSessionId) -> LegacyNegativeAdmission.STALE
+    remoteClaimed -> LegacyNegativeAdmission.REMOTE
+    expectedSessionId != null && (expectedRevision != currentRevision ||
+        pendingSessionId != expectedSessionId && activeSessionId != expectedSessionId) -> LegacyNegativeAdmission.STALE
+    else -> LegacyNegativeAdmission.LOCAL
+}
 
 /** Called under the runtime lock: an old removal must never retire a replacement owner. */
 internal fun finishAutomaticIdleRetirement(expectedRevision: Long, currentRevision: Long,
@@ -179,11 +222,57 @@ object AutomaticProtectionRuntime {
     private val serviceRetirement = AutomaticServiceRetirementHandoff() // runtime lock only
     private val mutable = MutableStateFlow(AutomaticProtectionState(configurationAvailable = false))
     val state: StateFlow<AutomaticProtectionState> = mutable.asStateFlow()
+    @Volatile private var migrationPrepared = false
+    private var migrationRetiredSessionId: String? = null // exact original notification, negative continuity only
+
+    fun localExecutionAllowed(context: Context): Boolean = !migrationPrepared && !DaemonAppRuntime.isRemoteOwned(context)
+
+    /** Close only process-local capabilities. The caller persists MIGRATING before awaiting IO. */
+    fun prepareForDaemonMigration(context: Context): Boolean {
+        val cancel = synchronized(this) {
+            val firstPreparation = !migrationPrepared
+            migrationPrepared = true
+            restoreBlocked = true
+            pendingStart = null
+            ++revision
+            val current = grant
+            if (firstPreparation) migrationRetiredSessionId = current?.id
+            current?.writes?.block()
+            current?.live?.set(false)
+            current?.let { gate.revoke(it.id) }
+            grant = null
+            current?.cancel
+        }
+        ShizukuExecutor.prepareForDaemonMigration()
+        StoppedRecoveryController.prepareForDaemonMigration()
+        FcmProtectionRuntime.prepareForDaemonMigration()
+        cancel?.invoke()
+        return true
+    }
+
+    /** Success means actual workers and FIFO persistence have settled, not Future cancellation. */
+    suspend fun awaitDaemonMigrationDrain(context: Context): Boolean = withContext(Dispatchers.IO) { withTimeoutOrNull(45_000) {
+        if (!migrationPrepared) return@withTimeoutOrNull false
+        if (!AutomaticProtectionService.awaitDaemonMigrationDrain()) return@withTimeoutOrNull false
+        if (!StoppedRecoveryController.awaitDaemonMigrationDrain()) return@withTimeoutOrNull false
+        if (AndroidRecoveryJournal.open(context.applicationContext).load().latest?.requiresReconcile == true)
+            return@withTimeoutOrNull false
+        val persisted = CompletableDeferred<Unit>()
+        synchronized(this@AutomaticProtectionRuntime) { authorityExecutor.execute { persisted.complete(Unit) } }
+        persisted.await()
+        if (!FcmProtectionRuntime.awaitDaemonMigrationDrain(context)) return@withTimeoutOrNull false
+        val drained = ShizukuExecutor.awaitDaemonMigrationDrain()
+        if (drained) io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.markMigrationWorkersDrained()
+        drained
+    } ?: false }
+
+    @Synchronized internal fun publishDaemonState(value: AutomaticProtectionState) { mutable.value = value }
 
     fun start(context: Context, identity: SelectedTargetIdentity): Boolean {
+        if (!localExecutionAllowed(context)) return false
         val app = context.applicationContext
         synchronized(this) {
-            if (pendingStart != null || mutable.value.busy || mutable.value.revocationSaveFailed) return false
+            if (migrationPrepared || pendingStart != null || mutable.value.busy || mutable.value.revocationSaveFailed) return false
             if (!validRuntimeFingerprint(Build.FINGERPRINT) ||
                 android.os.Process.myUid() / 100_000 != 0) {
                 mutable.value = mutable.value.copy(detail = "未添加该应用：当前系统版本或用户不受支持")
@@ -246,7 +335,8 @@ object AutomaticProtectionRuntime {
                             priorSession?.let { gate.revoke(it.id) }
                             grant = null
                             cancel = priorSession?.cancel
-                            mutable.value = mutable.value.copy(enabled = false, busy = true, detail = "正在保存应用选择")
+                            mutable.value = mutable.value.copy(enabled = false, busy = true, coreSessionStartedAtElapsedMillis = null,
+                                detail = "正在保存应用选择")
                             true
                         }
                     }
@@ -287,6 +377,7 @@ object AutomaticProtectionRuntime {
                     if (rejected) retireServiceWhenIdle(startingRevision)
                 },
                 failClosed = failure@ { commitMayHaveWritten ->
+                    if (migrationPrepared) return@failure
                     val retirement = synchronized(this) {
                         // OFF/removal can invalidate a failed read after the helper's last check.
                         // Only an admitted, possibly durable commit may retire authority when stale.
@@ -295,6 +386,7 @@ object AutomaticProtectionRuntime {
                             previous?.live?.set(false)
                             previous?.let { gate.revoke(it.id) }
                             grant = null
+                            mutable.value = mutable.value.copy(coreSessionStartedAtElapsedMillis = null)
                             restoreBlocked = true
                             true to previous?.cancel
                         }
@@ -356,9 +448,10 @@ object AutomaticProtectionRuntime {
 
     /** Explicit master ON reuses exact saved tokens and acknowledges only startup exit history. */
     fun enableMaster(context: Context): Boolean {
+        if (!localExecutionAllowed(context)) return false
         val app = context.applicationContext
         synchronized(this) {
-            if (pendingStart != null || mutable.value.busy || mutable.value.revocationSaveFailed) return false
+            if (migrationPrepared || pendingStart != null || mutable.value.busy || mutable.value.revocationSaveFailed) return false
             // Capture the user's action before queued IO. Later stop/crash events are not acknowledged.
             val actionClock = runCatching { budgetClock(app) }.getOrNull() ?: return false
             val request = UUID.randomUUID().toString()
@@ -370,7 +463,8 @@ object AutomaticProtectionRuntime {
             previous?.let { gate.revoke(it.id) }
             grant = null
             previous?.cancel?.invoke()
-            mutable.value = mutable.value.copy(enabled = false, busy = true, detail = "正在核对总开关开启条件")
+            mutable.value = mutable.value.copy(enabled = false, busy = true, coreSessionStartedAtElapsedMillis = null,
+                detail = "正在核对总开关开启条件")
             authorityExecutor.execute {
                 fun current() = synchronized(this) { revision == operationRevision && pendingStart == request }
                 var precommitSnapshot: ProtectionAuthoritySnapshot? = null
@@ -386,7 +480,7 @@ object AutomaticProtectionRuntime {
                     val selected = TargetSelectionStore(app).load()
                     val candidates = expected?.consents().orEmpty().filter { it.id !in expected!!.invalidatedConsentIds }
                     candidates.forEach {
-                        check(it.restartConsented() && it.fingerprint == Build.FINGERPRINT &&
+                        check(it.restartConsented() && it.acceptsRuntimeFingerprint(Build.FINGERPRINT) &&
                             it.identity in selected)
                     }
                     check(ProtectionStartupProbe(app, authority).historySince(actionClock.epoch) == StartupExitHistoryStatus.CLEAR)
@@ -454,10 +548,31 @@ object AutomaticProtectionRuntime {
     }
 
     fun stop(context: Context, reason: ProtectionLifecycleReason = ProtectionLifecycleReason.HOME_MASTER_OFF) {
+        stop(context, reason, null)
+    }
+
+    private fun stop(context: Context, reason: ProtectionLifecycleReason, expectedSessionId: String?) {
+        // Notification actions must still name the exact old session, not a replacement local owner.
+        val expectedRevision = if (expectedSessionId == null) null else synchronized(this) {
+            if (!matchesLegacyNotificationStop(expectedSessionId, pendingStart, grant?.id,
+                    migrationPrepared || DaemonAppRuntime.remoteOwnershipClaimed(), migrationRetiredSessionId)) return
+            revision
+        }
         ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.EXPLICIT_MASTER_OFF, reason)
-        io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.masterOff()
+        val initiallyLocal = localExecutionAllowed(context)
+        if (!initiallyLocal && expectedSessionId == null) { DaemonAppRuntime.stop(context); return }
+        // A stale notification must not even pause a replacement FCM host before the exact recheck.
+        // The matched grant's cancellation below performs its identity-scoped hostEnded teardown.
+        if (initiallyLocal && expectedSessionId == null) FcmProtectionRuntime.masterOff()
         val app = context.applicationContext
+        var forward = false
         val cancel = synchronized(this) {
+            when (legacyNegativeAdmission(!initiallyLocal || migrationPrepared || DaemonAppRuntime.remoteOwnershipClaimed(),
+                expectedSessionId, expectedRevision, revision, pendingStart, grant?.id, migrationRetiredSessionId)) {
+                LegacyNegativeAdmission.REMOTE -> { forward = true; return@synchronized null }
+                LegacyNegativeAdmission.STALE -> return
+                LegacyNegativeAdmission.LOCAL -> Unit
+            }
             restoreBlocked = true
             pendingStart = null
             val current = grant
@@ -487,14 +602,17 @@ object AutomaticProtectionRuntime {
             }
             current?.cancel
         }
+        // Daemon admission can persist a negative intent; never call it under the old monitor.
+        if (forward) { DaemonAppRuntime.stop(app); return }
         cancel?.invoke()
     }
 
     /** Foreground entry may resume already-explicit policy2, never upgrade legacy consent. */
     fun inspectSavedAuthorization(context: Context) {
+        if (!localExecutionAllowed(context)) return
         val app = context.applicationContext
         synchronized(this) {
-            if (grant != null || pendingStart != null) return
+            if (migrationPrepared || grant != null || pendingStart != null) return
             val observedRevision = revision
             authorityExecutor.execute {
                 val saved = runCatching { authorityStore(app).readSnapshot() }
@@ -529,9 +647,10 @@ object AutomaticProtectionRuntime {
 
     internal fun launchSavedFromTrigger(context: Context, mayLaunch: () -> Boolean = { true },
         finished: () -> Unit = {}, expectedRevision: Long? = null) {
+        if (!localExecutionAllowed(context)) { DaemonAppRuntime.restore(context); finished(); return }
         val app = context.applicationContext
         synchronized(this) {
-            if (!recoveryRevisionMatches(expectedRevision, revision) || grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) {
+            if (migrationPrepared || !recoveryRevisionMatches(expectedRevision, revision) || grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) {
                 finished()
                 return
             }
@@ -555,6 +674,7 @@ object AutomaticProtectionRuntime {
                         ProtectionLifecycleDiagnostics.recordFailure(ProtectionLifecycleEventKind.RESTORE_LAUNCH_FAILED, failure)
                         synchronized(this) {
                             if (revision == launchRevision) mutable.value = mutable.value.copy(enabled = false,
+                                coreSessionStartedAtElapsedMillis = null,
                                 busy = false, savedAuthorization = true, waitingForPrivilege = false, waitingForReconciliation = false,
                                 detail = "系统未允许启动恢复，请打开 Guardian 后重试")
                         }
@@ -566,12 +686,14 @@ object AutomaticProtectionRuntime {
 
     /** The service has already met the foreground deadline; IO can now rebuild a bounded grant. */
     internal fun restoreForService(context: Context, id: String, prepared: (AutomaticProtectionGrant?) -> Unit): Boolean {
+        if (!localExecutionAllowed(context)) return false
         val app = context.applicationContext
         synchronized(this) {
-            if (grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) return false
+            if (migrationPrepared || grant != null || pendingStart != null || restoreBlocked || mutable.value.revocationSaveFailed) return false
             pendingStart = id
             val restoringRevision = ++revision
             mutable.value = mutable.value.copy(enabled = false, busy = true, waitingForPrivilege = false, waitingForReconciliation = false,
+                coreSessionStartedAtElapsedMillis = null,
                 detail = "正在核对开机恢复授权与停止记录")
             authorityExecutor.execute {
                 var next: AutomaticProtectionGrant? = null
@@ -664,6 +786,7 @@ object AutomaticProtectionRuntime {
             }
             if (current != null || pendingMatches) {
                 mutable.value = mutable.value.copy(enabled = false, busy = false, waitingForPrivilege = false, waitingForReconciliation = false,
+                    coreSessionStartedAtElapsedMillis = null,
                     targets = mutable.value.targets.map { it.copy(enabled = false, busy = false, waitingForPrivilege = false, detail = "已保存授权等待系统恢复，尚未执行保护") },
                     detail = "服务已结束，已保存授权等待系统恢复；尚未执行保护")
             }
@@ -691,6 +814,14 @@ object AutomaticProtectionRuntime {
 
     @Synchronized internal fun allowWrites(current: AutomaticProtectionGrant) {
         if (authorized(current)) current.writes.open()
+    }
+
+    /** Service core entry, not claim/master ON or readiness polling. Repeated entry is idempotent. */
+    @Synchronized internal fun started(current: AutomaticProtectionGrant,
+        elapsedMillis: Long = SystemClock.elapsedRealtime()) {
+        if (!authorized(current)) return
+        mutable.value = startedAutomaticProtectionSessionState(mutable.value, current, grant,
+            sessionActive = true, elapsedMillis = elapsedMillis)
     }
 
     @Synchronized internal fun readOnly(current: AutomaticProtectionGrant, detail: String, busy: Boolean = false) {
@@ -724,7 +855,7 @@ object AutomaticProtectionRuntime {
     }
 
     internal fun consentsAuthorized(current: AutomaticProtectionGrant): Boolean =
-        authorized(current) && current.leases.all { current.store.verifyAuthorized(it) } && authorized(current)
+        authorized(current) && current.store.verifyAllAuthorized(current.leases) && authorized(current)
 
     /** Repeat all restore prerequisites after a new connection; this consumes no attempt. */
     internal fun startupStatus(current: AutomaticProtectionGrant, context: Context): StartupEligibilityStatus =
@@ -789,6 +920,7 @@ object AutomaticProtectionRuntime {
 
     @Synchronized internal fun claim(id: String, retireIfIdle: () -> Unit,
         cancel: () -> Unit): AutomaticProtectionGrant? {
+        if (migrationPrepared) return null
         val current = grant?.takeIf { it.id == id && it.live.get() } ?: return null
         if (!gate.claim(id)) return null
         current.cancel = cancel
@@ -797,7 +929,7 @@ object AutomaticProtectionRuntime {
     }
 
     @Synchronized internal fun authorized(current: AutomaticProtectionGrant): Boolean =
-        current.live.get() && grant === current && gate.active(current.id)
+        !migrationPrepared && current.live.get() && grant === current && gate.active(current.id)
 
     @Synchronized internal fun hasSession(): Boolean = grant != null || pendingStart != null
 
@@ -826,6 +958,7 @@ object AutomaticProtectionRuntime {
     internal fun pause(id: String, detail: String, outcome: String? = null) {
         val pausedDetail = "全部自动保护已暂停：$detail"
         val cancel = synchronized(this) {
+            if (migrationPrepared) return
             val current = grant?.takeIf { it.id == id } ?: return
             ProtectionLifecycleDiagnostics.recordPause(detail)
             restoreBlocked = true
@@ -835,6 +968,7 @@ object AutomaticProtectionRuntime {
             grant = null
             val pausedRevision = ++revision
             mutable.value = mutable.value.copy(masterEnabled = false, enabled = false, busy = false, detail = pausedDetail, savedAuthorization = false, waitingForPrivilege = false, waitingForReconciliation = false,
+                coreSessionStartedAtElapsedMillis = null,
                 targets = mutable.value.targets.map { it.copy(savedAuthorization = false, enabled = false, busy = false, waitingForPrivilege = false, detail = pausedDetail) },
                 lastOutcome = outcome ?: mutable.value.lastOutcome)
             authorityExecutor.execute {
@@ -868,14 +1002,15 @@ object AutomaticProtectionRuntime {
     }
 
     internal fun stopSession(context: Context, id: String) {
-        synchronized(this) {
-            if (pendingStart == id || grant?.id == id) stop(context, ProtectionLifecycleReason.NOTIFICATION_STOP)
-        }
+        stop(context, ProtectionLifecycleReason.NOTIFICATION_STOP, id)
     }
 
     /** Stop old RPC authority synchronously; callback runs only after durable exact-target removal. */
     fun stopTarget(context: Context, identity: SelectedTargetIdentity, onRetired: () -> Unit = {}) {
-        retireTargets(context, listOf(identity), onRetired = onRetired)
+        if (!retireTargets(context, listOf(identity), onRetired = onRetired)) {
+            // Submission is not the daemon's durable removal ACK; do not run onRetired here.
+            DaemonAppRuntime.disableTarget(context, identity)
+        }
     }
 
     /** Only a shared-safe fresh probe can initiate automatic removal of the exact observed leases. */
@@ -887,8 +1022,10 @@ object AutomaticProtectionRuntime {
         expected: AutomaticProtectionGrant? = null, probe: StartupProbeResult? = null,
         prepared: ((Boolean) -> Unit)? = null,
         onRetired: () -> Unit): Boolean {
+        if (!localExecutionAllowed(context)) return false
         val app = context.applicationContext
         val cancel = synchronized(this) {
+            if (migrationPrepared || DaemonAppRuntime.remoteOwnershipClaimed()) return false
             if (expected != null && (!authorized(expected) || pendingStart != null || probe == null ||
                 probe.leases != expected.leases || probe.invalidTargets.isEmpty() ||
                 !expected.leases.containsAll(probe.invalidTargets))) return false
@@ -901,6 +1038,7 @@ object AutomaticProtectionRuntime {
             pendingStart = request
             val removalRevision = ++revision
             mutable.value = mutable.value.copy(enabled = false, busy = true, waitingForReconciliation = false,
+                coreSessionStartedAtElapsedMillis = null,
                 targets = mutable.value.targets.map { it.copy(enabled = false, busy = false) },
                 detail = if (expected == null) "正在保存该应用的关闭状态" else "正在隔离已确认失效的应用，保留其他授权")
             authorityExecutor.execute {

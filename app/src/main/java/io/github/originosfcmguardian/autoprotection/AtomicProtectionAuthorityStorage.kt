@@ -15,6 +15,7 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.nio.charset.CharsetDecoder
 import java.security.MessageDigest
 
 /** Consent and budget share one commit, so a surviving grant can never acquire a fresh budget. */
@@ -42,16 +43,7 @@ internal class AtomicProtectionAuthorityStorage(context: Context) : ProtectionAu
     private fun readCommitted(ignoreRetirement: Boolean): ProtectionAuthoritySnapshot? {
         val bytes = try {
             file.openRead().use { input ->
-                val buffer = ByteArray(ProtectionAuthorityCodec.MAX_BYTES + 1)
-                var size = 0
-                while (size < buffer.size) {
-                    val count = input.read(buffer, size, buffer.size - size)
-                    if (count < 0) break
-                    check(count > 0)
-                    size += count
-                }
-                check(size <= ProtectionAuthorityCodec.MAX_BYTES)
-                buffer.copyOf(size)
+                readBoundedAuthorityBytes(input, ProtectionAuthorityCodec.MAX_BYTES)
             }
         } catch (missing: FileNotFoundException) {
             check(!file.baseFile.exists() && !File(file.baseFile.path + ".bak").exists() &&
@@ -185,6 +177,9 @@ internal object ProtectionAuthorityCodec {
         require(bytes.size in 32..MAX_BYTES)
         val payload = bytes.copyOfRange(0, bytes.size - 32)
         require(MessageDigest.isEqual(MessageDigest.getInstance("SHA-256").digest(payload), bytes.copyOfRange(bytes.size - 32, bytes.size)))
+        // Decoder state belongs to this decode only; reset before every fresh string.
+        val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
         return DataInputStream(ByteArrayInputStream(payload)).use { input ->
             require(input.readInt() == MAGIC)
             val schemaVersion = input.readInt()
@@ -195,18 +190,18 @@ internal object ProtectionAuthorityCodec {
             val reason = if (reasonOrdinal == -1) null else ProtectionSuspensionReason.entries.getOrNull(reasonOrdinal) ?: error("Unknown suspension reason")
             val targets = if (schemaVersion == 1) {
                 val present = input.readUnsignedByte(); require(present in 0..1)
-                if (present == 1) listOf(input.consent(0)) else emptyList()
+                if (present == 1) listOf(input.consent(0, decoder)) else emptyList()
             } else {
                 val count = input.readInt()
                 // Every entry needs substantially more than one byte; cap allocation by wire size.
                 require(count in 0..(payload.size / 100))
-                List(count) { input.consent(input.readUnsignedByte()) }
+                List(count) { input.consent(input.readUnsignedByte(), decoder) }
             }
             val masterEnabledAt = if (schemaVersion == 3) input.readLong().also { require(it >= 0) }.takeIf { it != 0L } else null
             val invalidated = if (schemaVersion == 3) {
                 val count = input.readInt()
                 require(count in 0..targets.size)
-                java.util.Collections.unmodifiableList(List(count) { input.string(36) })
+                java.util.Collections.unmodifiableList(List(count) { input.string(36, decoder) })
             } else emptyList()
             val budgetSize = input.readInt()
             require(budgetSize in 1..256)
@@ -220,21 +215,21 @@ internal object ProtectionAuthorityCodec {
         }
     }
 
-    private fun DataInputStream.consent(kind: Int): TargetConsent {
+    private fun DataInputStream.consent(kind: Int, decoder: CharsetDecoder): TargetConsent {
                 require(kind in 0..1)
                 val schema = readInt()
                 val policy = readInt()
                 val user = readInt()
-                val id = string(36)
+                val id = string(36, decoder)
                 val tokenGeneration = readLong()
                 val time = readLong()
-                val packageName = string(256)
+                val packageName = string(256, decoder)
                 val uid = readInt()
                 val installed = readLong()
                 val signerCount = readInt()
                 require(signerCount in 1..16)
-                val signers = java.util.Collections.unmodifiableList(List(signerCount) { string(64) })
-                val fingerprint = string(2048)
+                val signers = java.util.Collections.unmodifiableList(List(signerCount) { string(64, decoder) })
+                val fingerprint = string(2048, decoder)
                 val identity = SelectedTargetIdentity(packageName, uid, installed, signers)
                 return if (kind == 0) TargetConsent.Legacy(DurableConsentToken(id, tokenGeneration, time, identity, fingerprint, schema, policy, user))
                 else {
@@ -250,11 +245,10 @@ internal object ProtectionAuthorityCodec {
         write(bytes)
     }
 
-    private fun DataInputStream.string(maximum: Int): String {
+    private fun DataInputStream.string(maximum: Int, decoder: CharsetDecoder): String {
         val size = readInt()
         require(size in 1..maximum)
         val bytes = ByteArray(size).also(this::readFully)
-        return Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
+        return decoder.reset().decode(ByteBuffer.wrap(bytes)).toString()
     }
 }

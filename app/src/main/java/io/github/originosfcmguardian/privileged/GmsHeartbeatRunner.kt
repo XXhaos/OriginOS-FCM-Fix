@@ -5,6 +5,11 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+internal enum class GmsHeartbeatArmStage { QUEUED, PORT, CALLER, OBSERVATION, BINDING, FINAL_CALLER, LIFETIME, CAPABILITY }
+internal data class GmsHeartbeatArmDiagnostic(val stage: GmsHeartbeatArmStage,
+    val reason: GmsAutoArmReason, val durationMillis: Long, val workerQuiescent: Boolean)
 
 internal val GMS_HEARTBEAT_ARGV = listOf("/system/bin/am", "broadcast", "--user", "0", "-a",
     "com.google.android.intent.action.MCS_HEARTBEAT", "-p", "com.google.android.gms")
@@ -31,21 +36,35 @@ internal class GmsHeartbeatRunner(
     private val launch: () -> Process = { ProcessBuilder(GMS_HEARTBEAT_ARGV).start() },
     private val budgetMillis: Long = 8_000,
     clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val armDiagnostic: (GmsHeartbeatArmDiagnostic) -> Unit = { value ->
+        // Only one failed initialization record: no raw identities, payloads or exception messages.
+        runCatching { android.util.Log.w("GuardianHeartbeat", "arm=${value.reason} stage=${value.stage} " +
+            "durationMs=${value.durationMillis} quiescent=${value.workerQuiescent}") }
+    },
 ) {
     init { require(budgetMillis in 1..8_000) }
     private val worker = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),
         { task -> Thread(task, "guardian-manual-gms-heartbeat").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
     private val automatic = GmsAutomaticHeartbeatGate(clock)
+    private val activity = PrivilegedWorkerActivity()
+    fun isQuiescent(): Boolean = activity.isQuiescent()
 
     fun request(requestId: Long, wasCancelled: () -> Boolean): GmsHeartbeatResult {
         automatic.manualEvent()
-        return perform(requestId, wasCancelled, null)
+        return perform(requestId, wasCancelled, null, null)
     }
     fun requestAutomatic(requestId: Long, callerUid: Int, session: GmsAutoSession, attemptId: String,
                          wasCancelled: () -> Boolean): GmsHeartbeatResult {
+        return requestAutomaticGuarded(requestId, callerUid, session, attemptId, wasCancelled, null)
+    }
+    fun requestAutomaticGuarded(requestId: Long, callerUid: Int, session: GmsAutoSession, attemptId: String,
+        wasCancelled: () -> Boolean, execution: PrivilegedExecutionFence?): GmsHeartbeatResult {
         val (cap, reason) = automatic.prepare(session, callerUid, attemptId)
-        if (reason != null) return GmsHeartbeatResult.notSent(requestId, reason)
-        return perform(requestId, wasCancelled, checkNotNull(cap))
+        if (reason != null) {
+            PrivilegedWorkSettlement(execution).abandonQueued()
+            return GmsHeartbeatResult.notSent(requestId, reason)
+        }
+        return perform(requestId, wasCancelled, checkNotNull(cap), execution)
     }
     fun revokeAutomatic(callerUid: Int, generation: Long, sessionId: String?): Boolean {
         val closed = automatic.revoke(callerUid, generation, sessionId)
@@ -55,36 +74,62 @@ internal class GmsHeartbeatRunner(
 
     fun armAutomatic(requestId: Long, callerUid: Int, generation: Long, expectedDigest: String,
                      lifetime: GmsHeartbeatLifetime, wasCancelled: () -> Boolean): GmsAutoArmResult {
+        val startedAt = System.nanoTime()
+        val stage = AtomicReference(GmsHeartbeatArmStage.QUEUED)
+        val result = armAutomaticWithStages(requestId, callerUid, generation, expectedDigest, lifetime, wasCancelled, stage)
+        // Log the public return, not a worker result that may lose a race to the caller deadline.
+        if (result.session == null) runCatching {
+                armDiagnostic(GmsHeartbeatArmDiagnostic(stage.get(), result.reason,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt), isQuiescent()))
+        }
+        return result
+    }
+
+    private fun armAutomaticWithStages(requestId: Long, callerUid: Int, generation: Long, expectedDigest: String,
+        lifetime: GmsHeartbeatLifetime, wasCancelled: () -> Boolean,
+        stage: AtomicReference<GmsHeartbeatArmStage>): GmsAutoArmResult {
         fun failure(reason: GmsAutoArmReason) = GmsAutoArmResult(null, reason)
         if (requestId <= 0 || generation <= 0 || !expectedDigest.matches(Regex("[a-f0-9]{64}"))) return failure(GmsAutoArmReason.INVALID_REQUEST)
+        val settlement = activity.track()
         val abandoned = AtomicBoolean(false)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis)
         fun stopped() = abandoned.get() || wasCancelled() || Thread.currentThread().isInterrupted || System.nanoTime() >= deadline
         val future = try { worker.submit<GmsAutoArmResult> {
+            if (!settlement.workerEntered()) return@submit failure(GmsAutoArmReason.TIMED_OUT)
             automatic.workerEntered()
             var cap: GmsAutoCapability? = null
             var armed = false
             try {
                 if (stopped()) return@submit failure(GmsAutoArmReason.TIMED_OUT)
+                stage.set(GmsHeartbeatArmStage.PORT)
                 val port = portFactory()
+                stage.set(GmsHeartbeatArmStage.CALLER)
                 if (!guardianCaller(port, callerUid)) return@submit failure(GmsAutoArmReason.CALLER_UNAVAILABLE)
+                stage.set(GmsHeartbeatArmStage.OBSERVATION)
                 val observation = observeGmsConnection(requestId, port, { if (stopped()) GmsUnknown.CANCELLED else null })
                 if (stopped()) return@submit failure(GmsAutoArmReason.TIMED_OUT)
                 if (GmsHeartbeatPolicy.rejection(observation, port.elapsedRealtime()) != null) return@submit failure(GmsAutoArmReason.NOT_ELIGIBLE)
                 val sample = observation as GmsConnectionObservation.Sample
+                stage.set(GmsHeartbeatArmStage.BINDING)
                 if (gmsHeartbeatBindingDigest(sample) != expectedDigest) return@submit failure(GmsAutoArmReason.IDENTITY_CHANGED)
+                stage.set(GmsHeartbeatArmStage.FINAL_CALLER)
                 if (!guardianCaller(port, callerUid)) return@submit failure(GmsAutoArmReason.CALLER_UNAVAILABLE)
                 runCatching { automatic.retiredLifetime()?.unlink() }
                 cap = automatic.newCapability(generation, sample, callerUid, lifetime)
                 val next = checkNotNull(cap)
+                stage.set(GmsHeartbeatArmStage.LIFETIME)
                 lifetime.link { next.live.set(false); automatic.revoke(callerUid, generation, next.session.id) }
                 if (!lifetime.alive() || !next.live.get()) return@submit failure(GmsAutoArmReason.LIFETIME_ENDED)
+                stage.set(GmsHeartbeatArmStage.CAPABILITY)
                 if (!automatic.arm(next, ::stopped)) return@submit failure(if (stopped()) GmsAutoArmReason.TIMED_OUT else GmsAutoArmReason.BUSY)
                 armed = true
                 GmsAutoArmResult(next.session, GmsAutoArmReason.ARMED)
             } catch (_: Throwable) { failure(if (stopped()) GmsAutoArmReason.TIMED_OUT else GmsAutoArmReason.BRIDGE_UNAVAILABLE) }
-            finally { if (!armed) { cap?.live?.set(false); runCatching { lifetime.unlink() } }; automatic.workerExited() }
-        } } catch (_: RejectedExecutionException) { return failure(GmsAutoArmReason.BUSY) }
+            finally {
+                if (!armed) { cap?.live?.set(false); runCatching { lifetime.unlink() } }
+                automatic.workerExited(); settlement.workerEnded(false, null)
+            }
+        } } catch (_: RejectedExecutionException) { settlement.abandonQueued(); return failure(GmsAutoArmReason.BUSY) }
         var returned = false
         try {
             while (true) {
@@ -98,15 +143,18 @@ internal class GmsHeartbeatRunner(
             }
         } catch (_: Throwable) { return failure(GmsAutoArmReason.BRIDGE_UNAVAILABLE) }
         finally {
-            abandoned.set(true); future.cancel(true)
+            abandoned.set(true); settlement.abandonQueued(); future.cancel(true)
             if (!returned) automatic.revoke(callerUid, generation, null)
         }
     }
     private fun guardianCaller(port: GmsConnectionReadPort, uid: Int) = uid in 10_000..99_999 &&
         port.packagesForUid(uid) == listOf("io.github.originosfcmguardian")
 
-    private fun perform(requestId: Long, wasCancelled: () -> Boolean, cap: GmsAutoCapability?): GmsHeartbeatResult {
-        if (requestId <= 0) return GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.INVALID_REQUEST)
+    private fun perform(requestId: Long, wasCancelled: () -> Boolean, cap: GmsAutoCapability?, execution: PrivilegedExecutionFence?): GmsHeartbeatResult {
+        val settlement = activity.track(execution)
+        if (requestId <= 0) {
+            settlement.abandonQueued(); return GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.INVALID_REQUEST)
+        }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis)
         lateinit var gate: GmsHeartbeatDispatchGate
         fun interruption(): GmsHeartbeatReason? = when {
@@ -117,7 +165,11 @@ internal class GmsHeartbeatRunner(
         }
         gate = GmsHeartbeatDispatchGate(::interruption)
         val future = try { worker.submit<GmsHeartbeatResult> {
+            if (!settlement.workerEntered()) return@submit gate.failure(requestId, GmsHeartbeatReason.CANCELLED)
             automatic.workerEntered()
+            var child: Process? = null
+            var launchEntered = false
+            var readerOwnsChild = false
             try {
                 interruption()?.let { return@submit gate.failure(requestId, it) }
                 val port = portFactory()
@@ -132,8 +184,23 @@ internal class GmsHeartbeatRunner(
                 GmsHeartbeatPolicy.rejection(observation, port.elapsedRealtime())?.let {
                     return@submit gate.failure(requestId, it)
                 }
-                val sample = observation as GmsConnectionObservation.Sample
+                var sample = observation as GmsConnectionObservation.Sample
                 if (cap != null && !guardianCaller(port, cap.callerUid)) return@submit gate.failure(requestId, GmsHeartbeatReason.CALLER_UNAVAILABLE)
+                if (execution != null) {
+                    // Ownership reads can block: repeat GMS service/socket evidence afterwards.
+                    if (!execution.prepare()) return@submit gate.failure(requestId, GmsHeartbeatReason.SESSION_REVOKED)
+                    val fresh = observeGmsConnection(requestId, port, {
+                        if (interruption() == null) null else GmsUnknown.CANCELLED
+                    })
+                    interruption()?.let { return@submit gate.failure(requestId, it) }
+                    GmsHeartbeatPolicy.rejection(fresh, port.elapsedRealtime())?.let {
+                        return@submit gate.failure(requestId, it)
+                    }
+                    val next = fresh as GmsConnectionObservation.Sample
+                    if (gmsHeartbeatBindingDigest(next) != gmsHeartbeatBindingDigest(sample))
+                        return@submit gate.failure(requestId, GmsHeartbeatReason.IDENTITY_CHANGED)
+                    sample = next
+                }
                 // Repeat exact installation/owner/boot/user guards immediately before opening dispatch.
                 val identity = port.gmsPackage()
                 val owners = port.packagesForUid(sample.uid)
@@ -145,14 +212,24 @@ internal class GmsHeartbeatRunner(
                     return@submit gate.failure(requestId, GmsHeartbeatReason.IDENTITY_CHANGED)
                 }
                 GmsHeartbeatPolicy.rejection(sample, port.elapsedRealtime())?.let { return@submit gate.failure(requestId, it) }
-                val (process, rejected) = automatic.launch(cap, sample, gate::begin, launch)
+                // Never run fresh Binder/PM IO inside automatic.launch's capability monitor.
+                val (process, rejected) = automatic.launch(cap, sample, gate::begin) {
+                    val start = { launchEntered = true; launch().also { child = it } }
+                    if (execution == null) start() else execution.start(start)
+                }
                 if (rejected != null) return@submit gate.failure(requestId, interruption() ?: rejected)
+                readerOwnsChild = true
                 val reason = readHeartbeatProcess(checkNotNull(process), deadline, ::interruption)
                 if (reason == GmsHeartbeatReason.COMMAND_ACCEPTED) GmsHeartbeatResult(requestId, GmsHeartbeatStatus.REQUESTED, reason)
                 else gate.failure(requestId, reason)
             } catch (_: Throwable) { gate.failure(requestId, interruption() ?: GmsHeartbeatReason.BRIDGE_UNAVAILABLE) }
-            finally { automatic.workerExited() }
-        } } catch (_: RejectedExecutionException) { return GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.BUSY) }
+            finally {
+                if (!readerOwnsChild) child?.let(::bestEffortTerminatePrivilegedChild)
+                automatic.workerExited(); settlement.workerEnded(launchEntered, child)
+            }
+        } } catch (_: RejectedExecutionException) {
+            settlement.abandonQueued(); return GmsHeartbeatResult.notSent(requestId, GmsHeartbeatReason.BUSY)
+        }
         try {
             while (true) {
                 interruption()?.let { return gate.failure(requestId, it, abandon = true).also { result -> automatic.ended(cap, result.status, future.isDone) } }
@@ -167,7 +244,7 @@ internal class GmsHeartbeatRunner(
             Thread.currentThread().interrupt()
             return gate.failure(requestId, GmsHeartbeatReason.CANCELLED, abandon = true).also { automatic.ended(cap, it.status, future.isDone) }
         } catch (_: Throwable) { return gate.failure(requestId, GmsHeartbeatReason.BRIDGE_UNAVAILABLE, abandon = true).also { automatic.ended(cap, it.status, future.isDone) } }
-        finally { gate.failure(requestId, GmsHeartbeatReason.CANCELLED, abandon = true); future.cancel(true) }
+        finally { gate.failure(requestId, GmsHeartbeatReason.CANCELLED, abandon = true); settlement.abandonQueued(); future.cancel(true) }
     }
     fun close() { automatic.close(); worker.shutdownNow() }
 }
@@ -210,11 +287,7 @@ internal fun readHeartbeatProcess(process: Process, deadline: Long, interruption
     } catch (_: InterruptedException) { Thread.currentThread().interrupt(); GmsHeartbeatReason.CANCELLED }
     catch (_: Exception) { GmsHeartbeatReason.COMMAND_FAILED }
     finally {
-        runCatching { process.destroy() }
-        runCatching { if (process.isAlive) process.destroyForcibly() }
-        runCatching { process.inputStream.close() }
-        runCatching { process.errorStream.close() }
-        runCatching { process.outputStream.close() }
+        bestEffortTerminatePrivilegedChild(process)
         out.reset()
     }
 }

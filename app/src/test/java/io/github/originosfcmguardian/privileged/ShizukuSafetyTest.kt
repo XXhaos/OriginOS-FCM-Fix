@@ -2,8 +2,6 @@ package io.github.originosfcmguardian.privileged
 
 import io.github.originosfcmguardian.core.SafeCommand
 import io.github.originosfcmguardian.core.CommandResult
-import io.github.originosfcmguardian.core.trace.ProcessTraceCodec
-import io.github.originosfcmguardian.core.trace.ProcessTraceKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -56,10 +54,7 @@ class ShizukuSafetyTest {
         assertEquals(null, fixedSystemExecutable(listOf("sh", "-c", "id")))
         assertEquals(null, fixedSystemExecutable(emptyList()))
         assertNull(fixedSystemExecutable(listOf("content", "query", "--user", "0")))
-        assertEquals(
-            listOf("/system/bin/logcat", "-b", "events", "-d"),
-            fixedSystemExecutable(listOf("logcat", "-b", "events", "-d")),
-        )
+        assertNull(fixedSystemExecutable(listOf("logcat", "-b", "events", "-d")))
     }
 
     @Test
@@ -185,77 +180,6 @@ class ShizukuSafetyTest {
                 10_434,
             ),
         )
-    }
-
-    @Test
-    fun traceIpcUsesBothTypedFieldsWithoutChangingGenericCalls() {
-        assertEquals(
-            IpcArguments(10_434, "org.telegram.messenger"),
-            ipcArguments(SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger")),
-        )
-        assertEquals(
-            IpcArguments(IpcContract.NO_UID_ARGUMENT, null),
-            ipcArguments(SafeCommand.GetCurrentUser),
-        )
-    }
-
-    @Test
-    fun processTraceIsParsedRemotelyAndOnlyStructuralFieldsRemain() {
-        val command = SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger")
-        val result = structureTargetProcessTrace(
-            command,
-            RemoteRunResult(
-                exitCode = 0,
-                stdout = "1790590802.356  100  200 I am_uid_active: 10434\n" +
-                    "private unrelated application log\n",
-                stderr = "",
-                timedOut = false,
-                outputTruncated = false,
-            ),
-        )
-
-        assertEquals(0, result.exitCode)
-        assertFalse(result.stdout.contains("private"))
-        val decoded = ProcessTraceCodec.decode(result.stdout)
-        assertEquals(1, decoded?.size)
-        assertEquals(ProcessTraceKind.UID_ACTIVE, decoded?.single()?.kind)
-        assertEquals("", result.stderr)
-    }
-
-    @Test
-    fun processTraceTransportFailuresNeverReturnRawOutputOrStderr() {
-        val command = SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger")
-        val failures = listOf(
-            RemoteRunResult(1, "raw-private", "raw-stderr-secret", false, false),
-            RemoteRunResult(0, "raw-private", "", false, true),
-            RemoteRunResult(IpcContract.EXIT_TIMED_OUT, "raw-private", "raw-timeout", true, false),
-        )
-
-        failures.forEach { failure ->
-            val result = structureTargetProcessTrace(command, failure)
-            assertEquals("", result.stdout)
-            assertFalse(result.stderr.contains("raw"))
-            assertFalse(result.outputTruncated)
-            assertNull(ProcessTraceCodec.decode(result.stderr))
-        }
-    }
-
-    @Test
-    fun clientRejectsMalformedOrFailedTracePayloadWithoutExposingRemoteText() {
-        val command = SafeCommand.GetTargetProcessEvents(10_434, "org.telegram.messenger")
-        val malformed = sanitizeProcessTraceIpcResult(
-            CommandResult(command, 0, "raw-private-log", ""),
-        )
-        val failed = sanitizeProcessTraceIpcResult(
-            CommandResult(command, 1, "raw-private-log", "raw-stderr-secret"),
-        )
-
-        listOf(malformed, failed).forEach { result ->
-            assertEquals(IpcContract.EXIT_BRIDGE_ERROR, result.exitCode)
-            assertEquals("", result.stdout)
-            assertEquals("Process trace unavailable", result.stderr)
-            assertFalse(result.outputTruncated)
-        }
     }
 
     @Test

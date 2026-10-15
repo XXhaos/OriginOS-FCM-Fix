@@ -52,7 +52,7 @@ class StoppedRecoveryControlsTest {
             StoppedRecoveryReceipt(StoppedRecoveryUiState(loaded = true, needsReconcile = true)) { reads++ }
         } }
         compose.onNodeWithText("恢复接收").assertDoesNotExist()
-        compose.onNodeWithText("核对上次结果（只读）").performClick()
+        compose.onNodeWithText("核对上次结果").performClick()
         compose.runOnIdle { assertEquals(1, reads) }
     }
 
@@ -70,7 +70,7 @@ class StoppedRecoveryControlsTest {
             StoppedRecoveryReceipt(StoppedRecoveryUiState(loaded = true, needsReconcile = true),
                 target, reconcileBusy = true) { error("Read session reentered") }
         } }
-        compose.onNodeWithText("核对上次结果（只读）").assertIsNotEnabled()
+        compose.onNodeWithText("核对上次结果").assertIsNotEnabled()
     }
 
     @Test fun recoveryShowsDisabledProgressThenTransientCompletionAndKeepsReceipt() {
@@ -123,6 +123,6 @@ class StoppedRecoveryControlsTest {
         } } }
         compose.onNodeWithText("操作成功：已解除停止限制").assertDoesNotExist()
         compose.onNodeWithText("结果未确认：请复检或核对上次结果").assertExists()
-        compose.onNodeWithText("核对上次结果（只读）").assertIsEnabled()
+        compose.onNodeWithText("核对上次结果").assertIsEnabled()
     }
 }

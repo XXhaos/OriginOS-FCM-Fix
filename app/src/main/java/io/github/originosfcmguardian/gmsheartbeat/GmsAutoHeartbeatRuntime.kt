@@ -24,33 +24,65 @@ object GmsAutoHeartbeatRuntime {
     private var controller: GmsAutoHeartbeatController? = null
     private var hostId: String? = null
     private var hostGrant: AutomaticProtectionGrant? = null
+    @Volatile private var migrationPrepared = false
+    @Volatile private var migrationWorkersDrained = false
+    private val collectors = mutableListOf<Job>()
+    @Volatile private var forwardedUnknownSerial = GmsManualHeartbeatEvents.unknownSerial.value
+
+    @Synchronized internal fun prepareForDaemonMigration() {
+        migrationPrepared = true
+        migrationWorkersDrained = false
+        hostId = null; hostGrant = null
+        controller?.prepareForDaemonMigration()
+        collectors.forEach { it.cancel() }
+    }
+
+    internal suspend fun awaitDaemonMigrationDrain(context: Context): Boolean {
+        // If never initialized, inspect the historical root inertly; never reconstruct or arm here.
+        val engine = synchronized(this) { controller } ?: GmsAutoHeartbeatController(
+            GmsAutoHeartbeatStore(AtomicHeartbeatStorage(context.applicationContext)), scope,
+            SystemClock::elapsedRealtime).also { it.prepareForDaemonMigration() }
+        if (GmsManualHeartbeatEvents.unknownSerial.value > forwardedUnknownSerial) engine.manualUnknown()
+        scope.coroutineContext[Job]?.children?.toList()?.forEach { it.join() }
+        return engine.awaitDaemonMigrationDrain()
+    }
+
+    /** Called only after original endpoint RPCs confirm actual worker/child settlement. */
+    @Synchronized internal fun markMigrationWorkersDrained() { migrationWorkersDrained = true }
+
+    @Synchronized internal fun migrationEndpointClosureAttested(): Boolean = migrationPrepared &&
+        migrationWorkersDrained && controller?.migrationEndpointClosureAttested() == true
 
     @Synchronized private fun controller(context: Context): GmsAutoHeartbeatController {
         controller?.let { return it }
         return GmsAutoHeartbeatController(GmsAutoHeartbeatStore(AtomicHeartbeatStorage(context.applicationContext)),
             scope, SystemClock::elapsedRealtime).also { engine ->
             controller = engine
-            scope.launch { engine.state.collect { mutable.value = it } }
+            collectors += scope.launch { engine.state.collect { mutable.value = it } }
             val initialManualSerial = GmsManualHeartbeatEvents.serial.value
-            scope.launch { GmsManualHeartbeatEvents.serial.collect { if (it > initialManualSerial) engine.manualHeartbeatChanged() } }
+            collectors += scope.launch { GmsManualHeartbeatEvents.serial.collect { if (it > initialManualSerial) engine.manualHeartbeatChanged() } }
             val initialUnknownSerial = GmsManualHeartbeatEvents.unknownSerial.value
-            scope.launch { GmsManualHeartbeatEvents.unknownSerial.collect { if (it > initialUnknownSerial) engine.manualUnknown() } }
+            forwardedUnknownSerial = initialUnknownSerial
+            collectors += scope.launch { GmsManualHeartbeatEvents.unknownSerial.collect { if (it > initialUnknownSerial) {
+                forwardedUnknownSerial = it; engine.manualUnknown()
+            } } }
         }
     }
 
-    fun initialize(context: Context) { val engine = controller(context); scope.launch { engine.initialize() } }
-    suspend fun confirm(context: Context): Boolean = withContext(Dispatchers.IO) { controller(context).confirm() }
-    suspend fun confirmDurable(context: Context): Boolean = withContext(Dispatchers.IO) { controller(context).confirmDurable() }
+    fun initialize(context: Context) { if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return; val engine = controller(context); scope.launch { engine.initialize() } }
+    suspend fun confirm(context: Context): Boolean = withContext(Dispatchers.IO) { !migrationPrepared && AutomaticProtectionRuntime.localExecutionAllowed(context) && controller(context).confirm() }
+    suspend fun confirmDurable(context: Context): Boolean = withContext(Dispatchers.IO) { !migrationPrepared && AutomaticProtectionRuntime.localExecutionAllowed(context) && controller(context).confirmDurable() }
     internal suspend fun provisionBundled(context: Context, epoch: String) = withContext(Dispatchers.IO) {
-        if (!bundledAdmission(null)) BundledHeartbeatProvision.DEFERRED else controller(context).provisionBundled(epoch)
+        if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context) || !bundledAdmission(null)) BundledHeartbeatProvision.DEFERRED else controller(context).provisionBundled(epoch)
     }
-    fun disable(context: Context) { controller(context).disable() }
+    fun disable(context: Context) { if (!migrationPrepared && AutomaticProtectionRuntime.localExecutionAllowed(context)) controller(context).disable() }
     suspend fun manualHeartbeatAllowed(context: Context): Boolean = withContext(Dispatchers.IO) {
-        controller(context).manualHeartbeatAllowed()
+        !migrationPrepared && AutomaticProtectionRuntime.localExecutionAllowed(context) && controller(context).manualHeartbeatAllowed()
     }
-    fun manualHeartbeatAllowedNow(): Boolean = synchronized(this) { controller }?.manualHeartbeatAllowedNow() == true
+    fun manualHeartbeatAllowedNow(): Boolean = !migrationPrepared && synchronized(this) { controller }?.manualHeartbeatAllowedNow() == true
 
     internal fun attachHost(context: Context, grant: AutomaticProtectionGrant) {
+        if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return
         val engine = controller(context)
         engine.attachHost(newHost(context, grant))
         synchronized(this) { hostId = grant.id; hostGrant = grant }
@@ -93,7 +125,7 @@ object GmsAutoHeartbeatRuntime {
             admittedEpoch = epoch; return true
         }
         private fun epochAuthorized() = admittedEpoch?.let(bundledEpochAdmission) == true
-        private val executor = ShizukuExecutor(context)
+        private val executor = ShizukuExecutor.backgroundObservation(context)
         private var lifetime: Binder? = null
         @Volatile override var lastBindingRejection: GmsHeartbeatReason? = null
             private set

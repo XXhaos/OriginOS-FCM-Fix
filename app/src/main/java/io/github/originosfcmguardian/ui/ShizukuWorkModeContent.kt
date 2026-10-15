@@ -19,7 +19,7 @@ internal fun ShizukuWorkModeContent(snapshot: ShizukuStatusSnapshot, onAction: (
     val presentation = shizukuWorkModePresentation(snapshot)
     Text(CURRENT_RECOVERY_BACKEND_LABEL, style = MaterialTheme.typography.titleSmall)
     Text(presentation.statusLabel, style = MaterialTheme.typography.bodyMedium)
-    Text(presentation.summary, style = MaterialTheme.typography.bodySmall)
+    if (presentation.summary.isNotBlank()) Text(presentation.summary, style = MaterialTheme.typography.bodySmall)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         presentation.actionLabel?.let { label -> OutlinedButton(onClick = onAction) { Text(label) } }
         if (presentation.showOpenManager) TextButton(onClick = onOpenManager) { Text("打开 Shizuku") }

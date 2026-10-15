@@ -20,18 +20,18 @@ class StoppedRecoveryPresentationTest {
     @Test fun reconciledObservationDoesNotClaimOriginalOperationSucceededOrFailed() {
         val reconciled = ready.copy(recordIdentity = target.identity, recordStage = StoppedRecoveryStage.RECONCILED,
             receiptOutcome = StoppedRecoveryOutcome.STILL_STOPPED)
-        assertEquals("上次只读复检：停止限制仍存在；原操作结果未确认",
+        assertEquals("上次复检：仍受限，恢复结果待确认",
             stoppedRecoveryReceiptPresentation(reconciled, target)?.text)
         val cleared = target.copy(stoppedSnapshot = TargetStoppedSnapshot(TargetStoppedStatus.NOT_STOPPED, 20))
         val clearedReconcile = reconciled.copy(receiptOutcome = StoppedRecoveryOutcome.FLAG_CLEARED,
             phase = StoppedRecoveryPhase.SUCCESS)
-        assertEquals("上次只读复检：未被停止；不代表原操作成功",
+        assertEquals("上次复检：允许后台唤醒，恢复结果待确认",
             stoppedRecoveryReceiptPresentation(clearedReconcile, cleared)?.text)
         assertEquals(TargetStatusTone.NEUTRAL, stoppedRecoveryReceiptPresentation(clearedReconcile, cleared)?.tone)
         assertEquals(RecoveryActionPresentation.HIDDEN,
             stoppedRecoveryActionPresentation(cleared, clearedReconcile.copy(showSuccessButton = true), false))
-        assertTrue(stoppedRecoveryReceiptPresentation(reconciled, target.copy(identity = target.identity.copy(firstInstallTime = 200)))!!
-            .text.contains("不代表当前安装"))
+        assertEquals(TargetStatusTone.NEUTRAL, stoppedRecoveryReceiptPresentation(reconciled,
+            target.copy(identity = target.identity.copy(firstInstallTime = 200)))?.tone)
         assertEquals(TargetStatusTone.UNCERTAIN,
             stoppedRecoveryReceiptPresentation(reconciled.copy(needsReconcile = true), target)?.tone)
     }
@@ -98,10 +98,10 @@ class StoppedRecoveryPresentationTest {
         val cleared = target.copy(stoppedSnapshot = TargetStoppedSnapshot(TargetStoppedStatus.NOT_STOPPED, 20))
         val historical = ready.copy(recordIdentity = target.identity, receiptOutcome = StoppedRecoveryOutcome.FLAG_CLEARED)
         assertEquals(TargetStatusTone.NEUTRAL, stoppedRecoveryReceiptPresentation(historical, cleared)?.tone)
-        assertEquals("上次操作成功：已解除停止限制（历史）", stoppedRecoveryReceiptPresentation(historical, cleared)?.text)
+        assertEquals("上次恢复：已解除限制", stoppedRecoveryReceiptPresentation(historical, cleared)?.text)
         val replacement = cleared.copy(identity = target.identity.copy(firstInstallTime = 200))
         assertEquals(TargetStatusTone.NEUTRAL, stoppedRecoveryReceiptPresentation(historical, replacement)?.tone)
-        assertTrue(stoppedRecoveryReceiptPresentation(historical, replacement)!!.text.contains("不代表当前安装"))
+        assertEquals("上次恢复：已解除限制", stoppedRecoveryReceiptPresentation(historical, replacement)?.text)
         val uncertain = historical.copy(phase = StoppedRecoveryPhase.UNCONFIRMED, needsReconcile = true)
         assertEquals(TargetStatusTone.UNCERTAIN, stoppedRecoveryReceiptPresentation(uncertain, cleared)?.tone)
         assertEquals(TargetStatusTone.UNCERTAIN, stoppedRecoveryReceiptPresentation(uncertain, null)?.tone)
@@ -118,7 +118,7 @@ class StoppedRecoveryPresentationTest {
 
     @Test fun wakeStatusDoesNotTurnReplacementOrUnknownGreen() {
         val cleared = target.copy(stoppedSnapshot = TargetStoppedSnapshot(TargetStoppedStatus.NOT_STOPPED, 20))
-        assertEquals("可被后台唤醒（未被停止）", targetWakePresentation(cleared).text)
+        assertEquals("允许后台唤醒", targetWakePresentation(cleared).text)
         assertEquals(TargetStatusTone.SUCCESS, targetWakePresentation(cleared).tone)
         assertEquals(TargetStatusTone.UNCERTAIN, targetWakePresentation(cleared.copy(status = TargetAutostartStatus.IDENTITY_CHANGED)).tone)
         assertEquals(TargetStatusTone.UNCERTAIN,

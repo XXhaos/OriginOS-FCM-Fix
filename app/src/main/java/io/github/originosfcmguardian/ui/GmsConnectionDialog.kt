@@ -36,9 +36,9 @@ data class GmsConnectionUiState(
 )
 
 internal fun gmsHeartbeatMessage(status: GmsHeartbeatStatus): String = when (status) {
-    GmsHeartbeatStatus.NOT_SENT -> "本次未发送心跳；当前连接或特权条件不满足。"
-    GmsHeartbeatStatus.REQUESTED -> "已请求心跳；不代表连接已修复或通知送达。"
-    GmsHeartbeatStatus.UNKNOWN -> "请求结果不明；不会自动重发。"
+    GmsHeartbeatStatus.NOT_SENT -> "心跳未发送，请检查连接与 Shizuku 授权。"
+    GmsHeartbeatStatus.REQUESTED -> "已请求心跳。"
+    GmsHeartbeatStatus.UNKNOWN -> "无法确认请求结果，请重新读取连接状态。"
 }
 internal data class GmsNetworkContext(val key: String, val summary: String)
 internal fun gmsNetworkContext(context: Context): GmsNetworkContext = runCatching {
@@ -54,25 +54,23 @@ internal fun gmsNetworkContext(context: Context): GmsNetworkContext = runCatchin
 }.getOrElse { GmsNetworkContext("unknown", "默认网络背景不可读取") }
 
 internal fun gmsSampleHeadline(sample: GmsConnectionObservation.Sample, nowElapsed: Long, networkChanged: Boolean): String = when {
-    networkChanged -> "网络背景已变化；该历史样本无法判断当前连接"
-    !sample.isFresh(nowElapsed) -> "历史样本已超过30秒；当前连接未知"
-    sample.observation == SocketObservation.OBSERVED -> "本次观察到匹配 TCP 迹象"
-    sample.observation == SocketObservation.NO_MATCH -> "本次可读来源未观察到匹配；不等于断线"
-    else -> "本次来源覆盖不足，无法判断"
+    networkChanged -> "网络已变化，请重新读取。"
+    !sample.isFresh(nowElapsed) -> "状态已过期，请重新读取。"
+    else -> "FCM 连接状态未知"
 }
 
 internal fun gmsServiceHeadline(sample: GmsConnectionObservation.Sample, nowElapsed: Long, networkChanged: Boolean): String {
     val source = sample.gcmService
     val sampledElapsed = source.elapsedRealtimeMillis
     return when {
-        networkChanged -> "网络背景已变化；当前 FCM 连接未知"
+        networkChanged -> "网络已变化，请重新读取。"
         sampledElapsed == null || source.completeness != SourceCompleteness.COMPLETE ||
             source.state == GcmConnectionState.UNKNOWN -> "FCM 连接状态未知"
         !sample.isFresh(nowElapsed) || nowElapsed < sampledElapsed ||
-            nowElapsed - sampledElapsed > 30_000 -> "历史自报状态已过期；当前连接未知"
+            nowElapsed - sampledElapsed > 30_000 -> "状态已过期，请重新读取。"
         source.state == GcmConnectionState.REPORTED_CONNECTED ->
             "FCM 已连接 · ${gmsConnectedDurationText(source.connectedDurationMillis)}"
-        source.state == GcmConnectionState.SERVICE_ABSENT -> "本次完整读取：FCM 服务不存在"
+        source.state == GcmConnectionState.SERVICE_ABSENT -> "FCM 服务未运行"
         else -> "FCM 已断开"
     }
 }
@@ -105,10 +103,9 @@ fun GmsConnectionDialog(state: GmsConnectionUiState, onRead: () -> Unit, onDismi
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(status.text, modifier = Modifier.clearAndSetSemantics { contentDescription = status.accessibilityLabel },
                 style = MaterialTheme.typography.titleMedium)
-            Text("状态仅供参考，不代表消息送达。", style = MaterialTheme.typography.bodySmall)
             if (state.busy) Text(if (state.heartbeatBusy) "正在请求心跳…" else "读取中…")
             OutlinedButton(onClick = onHeartbeat, enabled = !state.busy && manualHeartbeatAllowed) { Text("触发一次心跳") }
-            if (!manualHeartbeatAllowed) Text("请先关闭 FCM 保护并确认停止，再手动请求心跳。")
+            if (!manualHeartbeatAllowed) Text("请先关闭 FCM 保护，再请求心跳。")
             state.heartbeatStatus?.let { Text(gmsHeartbeatMessage(it)) }
             if (state.observation == null || state.observation is GmsConnectionObservation.Unknown)
                 Text("请确认 Shizuku 已授权，再读取一次。", style = MaterialTheme.typography.bodySmall)

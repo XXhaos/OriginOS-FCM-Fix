@@ -13,9 +13,9 @@ import org.junit.Test
 
 class GmsConnectionPresentationTest {
     @Test fun heartbeatTextNeverEquatesRequestWithRepair() {
-        assertEquals("本次未发送心跳；当前连接或特权条件不满足。", gmsHeartbeatMessage(GmsHeartbeatStatus.NOT_SENT))
-        assertEquals("已请求心跳；不代表连接已修复或通知送达。", gmsHeartbeatMessage(GmsHeartbeatStatus.REQUESTED))
-        assertEquals("请求结果不明；不会自动重发。", gmsHeartbeatMessage(GmsHeartbeatStatus.UNKNOWN))
+        assertEquals("心跳未发送，请检查连接与 Shizuku 授权。", gmsHeartbeatMessage(GmsHeartbeatStatus.NOT_SENT))
+        assertEquals("已请求心跳。", gmsHeartbeatMessage(GmsHeartbeatStatus.REQUESTED))
+        assertEquals("无法确认请求结果，请重新读取连接状态。", gmsHeartbeatMessage(GmsHeartbeatStatus.UNKNOWN))
     }
 
     private fun sample(matched: Boolean = true, complete: Boolean = true) = GmsConnectionObservation.Sample(
@@ -27,28 +27,28 @@ class GmsConnectionPresentationTest {
         receiverInspectionComplete = false, receivers = emptyList(),
     )
 
-    @Test fun freshSampleReportsObservationNotDelivery() {
-        assertEquals("本次观察到匹配 TCP 迹象", gmsSampleHeadline(sample(), 500, false))
-        assertEquals("本次观察到匹配 TCP 迹象", gmsSampleHeadline(sample(), 30500, false))
+    @Test fun socketCluesNeverClaimKnownFcmConnection() {
+        assertEquals("FCM 连接状态未知", gmsSampleHeadline(sample(), 500, false))
+        assertEquals("FCM 连接状态未知", gmsSampleHeadline(sample(), 30500, false))
     }
 
     @Test fun staleOrBackwardClockNeverKeepsCurrentConnectionClaim() {
         for (now in listOf(499L, 30501L)) {
-            assertTrue(gmsSampleHeadline(sample(), now, false).contains("当前连接未知"))
+            assertEquals("状态已过期，请重新读取。", gmsSampleHeadline(sample(), now, false))
         }
     }
 
     @Test fun networkEventInvalidatesEvenFreshPositiveSample() {
-        assertTrue(gmsSampleHeadline(sample(), 500, true).contains("无法判断当前连接"))
+        assertEquals("网络已变化，请重新读取。", gmsSampleHeadline(sample(), 500, true))
     }
 
     @Test fun completeNegativeExplicitlyDoesNotAssertDisconnection() {
-        assertEquals("本次可读来源未观察到匹配；不等于断线", gmsSampleHeadline(sample(matched = false), 500, false))
+        assertEquals("FCM 连接状态未知", gmsSampleHeadline(sample(matched = false), 500, false))
     }
 
-    @Test fun partialNegativeIsUnknownWhileValidPositiveRemainsObservationOnly() {
-        assertEquals("本次来源覆盖不足，无法判断", gmsSampleHeadline(sample(matched = false, complete = false), 500, false))
-        assertEquals("本次观察到匹配 TCP 迹象", gmsSampleHeadline(sample(complete = false), 500, false))
+    @Test fun partialSocketEvidenceKeepsConnectionUnknown() {
+        assertEquals("FCM 连接状态未知", gmsSampleHeadline(sample(matched = false, complete = false), 500, false))
+        assertEquals("FCM 连接状态未知", gmsSampleHeadline(sample(complete = false), 500, false))
     }
 
     @Test fun selfReportedStateIsIndependentOfSocketAndExpires() {
@@ -58,9 +58,9 @@ class GmsConnectionPresentationTest {
         assertEquals("FCM 已断开", gmsServiceHeadline(disconnected, 500, false))
         assertEquals("FCM 已连接 · 连接时长未知", gmsServiceHeadline(disconnected.copy(gcmService =
             disconnected.gcmService.copy(state = GcmConnectionState.REPORTED_CONNECTED)), 500, false))
-        assertTrue(gmsServiceHeadline(disconnected, 30501, false).contains("当前连接未知"))
-        assertTrue(gmsServiceHeadline(disconnected, 499, false).contains("当前连接未知"))
-        assertTrue(gmsServiceHeadline(disconnected, 500, true).contains("未知"))
+        assertEquals("状态已过期，请重新读取。", gmsServiceHeadline(disconnected, 30501, false))
+        assertEquals("状态已过期，请重新读取。", gmsServiceHeadline(disconnected, 499, false))
+        assertEquals("网络已变化，请重新读取。", gmsServiceHeadline(disconnected, 500, true))
         assertTrue(gmsServiceHeadline(sample(), 500, false).contains("未知"))
     }
 
@@ -81,7 +81,7 @@ class GmsConnectionPresentationTest {
     @Test fun reportedDurationStaysFixedUntilAnotherRead() {
         val observation = connected(59_000)
         assertEquals(gmsServiceHeadline(observation, 500, false), gmsServiceHeadline(observation, 30_500, false))
-        assertTrue(gmsServiceHeadline(observation, 30_501, false).contains("当前连接未知"))
+        assertEquals("状态已过期，请重新读取。", gmsServiceHeadline(observation, 30_501, false))
         assertTrue(!gmsServiceHeadline(observation, 30_501, false).contains("连接时长"))
     }
 
@@ -99,10 +99,10 @@ class GmsConnectionPresentationTest {
             observedAtMillis = 1000, elapsedRealtimeMillis = 500, userId = 0))
         assertEquals("FCM 连接状态未知", gmsServiceHeadline(incomplete, 500, false))
         val historicalService = connected().copy(elapsedRealtimeMillis = 31_000)
-        assertTrue(gmsServiceHeadline(historicalService, 31_000, false).contains("当前连接未知"))
+        assertEquals("状态已过期，请重新读取。", gmsServiceHeadline(historicalService, 31_000, false))
         val historicalSample = connected().copy(elapsedRealtimeMillis = 0,
             gcmService = connected().gcmService.copy(elapsedRealtimeMillis = 31_000))
-        assertTrue(gmsServiceHeadline(historicalSample, 31_000, false).contains("当前连接未知"))
+        assertEquals("状态已过期，请重新读取。", gmsServiceHeadline(historicalSample, 31_000, false))
         assertTrue(!gmsServiceHeadline(connected(), 500, true).contains("连接时长"))
         assertTrue(!gmsServiceHeadline(connected(), 499, false).contains("连接时长"))
     }
@@ -110,7 +110,7 @@ class GmsConnectionPresentationTest {
     @Test fun disconnectedAndAbsentServiceNeverShowConnectedDuration() {
         for ((state, expected) in listOf(
             GcmConnectionState.REPORTED_DISCONNECTED to "FCM 已断开",
-            GcmConnectionState.SERVICE_ABSENT to "本次完整读取：FCM 服务不存在")) {
+            GcmConnectionState.SERVICE_ABSENT to "FCM 服务未运行")) {
             val observation = connected().copy(gcmService = connected().gcmService.copy(
                 state = state, connectedDurationMillis = null))
             assertEquals(expected, gmsServiceHeadline(observation, 500, false))

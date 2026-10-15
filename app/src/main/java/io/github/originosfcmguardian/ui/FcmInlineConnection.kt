@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -59,24 +59,20 @@ internal fun FcmInlineConnection(manual: GmsConnectionUiState,
     val selection = selectFcmInlineConnection(manual, automatic)
     val status = fcmInlineStatus(selection, fcmPresentationClock(selection.observation))
     Surface(onClick = onRead, enabled = !selection.busy,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp)
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
             .testTag("fcm-inline-read").semantics { contentDescription = "读取 FCM 连接状态" }) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically,
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f).clearAndSetSemantics { contentDescription = status.accessibilityLabel },
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(status.text.substringBefore(" · "), style = MaterialTheme.typography.titleMedium)
+                Text(status.text.substringBefore(" · "), style = MaterialTheme.typography.bodyMedium)
                 if (" · " in status.text) Text(status.text.substringAfter(" · "),
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Column(Modifier.widthIn(max = 84.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("↻", style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.clearAndSetSemantics {})
-                Text(if (selection.busy) "读取中…" else "查看连接状态",
-                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-            }
+            Text(if (selection.busy) "读取中…" else "刷新",
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

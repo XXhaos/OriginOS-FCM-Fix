@@ -51,11 +51,9 @@ class SelectedTargetDetailsExpansionTest {
             HomeScreen(state = state, onShizukuAction = {},
                 onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
                 onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
-                onRunDailyProtection = {}, onClearCorruptTargetSelection = {}, onRequestFcmToken = {},
-                onToggleFcmTokenVisibility = {}, onCopyFcmToken = {}, onClearFcmToken = {},
-                onRequestNotificationPermission = {}, onSetNotificationFactsEnabled = {},
-                onOpenNotificationListenerSettings = {}, onClearNotificationFactsHistory = {},
-                onExportNotificationFacts = {})
+                onClearCorruptTargetSelection = {},
+
+                )
         } }
         compose.onNodeWithContentDescription("应用标签").performClick()
         compose.onNodeWithText(countsText).assertDoesNotExist()
@@ -63,9 +61,9 @@ class SelectedTargetDetailsExpansionTest {
         compose.onNodeWithTag("app-details:${target.identity.packageName}:true").performClick()
         compose.onAllNodesWithTag("app-details:${target.identity.packageName}:true").assertCountEquals(1)
         compose.onAllNodesWithText("Fixture").assertCountEquals(1)
-        compose.onNodeWithText("今日 2 · 本周 4 次确认解除").assertExists()
+        compose.onNodeWithText("今日解除 2 次 · 本周 4 次").assertExists()
         compose.onNodeWithText(countsText).assertDoesNotExist()
-        compose.onNodeWithText("复检结果：可被后台唤醒（未被停止）").assertExists()
+        compose.onNodeWithText("复检结果：允许后台唤醒").assertExists()
         compose.onNodeWithText("自启动权限：尚未检查").assertDoesNotExist()
         compose.onNodeWithText("Fixture protection details").assertDoesNotExist()
         compose.onNodeWithText("复检").assertIsEnabled()
@@ -76,7 +74,7 @@ class SelectedTargetDetailsExpansionTest {
         compose.onNodeWithText("收起").assertDoesNotExist()
         compose.onNodeWithTag("app-details:${target.identity.packageName}:true").performClick()
         compose.onNodeWithText(countsText).assertDoesNotExist()
-        compose.onNodeWithText("复检结果：可被后台唤醒（未被停止）").assertDoesNotExist()
+        compose.onNodeWithText("复检结果：允许后台唤醒").assertDoesNotExist()
         compose.onNodeWithText("Fixture protection details").assertDoesNotExist()
         compose.onNodeWithText("复检").assertDoesNotExist()
         compose.onAllNodesWithTag("app-details:${target.identity.packageName}:true").assertCountEquals(1)
@@ -95,12 +93,12 @@ class SelectedTargetDetailsExpansionTest {
         compose.onNodeWithContentDescription("Fixture详情").assertDoesNotExist()
         compose.onNodeWithText("Fixture").assertDoesNotExist()
         compose.onNodeWithText(countsText).assertExists()
-        compose.onNodeWithText("可被后台唤醒（未被停止）").assertExists()
+        compose.onNodeWithText("允许后台唤醒").assertExists()
         compose.onNodeWithText("Fixture automatic controls").assertExists()
         compose.onNodeWithText("复检").assertIsNotEnabled()
         compose.onNodeWithText("系统设置").assertIsEnabled()
         compose.onNodeWithText("移除").assertIsEnabled()
-        compose.onNodeWithText("核对上次结果（只读）").assertIsNotEnabled()
+        compose.onNodeWithText("核对上次结果").assertIsNotEnabled()
     }
 
     @Test fun standaloneDefaultRetainsItsOwnExpansionHeader() {
@@ -113,7 +111,7 @@ class SelectedTargetDetailsExpansionTest {
         compose.onNodeWithText("复检").assertExists()
         compose.onNodeWithContentDescription("Fixture详情").performClick()
         compose.onNodeWithText("复检").assertDoesNotExist()
-        compose.onNodeWithText("可被后台唤醒（未被停止）").assertExists()
+        compose.onNodeWithText("允许后台唤醒").assertExists()
         compose.onNodeWithContentDescription("Fixture详情").performClick()
         compose.onNodeWithText("复检").assertExists()
     }

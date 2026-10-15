@@ -44,10 +44,10 @@ class AppsProtectionPresentationTest {
         assertTrue(groups.all.isEmpty())
         groups.protected.forEach { row ->
             assertTrue(targetAutomaticProtectionState(waiting, row.app.identity!!).savedAuthorization)
-            assertEquals("等待恢复检测", protectionAppStatus(state, row))
+            assertEquals("等待恢复", protectionAppStatus(state, row))
         }
         val pending = state.copy(automaticProtection = waiting.copy(waitingForReconciliation = true))
-        assertEquals("等待只读复检", protectionAppStatus(pending, groups.protected.first()))
+        assertEquals("等待复检", protectionAppStatus(pending, groups.protected.first()))
     }
 
     @Test fun compactCountsUseExactAuthorizedInstallationEvenWhileWaitingForPrivilege() {
@@ -101,7 +101,7 @@ class AppsProtectionPresentationTest {
         assertFalse(canPrepareAppProtection(state, state.visibleApps.single()))
         val oldRow = groups.protected.single { !it.currentInstallation }
         assertTrue(targetAutomaticProtectionState(state.automaticProtection, oldRow.app.identity!!).savedAuthorization)
-        assertEquals("已保留选择；安装身份变化，请取消后重新确认", protectionAppStatus(state, oldRow))
+        assertEquals("应用已变化，请重新选择", protectionAppStatus(state, oldRow))
     }
 
     @Test fun unavailableSelectedRowsStayVisibleWithoutClaimingAVisibleInstallation() {
@@ -143,7 +143,7 @@ class AppsProtectionPresentationTest {
         val state = ready.copy(stoppedRecovery = StoppedRecoveryUiState(loaded = true, recordIdentity = first,
             receiptOutcome = StoppedRecoveryOutcome.STILL_STOPPED))
         assertTrue(protectionAppGroups(state, "").protected.isEmpty())
-        assertEquals("上次核对仍有停止限制；保护未开启，请查看详情",
+        assertEquals("上次恢复未完成，请复检",
             protectionAppStatus(state, ProtectionAppRow(firstApp, true)))
         assertFalse(targetAutomaticProtectionState(state.automaticProtection, first).savedAuthorization)
     }
