@@ -38,7 +38,8 @@ class DaemonProtectionHostTest {
     }
 
     private inner class Fixture(emptyRoot: Boolean = false, activeHeartbeat: Boolean = false,
-        configuredTarget: Boolean = false, existingRoot: DaemonProtectionRoot? = null) : AutoCloseable {
+        configuredTarget: Boolean = false, existingRoot: DaemonProtectionRoot? = null,
+        collectDiagnostics: Boolean = false) : AutoCloseable {
         val now = AtomicLong(10_000)
         var writes = 0
         var reads = 0
@@ -128,6 +129,14 @@ class DaemonProtectionHostTest {
             override fun isQuiescent() = idle
             override fun close() { fcmCloses++ }
         }
+        val diagnosticRuntime = if (collectDiagnostics) DaemonDiagnosticsRuntime(
+            DaemonDiagnosticsSession("host-session", boot, 555, 123, 93, wall(), now.get(), wall(), now.get(), DaemonDiagnosticsState.BEGIN),
+            open = { object : DaemonDiagnosticsStorage {
+                override fun read(): DaemonDiagnosticsSnapshot? = null
+                override fun write(value: DaemonDiagnosticsSnapshot) = Unit
+                override fun close() = Unit
+            } }, capture = { DaemonDiagnosticsSample("host-session", it.atMillis, it.elapsedMillis) },
+            wall = ::wall, elapsed = now::get) else null
         val host = DaemonProtectionHost(initial.control.owner, guardian, boot, "migration", root,
             ownerLease = { start -> start(); true }, releaseLease = {
                 if (releaseFailures-- > 0) error("Lease release failed")
@@ -142,7 +151,8 @@ class DaemonProtectionHostTest {
                 override fun wallMillis() = wall()
             }, stoppedShell = stopped, fcmShell = fcm, elapsed = now::get, wall = ::wall,
             processId = 555, fingerprint = { VERIFIED_AUTOSTART_FINGERPRINT },
-            commandClock = { BudgetClock(1, now.get(), wall()) }, recoveryReady = { true }, startScheduler = false)
+            commandClock = { BudgetClock(1, now.get(), wall()) }, recoveryReady = { true }, startScheduler = false,
+            diagnostics = diagnosticRuntime)
         fun reconcile() {
             val challenge = requireNotNull(host.currentPointerChallenge(caller))
             assertTrue(host.attest(caller, DaemonAppPointerAttestation(challenge, challenge.pointer)))
@@ -186,6 +196,41 @@ class DaemonProtectionHostTest {
                 DaemonControlIntent.SetAuthority(challenge.pointer)))
         }
         override fun close() { child.running = false; idle = true; fence?.workerSettled(PrivilegedExecutionSettlement.UNKNOWN); host.close() }
+    }
+
+    @Test fun productionCycleMetricsMeasureAwaitedCallsAndPreserveReturnedStatuses() = runBlocking {
+        Fixture(collectDiagnostics = true).use { f ->
+            val runtime = requireNotNull(f.diagnosticRuntime)
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+            while (runtime.snapshot().sessions.isEmpty() && System.nanoTime() < deadline) Thread.yield()
+            // Before pointer reconciliation neither engine has been invoked.
+            f.poll()
+            assertEquals(0, runtime.snapshot().sessions.single().cycleMetrics!!.stopped.completedCount)
+            f.reconcile()
+            f.connection = GcmConnectionState.REPORTED_CONNECTED
+            f.beforeFcmRead = { f.now.addAndGet(125) }
+            f.poll()
+            val first = runtime.snapshot().sessions.single().cycleMetrics!!
+            assertEquals(1, first.stopped.outcomes.waiting)
+            assertEquals(1, first.fcm.outcomes.checked)
+            assertEquals(125, first.fcm.totalElapsedMillis)
+            assertEquals(125, first.fcm.maxElapsedMillis)
+            // Calling again without advancing the fake monotonic clock returns actual throttles.
+            f.host.pollOnce()
+            val throttled = runtime.snapshot().sessions.single().cycleMetrics!!
+            assertEquals(1, throttled.stopped.outcomes.throttled)
+            assertEquals(1, throttled.fcm.outcomes.throttled)
+            assertEquals(2, throttled.fcm.completedCount)
+            assertEquals(125, throttled.fcm.totalElapsedMillis)
+            // The engine contains the exception and returns UNAVAILABLE; no invented failure outcome.
+            f.beforeFcmRead = { error("contained diagnostic engine read failure") }
+            f.poll()
+            val unavailable = runtime.snapshot().sessions.single().cycleMetrics!!
+            assertEquals(3, unavailable.fcm.completedCount)
+            assertEquals(1, unavailable.fcm.outcomes.unavailable)
+            assertEquals(2, unavailable.stopped.outcomes.waiting)
+            first.validate(); throttled.validate(); unavailable.validate()
+        }
     }
 
     private fun unusedPermitRoot(f: Fixture, previousBoot: String, masterOff: Boolean = false): DaemonProtectionRoot {

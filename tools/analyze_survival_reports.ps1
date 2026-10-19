@@ -142,6 +142,41 @@ function Get-GuardianDaemonEvidence {
         }
         $Value
     }
+    function Read-DaemonSampledContext($Value, [long]$SampleCount) {
+        # Optional v13 extension: absence is unknown, never reconstruct it from the 16-sample preview.
+        if ($null -eq $Value) { return $null }
+        $result = [ordered]@{}
+        foreach ($name in @('batteryKnownCount','batteryUnknownCount')) {
+            $result[$name] = Read-DaemonNumber $Value.$name $true 0 $SampleCount
+        }
+        if ($result.batteryKnownCount + $result.batteryUnknownCount -ne $SampleCount) { throw 'Invalid daemon battery sample counts' }
+        foreach ($name in @('batteryFirstPercent','batteryLastPercent','batteryMinPercent','batteryMaxPercent')) {
+            $result[$name] = Read-DaemonNumber $Value.$name $false 0 100
+        }
+        if ($result.batteryKnownCount -eq 0) {
+            if ($null -ne $result.batteryFirstPercent -or $null -ne $result.batteryLastPercent -or
+                $null -ne $result.batteryMinPercent -or $null -ne $result.batteryMaxPercent) { throw 'Unknown daemon battery has values' }
+        } else {
+            if ($null -eq $result.batteryMinPercent -or $null -eq $result.batteryMaxPercent -or
+                $result.batteryMinPercent -gt $result.batteryMaxPercent) { throw 'Invalid daemon sampled battery range' }
+            foreach ($name in @('batteryFirstPercent','batteryLastPercent')) {
+                if ($null -ne $result[$name] -and ($result[$name] -lt $result.batteryMinPercent -or
+                    $result[$name] -gt $result.batteryMaxPercent)) { throw 'Invalid daemon sampled battery endpoint' }
+            }
+        }
+        foreach ($family in @('chargingStatusCounts','interactive','deviceIdle')) {
+            $names = if ($family -eq 'chargingStatusCounts') { @('CHARGING','FULL','DISCHARGING','NOT_CHARGING','UNKNOWN') }
+                else { @('trueCount','falseCount','unknownCount') }
+            $counts = [ordered]@{}; $total = 0L
+            foreach ($name in $names) {
+                $counts[$name] = Read-DaemonNumber $Value.$family.$name $true 0 $SampleCount
+                $total += $counts[$name]
+            }
+            if ($total -ne $SampleCount) { throw 'Invalid daemon sampled state counts' }
+            $result[$family] = [pscustomobject]$counts
+        }
+        [pscustomobject]$result
+    }
     function Read-DaemonSummary($Value) {
         if ($null -eq $Value) { throw 'Missing daemon summary' }
         $result = [ordered]@{ sampleCount = Read-DaemonNumber $Value.sampleCount $true 0 2016 }
@@ -151,12 +186,39 @@ function Get-GuardianDaemonEvidence {
         }
         $result.rssDeltaKiB = Read-DaemonNumber $Value.rssDeltaKiB $false ([long]::MinValue)
         $result.cpuSingleCorePercent = Read-DaemonNumber $Value.cpuSingleCorePercent $false 0 ([long]::MaxValue) $false
+        $result.sampledContext = Read-DaemonSampledContext $Value.sampledContext $result.sampleCount
         [pscustomobject]$result
     }
     function Read-DaemonScope($Value, [string]$Expected) {
         if ($null -eq $Value) { return $null }
         if ($Value -isnot [string] -or $Value -cne $Expected) { throw 'Invalid daemon evidence scope' }
         $Value
+    }
+    function Read-DaemonCycleMetrics($Value, [long]$SessionStartedElapsed) {
+        if ($null -eq $Value) { return $null }
+        $result = [ordered]@{ version = Read-DaemonNumber $Value.version $true 1 1
+            startedAtEpochMillis = Read-DaemonNumber $Value.startedAtEpochMillis $true 1
+            startedElapsedMillis = Read-DaemonNumber $Value.startedElapsedMillis $true $SessionStartedElapsed
+            lastCheckpointAtEpochMillis = Read-DaemonNumber $Value.lastCheckpointAtEpochMillis $true 1
+            lastCheckpointElapsedMillis = Read-DaemonNumber $Value.lastCheckpointElapsedMillis $true }
+        if ($result.lastCheckpointElapsedMillis -lt $result.startedElapsedMillis) { throw 'Invalid daemon cycle coverage' }
+        foreach ($stage in @('stopped','fcm')) {
+            $entry = [ordered]@{}
+            foreach ($name in @('completedCount','totalElapsedMillis','maxElapsedMillis')) {
+                $entry[$name] = Read-DaemonNumber $Value.$stage.$name $true
+            }
+            if ($entry.maxElapsedMillis -gt $entry.totalElapsedMillis -or
+                ($entry.completedCount -eq 0 -and $entry.totalElapsedMillis -ne 0)) { throw 'Invalid daemon cycle duration' }
+            $outcomes = [ordered]@{}; $sum = [decimal]0
+            foreach ($name in @('checked','reconciled','waiting','busy','throttled','pending','unavailable')) {
+                $outcomes[$name] = Read-DaemonNumber $Value.$stage.outcomes.$name $true
+                $sum += [decimal]$outcomes[$name]
+            }
+            if ([Math]::Min($sum, [decimal][long]::MaxValue) -ne $entry.completedCount) { throw 'Invalid daemon cycle outcome counts' }
+            $entry.outcomes = [pscustomobject]$outcomes
+            $result[$stage] = [pscustomobject]$entry
+        }
+        [pscustomobject]$result
     }
     $output = [ordered]@{
         availability = $availability
@@ -168,7 +230,8 @@ function Get-GuardianDaemonEvidence {
         sessions = @(); timeBuckets = @(); omittedTimeBuckets = $null; recentSamples = @()
         events = $null; omittedRawSamples = $null
         sourceCpuScope = $null; batteryScope = $null; capacityScope = $null
-        snapshotScope = $null; unknownIntervalScope = $null
+        snapshotScope = $null; unknownIntervalScope = $null; sampledContextScope = $null
+        cycleMetricsScope = $null; cycleOutcomeScope = $null; cycleMetricsPersistenceScope = $null
         daemonTerminationCount = $null
         terminationAttribution = 'UNKNOWN_END_OR_MISSING_NORMAL_END_DOES_NOT_PROVE_KILL'
         cpuScope = 'DAEMON_PROCESS_SINGLE_CORE_PERCENT_NOT_SYSTEM_CPU_OR_BATTERY_DRAIN'
@@ -190,6 +253,10 @@ function Get-GuardianDaemonEvidence {
     $output.generatedElapsedMillis = Read-DaemonNumber $section.generatedElapsedMillis
     $output.sourceCpuScope = Read-DaemonScope $section.cpuScope 'SAME_HOST_SESSION_PROCESS_CPU_EXCLUDES_CHILDREN_GMS_AND_RADIO'
     $output.batteryScope = Read-DaemonScope $section.batteryScope 'WHOLE_PHONE_CONTEXT_NOT_GUARDIAN_ENERGY'
+    $output.sampledContextScope = Read-DaemonScope $section.sampledContextScope 'RETAINED_SAMPLE_POINTS_NOT_CONTINUOUS_STATE_OR_GUARDIAN_ENERGY'
+    $output.cycleMetricsScope = Read-DaemonScope $section.cycleMetricsScope 'AWAITED_POLL_WALL_LATENCY_INCLUDES_DISPATCH_WAIT_NOT_CPU_OR_CHILD_RUNTIME'
+    $output.cycleOutcomeScope = Read-DaemonScope $section.cycleOutcomeScope 'CYCLE_RESULT_NOT_TARGET_CHECK_WRITE_OR_FCM_DELIVERY_COUNTS'
+    $output.cycleMetricsPersistenceScope = Read-DaemonScope $section.cycleMetricsPersistenceScope 'LIVE_COUNTERS_PERIODIC_PERSISTENCE_UNCOMMITTED_TAIL_MAY_BE_LOST'
     $output.capacityScope = Read-DaemonScope $section.capacityScope 'COUNT_BOUND_NOT_SEVEN_DAY_TTL'
     $output.snapshotScope = Read-DaemonScope $section.snapshotScope 'INDEPENDENT_DIAGNOSTIC_SNAPSHOT_NOT_CONTROL_TRANSACTION'
     $output.unknownIntervalScope = Read-DaemonScope $section.unknownIntervalScope 'UNSETTLED_SESSIONS_OR_POLL_GAPS_NOT_CONFIRMED_KILLS'
@@ -233,6 +300,7 @@ function Get-GuardianDaemonEvidence {
             ($null -ne $entry.normalEndedElapsedMillis -and $entry.normalEndedElapsedMillis -lt $entry.startedElapsedMillis)) {
             throw 'Invalid daemon monotonic/end relation'
         }
+        $entry.cycleMetrics = Read-DaemonCycleMetrics $session.cycleMetrics $entry.startedElapsedMillis
         [pscustomobject]$entry
     })
     if ($null -ne $output.currentSession -and -not $knownSessions.ContainsKey($output.currentSession)) { throw 'Unknown current daemon session' }

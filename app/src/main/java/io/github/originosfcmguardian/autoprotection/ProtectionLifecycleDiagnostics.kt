@@ -74,7 +74,7 @@ internal object ProtectionLifecycleDiagnostics {
             resourceFailed.updateAndGet { saturatedDiagnosticAdd(it, prior.failed) }
             val merged = mergeProtectionResourceExits(prior, resourceExits)
                 .copy(skipped = resourceSkipped.get(), failed = resourceFailed.get())
-            sidecar.write(merged)
+            persistChangedProtectionResources(prior, merged, sidecar::write)
             resourceSnapshot = merged
             resourceSampler = ProtectionResourceSampler(app)
             resourceAvailability = merged.availability

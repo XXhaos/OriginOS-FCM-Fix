@@ -11,6 +11,20 @@ class ProtectionResourceJournalTest {
         1, 1, at, at)
     private fun exit(at: Long = 10, pid: Int = 100) = ProtectionResourceExit(pid, at, 3, 0, 200, 123, null)
 
+    @Test fun `startup skips identical resource history but persists exit coverage and counter changes`() {
+        val prior = mergeProtectionResourceExits(ProtectionResourceSnapshot(), listOf(exit()))
+        val written = mutableListOf<ProtectionResourceSnapshot>()
+        persistChangedProtectionResources(prior, prior.copy(), written::add)
+        assertTrue(written.isEmpty())
+        val newExit = mergeProtectionResourceExits(prior, listOf(exit(), exit(at = 11)))
+        persistChangedProtectionResources(prior, newExit, written::add)
+        val unknownCoverage = mergeProtectionResourceExits(newExit, null)
+        persistChangedProtectionResources(newExit, unknownCoverage, written::add)
+        val failed = unknownCoverage.copy(failed = 1)
+        persistChangedProtectionResources(unknownCoverage, failed, written::add)
+        assertEquals(listOf(newExit, unknownCoverage, failed), written)
+    }
+
     @Test fun `both rings retain bounded evidence and exact eviction counters`() {
         var value = ProtectionResourceSnapshot()
         repeat(1030) { value = appendProtectionResource(value, sample(it + 10L)) }

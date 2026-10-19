@@ -195,6 +195,49 @@ Assert-Equal 'COUNT_BOUND_NOT_SEVEN_DAY_TTL' $daemon.daemonEvidence.capacityScop
 Assert-Equal 'INDEPENDENT_DIAGNOSTIC_SNAPSHOT_NOT_CONTROL_TRANSACTION' $daemon.daemonEvidence.snapshotScope 'snapshot transaction limit retained'
 Assert-Equal 'UNSETTLED_SESSIONS_OR_POLL_GAPS_NOT_CONFIRMED_KILLS' $daemon.daemonEvidence.unknownIntervalScope 'gaps are not death counts'
 Assert-Equal 'START_AND_PENDING_AND_RETURNED_RESULT' $daemon.fcm.episodes.requestTimingScope 'v13 inherits v12 timing semantics'
+Assert-Equal $null $daemon.daemonEvidence.sessions[0].summary.sampledContext 'legacy v13 context stays unknown'
+Assert-Equal $null $daemon.daemonEvidence.sampledContextScope 'legacy context scope stays unknown'
+Assert-Equal $null $daemon.daemonEvidence.sessions[0].cycleMetrics 'legacy cycles stay unknown'
+Assert-Equal $null $daemon.daemonEvidence.cycleMetricsPersistenceScope 'legacy cycle durability stays unknown'
+function New-DaemonCycleMetrics([long]$Count = 1, [long]$Elapsed = 120) {
+    @{version=1; startedAtEpochMillis=1000; startedElapsedMillis=100
+      lastCheckpointAtEpochMillis=2000; lastCheckpointElapsedMillis=1100
+      stopped=@{completedCount=$Count; totalElapsedMillis=$Elapsed; maxElapsedMillis=$Elapsed
+        outcomes=@{checked=$Count; reconciled=0; waiting=0; busy=0; throttled=0; pending=0; unavailable=0}}
+      fcm=@{completedCount=0; totalElapsedMillis=0; maxElapsedMillis=0
+        outcomes=@{checked=0; reconciled=0; waiting=0; busy=0; throttled=0; pending=0; unavailable=0}} }
+}
+function New-DaemonSampledContext {
+    @{ batteryKnownCount=1; batteryUnknownCount=1; batteryFirstPercent=$null; batteryLastPercent=78
+        batteryMinPercent=78; batteryMaxPercent=78
+        chargingStatusCounts=@{CHARGING=1; FULL=0; DISCHARGING=0; NOT_CHARGING=0; UNKNOWN=1}
+        interactive=@{trueCount=1; falseCount=0; unknownCount=1}
+        deviceIdle=@{trueCount=0; falseCount=1; unknownCount=1} }
+}
+$report.daemonDiagnostics.sampledContextScope='RETAINED_SAMPLE_POINTS_NOT_CONTINUOUS_STATE_OR_GUARDIAN_ENERGY'
+$report.daemonDiagnostics.cycleMetricsScope='AWAITED_POLL_WALL_LATENCY_INCLUDES_DISPATCH_WAIT_NOT_CPU_OR_CHILD_RUNTIME'
+$report.daemonDiagnostics.cycleOutcomeScope='CYCLE_RESULT_NOT_TARGET_CHECK_WRITE_OR_FCM_DELIVERY_COUNTS'
+$report.daemonDiagnostics.cycleMetricsPersistenceScope='LIVE_COUNTERS_PERIODIC_PERSISTENCE_UNCOMMITTED_TAIL_MAY_BE_LOST'
+$report.daemonDiagnostics.sessions[0].cycleMetrics=New-DaemonCycleMetrics
+$report.daemonDiagnostics.sessions[0].summary.sampledContext=New-DaemonSampledContext
+$report.daemonDiagnostics.sessions[0].summary.gapIntervals=1
+$report.daemonDiagnostics.timeBuckets=@(@{session='000000000000000000000001'; hourEpochMillis=0; summary=(New-DaemonSummary)})
+$report.daemonDiagnostics.timeBuckets[0].summary.sampledContext=New-DaemonSampledContext
+$contextDaemon=(Get-GuardianSurvivalSummary $report).daemonEvidence
+Assert-Equal $null $contextDaemon.sessions[0].summary.sampledContext.batteryFirstPercent 'unknown first endpoint not filled'
+Assert-Equal 78 $contextDaemon.sessions[0].summary.sampledContext.batteryLastPercent 'last actual point retained'
+Assert-Equal 1 $contextDaemon.sessions[0].summary.sampledContext.interactive.unknownCount 'unknown sampled screen state retained'
+Assert-Equal 1 $contextDaemon.timeBuckets[0].summary.sampledContext.chargingStatusCounts.UNKNOWN 'hourly unknown charging count retained'
+Assert-Equal 1 $contextDaemon.sessions[0].summary.gapIntervals 'gaps remain explicit beside sampled context'
+Assert-Equal 'RETAINED_SAMPLE_POINTS_NOT_CONTINUOUS_STATE_OR_GUARDIAN_ENERGY' $contextDaemon.sampledContextScope 'point observation scope retained'
+Assert-Equal $false $contextDaemon.continuousProtectionProven 'sampled context not continuous evidence'
+Assert-Equal $null $contextDaemon.sessions[0].summary.sampledContext.dischargeRate 'no inferred discharge rate'
+Assert-Equal $null $contextDaemon.sessions[0].summary.sampledContext.guardianEnergy 'no inferred Guardian energy'
+Assert-Equal 120 $contextDaemon.sessions[0].cycleMetrics.stopped.totalElapsedMillis 'cycle awaited wall latency retained'
+Assert-Equal 0 $contextDaemon.sessions[0].cycleMetrics.fcm.completedCount 'new known zero differs from legacy null'
+Assert-Equal 'CYCLE_RESULT_NOT_TARGET_CHECK_WRITE_OR_FCM_DELIVERY_COUNTS' $contextDaemon.cycleOutcomeScope 'cycle outcome attribution retained'
+Assert-Equal 'LIVE_COUNTERS_PERIODIC_PERSISTENCE_UNCOMMITTED_TAIL_MAY_BE_LOST' $contextDaemon.cycleMetricsPersistenceScope 'live cycle tail loss scope retained'
+Assert-Equal $null $contextDaemon.timeBuckets[0].cycleMetrics 'no inferred hourly cycle attribution'
 foreach ($source in @('NOT_COLLECTED','INITIALIZING','UNAVAILABLE','CORRUPT','LOCKED')) {
     $report.daemonDiagnostics.availability=$source
     $unknownDaemon=Get-GuardianSurvivalSummary $report
@@ -207,6 +250,8 @@ foreach ($source in @('NOT_COLLECTED','INITIALIZING','UNAVAILABLE','CORRUPT','LO
     Assert-Equal $null $unknownDaemon.daemonEvidence.generatedElapsedMillis 'unavailable snapshot clock unknown'
     Assert-Equal $null $unknownDaemon.daemonEvidence.omittedRawSamples 'unavailable omission count unknown'
     Assert-Equal $null $unknownDaemon.daemonEvidence.sourceCpuScope 'unavailable stale source scopes omitted'
+    Assert-Equal $null $unknownDaemon.daemonEvidence.sampledContextScope 'unavailable sampled context scope omitted'
+    Assert-Equal $null $unknownDaemon.daemonEvidence.cycleMetricsPersistenceScope 'unavailable cycle durability scope omitted'
     Assert-Equal 2 $unknownDaemon.retainedNaturalLowMemoryCount 'daemon unavailable does not erase app history'
 }
 $report.daemonDiagnostics.availability='AVAILABLE'
@@ -242,25 +287,60 @@ Assert-RejectedDaemon { $report.daemonDiagnostics.generatedElapsedMillis=-1 } 'r
 Assert-RejectedDaemon { $report.daemonDiagnostics.omittedRawSamples=0 } 'reject hidden raw sample omissions'
 Assert-RejectedDaemon { $report.daemonDiagnostics.batteryScope='GUARDIAN_ENERGY' } 'reject false battery attribution scope'
 Assert-RejectedDaemon { $report.daemonDiagnostics.cpuScope='SYSTEM_CPU' } 'reject merged CPU scope'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sampledContextScope='GUARDIAN_ENERGY' } 'reject sampled energy attribution'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].summary.sampledContext.batteryKnownCount=2 } 'reject inconsistent battery point counts'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].summary.sampledContext.interactive.trueCount=-1 } 'reject negative context count'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].summary.sampledContext.deviceIdle.unknownCount=$null } 'reject missing context count'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].summary.sampledContext.chargingStatusCounts.UNKNOWN=0 } 'reject inconsistent charging counts'
+Assert-RejectedDaemon { $report.daemonDiagnostics.timeBuckets[0].summary.sampledContext.batteryMinPercent=79 } 'reject hourly endpoint outside range'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].summary.sampledContext.batteryKnownCount=0; $report.daemonDiagnostics.sessions[0].summary.sampledContext.batteryUnknownCount=2 } 'unknown battery cannot have values'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].cycleMetrics.version=2 } 'unknown cycle version rejected'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].cycleMetrics.startedElapsedMillis=99 } 'cycle coverage cannot precede session'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].cycleMetrics.lastCheckpointElapsedMillis=99 } 'cycle coverage cannot go backward'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].cycleMetrics.stopped.maxElapsedMillis=121 } 'cycle max cannot exceed total'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].cycleMetrics.stopped.outcomes.checked=0 } 'cycle completed must match outcomes'
+Assert-RejectedDaemon { $report.daemonDiagnostics.sessions[0].cycleMetrics.fcm.totalElapsedMillis=1 } 'no duration fabricated without completed cycle'
+Assert-RejectedDaemon { $report.daemonDiagnostics.cycleMetricsScope='CPU' } 'cycle wait is not CPU'
+Assert-RejectedDaemon { $report.daemonDiagnostics.cycleOutcomeScope='FCM_DELIVERY' } 'cycle outcome is not delivery'
+Assert-RejectedDaemon { $report.daemonDiagnostics.cycleMetricsPersistenceScope='ALL_COUNTERS_DURABLE' } 'reject false cycle durability scope'
 $optionalDaemon = $report.daemonDiagnostics | ConvertTo-Json -Depth 20
 $report.daemonDiagnostics.PSObject.Properties.Remove('generatedElapsedMillis')
 $report.daemonDiagnostics.PSObject.Properties.Remove('events')
 $report.daemonDiagnostics.PSObject.Properties.Remove('omittedRawSamples')
 $report.daemonDiagnostics.PSObject.Properties.Remove('cpuScope')
+$report.daemonDiagnostics.PSObject.Properties.Remove('sampledContextScope')
+$report.daemonDiagnostics.sessions[0].summary.PSObject.Properties.Remove('sampledContext')
+$report.daemonDiagnostics.sessions[0].PSObject.Properties.Remove('cycleMetrics')
+$report.daemonDiagnostics.PSObject.Properties.Remove('cycleMetricsScope')
+$report.daemonDiagnostics.PSObject.Properties.Remove('cycleOutcomeScope')
+$report.daemonDiagnostics.PSObject.Properties.Remove('cycleMetricsPersistenceScope')
 $legacyDaemon = (Get-GuardianSurvivalSummary $report).daemonEvidence
 Assert-Equal $null $legacyDaemon.generatedElapsedMillis 'missing legacy clock stays unknown'
 Assert-Equal $null $legacyDaemon.events 'missing legacy events stay unknown'
 Assert-Equal $null $legacyDaemon.omittedRawSamples 'missing legacy omissions stay unknown'
 Assert-Equal $null $legacyDaemon.sourceCpuScope 'missing legacy source CPU scope stays unknown'
+Assert-Equal $null $legacyDaemon.sampledContextScope 'missing legacy point scope stays unknown'
+Assert-Equal $null $legacyDaemon.sessions[0].summary.sampledContext 'missing legacy context stays unknown'
+Assert-Equal $null $legacyDaemon.sessions[0].cycleMetrics 'missing legacy cycle counters stay unknown'
+Assert-Equal $null $legacyDaemon.cycleMetricsScope 'missing legacy cycle scope stays unknown'
+Assert-Equal $null $legacyDaemon.cycleMetricsPersistenceScope 'missing legacy cycle durability stays unknown'
 $report.daemonDiagnostics = $optionalDaemon | ConvertFrom-Json
 Assert-RejectedEpisode { $report.fcmRecoveryEpisodes.episodes=@((New-EpisodePreview 1 'OBSERVING')); $report.fcmRecoveryEpisodes.episodes[0].requestPending=$null; $report.fcmRecoveryEpisodes.retainedEpisodeCount=1 } 'v13 still requires explicit pending state'
 # Exercise the documented maxima together, preserving the independent App history.
-$report.daemonDiagnostics.sessions=@(1..32 | ForEach-Object { New-DaemonSession ('{0:x24}' -f $_) })
+$report.daemonDiagnostics.sessions=@(1..32 | ForEach-Object {
+    $taskSession=New-DaemonSession ('{0:x24}' -f $_)
+    $taskSession.summary.sampledContext=New-DaemonSampledContext
+    $taskSession.cycleMetrics=New-DaemonCycleMetrics ([long]::MaxValue) ([long]::MaxValue)
+    $taskSession.cycleMetrics.stopped.outcomes.pending=[long]::MaxValue
+    $taskSession
+})
 $report.daemonDiagnostics.currentSession='000000000000000000000001'
 $report.daemonDiagnostics.retainedSessionCount=32
 $report.daemonDiagnostics.retainedSampleCount=2016
 $report.daemonDiagnostics.timeBuckets=@(0..167 | ForEach-Object {
-    @{session='000000000000000000000001'; hourEpochMillis=[long]$_*3600000; summary=(New-DaemonSummary)}
+    $taskSummary=New-DaemonSummary
+    $taskSummary.sampledContext=New-DaemonSampledContext
+    @{session='000000000000000000000001'; hourEpochMillis=[long]$_*3600000; summary=$taskSummary}
 })
 $report.daemonDiagnostics.recentSamples=@(1..16 | ForEach-Object { @{session='000000000000000000000001'; atEpochMillis=2000; elapsedMillis=1100} })
 $report.daemonDiagnostics.omittedRawSamples=2000
@@ -271,6 +351,9 @@ $boundedDaemon=Get-GuardianSurvivalSummary $report
 Assert-Equal 32 $boundedDaemon.daemonEvidence.sessions.Count '32 daemon sessions accepted'
 Assert-Equal 168 $boundedDaemon.daemonEvidence.timeBuckets.Count '168 hourly buckets accepted'
 Assert-Equal 2.0 $boundedDaemon.daemonEvidence.timeBuckets[0].summary.cpuSingleCorePercent 'mapper nested hourly summary retained'
+Assert-Equal 1 $boundedDaemon.daemonEvidence.timeBuckets[167].summary.sampledContext.batteryUnknownCount 'maximum hourly context retained'
+Assert-Equal 1 $boundedDaemon.daemonEvidence.sessions[31].summary.sampledContext.batteryKnownCount 'maximum session context retained'
+Assert-Equal ([long]::MaxValue) $boundedDaemon.daemonEvidence.sessions[31].cycleMetrics.stopped.completedCount 'saturated outcomes accepted without overflow'
 Assert-Equal 16 $boundedDaemon.daemonEvidence.recentSamples.Count '16 recent samples accepted'
 Assert-Equal 2016 $boundedDaemon.daemonEvidence.retainedSampleCount 'retained count independent of recent preview'
 Assert-Equal 256 $boundedDaemon.daemonEvidence.events.Count '256 state events accepted'

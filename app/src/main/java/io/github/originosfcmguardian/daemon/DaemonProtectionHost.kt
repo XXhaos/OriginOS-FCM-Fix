@@ -566,13 +566,17 @@ internal class DaemonProtectionHost(
                 live.fcm.invalidateDiagnosticReadiness(); return
             }
             if (live.owner.isDispatchReady()) activeSession.compareAndSet(null, elapsed() to wall())
+            val stoppedStart = runCatching { if (diagnostics != null) elapsed() else null }.getOrNull()
             val stopped = live.stopped.pollAsync()
+            recordCycle(DaemonCycleStage.STOPPED_CYCLE, stoppedStart, stopped.status.name)
             if (stopped.status == DaemonStoppedCycleStatus.CHECKED || stopped.status == DaemonStoppedCycleStatus.RECONCILED) {
                 lastCheckedAtMillis = wall()
                 diagnosticsStoppedCheckedAtMillis = lastCheckedAtMillis
             }
             if (!closing.get()) {
+                val fcmStart = runCatching { if (diagnostics != null) elapsed() else null }.getOrNull()
                 val fcm = live.fcm.pollAsync()
+                recordCycle(DaemonCycleStage.FCM_CYCLE, fcmStart, fcm.status.name)
                 if (fcm.status == DaemonFcmCycleStatus.CHECKED) diagnosticsFcmCheckedAtMillis = wall()
                 if (fcm.status == DaemonFcmCycleStatus.CHECKED || fcm.observation != latestGmsObservation)
                     lastCheckedAtMillis = wall()
@@ -582,6 +586,13 @@ internal class DaemonProtectionHost(
             pollBusy.set(false)
             offerDiagnostics()
             if (closing.get()) reapClosed()
+        }
+    }
+    private fun recordCycle(stage: DaemonCycleStage, startedElapsed: Long?, outcome: String) {
+        runCatching {
+            if (startedElapsed == null) return
+            val finished = elapsed()
+            if (finished >= startedElapsed) diagnostics?.cycleCompleted(stage, finished - startedElapsed, DaemonCycleOutcome.valueOf(outcome))
         }
     }
     private fun offerDiagnostics() {

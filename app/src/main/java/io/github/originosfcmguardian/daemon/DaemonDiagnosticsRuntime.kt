@@ -18,6 +18,7 @@ internal data class DaemonDiagnosticsOpportunity(val atMillis: Long, val elapsed
 
 /** Pure single-writer journal. UNKNOWN_END has no invented death time, including across boots. */
 internal class DaemonDiagnosticsJournal(private val storage: DaemonDiagnosticsStorage,
+    private val budget: (DaemonDiagnosticsSnapshot) -> DaemonDiagnosticsSnapshot = DaemonDiagnosticsCodec::bounded,
     private val sample: (DaemonDiagnosticsOpportunity) -> DaemonDiagnosticsSample) {
     private var value = DaemonDiagnosticsSnapshot()
     private var lastSampleElapsed: Long? = null
@@ -35,17 +36,18 @@ internal class DaemonDiagnosticsJournal(private val storage: DaemonDiagnosticsSt
         val ids = retained.map { it.sessionId }.toSet()
         val samples = prior.samples.filter { it.sessionId in ids }
         val events = prior.events.filter { it.sessionId in ids }
-        value = prior.copy(availability = DaemonDiagnosticsAvailability.AVAILABLE, currentSessionId = session.sessionId,
+        value = freeze(prior.copy(availability = DaemonDiagnosticsAvailability.AVAILABLE, currentSessionId = session.sessionId,
             sessions = retained, samples = samples, events = events,
             evictedSessions = add(prior.evictedSessions, (all.size - retained.size).toLong()),
             evictedSamples = add(prior.evictedSamples, (prior.samples.size - samples.size).toLong()),
             evictedEvents = add(prior.evictedEvents, (prior.events.size - events.size).toLong()),
             failedOperations = add(prior.failedOperations, previousFailures),
-            unknownIntervals = add(prior.unknownIntervals, unknown))
+            unknownIntervals = add(prior.unknownIntervals, unknown)))
         return commit(event(value, DaemonDiagnosticsEvent(session.sessionId, session.startedAtMillis,
             session.startedElapsedMillis, DaemonDiagnosticsState.BEGIN)))
     }
-    fun observe(opportunity: DaemonDiagnosticsOpportunity, skipped: Long): DaemonDiagnosticsSnapshot {
+    fun observe(opportunity: DaemonDiagnosticsOpportunity, skipped: Long,
+        cycleMetrics: DaemonCycleMetrics? = null): DaemonDiagnosticsSnapshot {
         val current = value.sessions.last()
         val gap = lastOpportunityElapsed?.let { (opportunity.elapsedMillis - it).coerceAtLeast(0) } ?: 0
         lastOpportunityElapsed = opportunity.elapsedMillis
@@ -54,6 +56,7 @@ internal class DaemonDiagnosticsJournal(private val storage: DaemonDiagnosticsSt
             stoppedCheckedAtMillis = opportunity.stoppedCheckedAtMillis ?: current.stoppedCheckedAtMillis,
             fcmCheckedAtMillis = opportunity.fcmCheckedAtMillis ?: current.fcmCheckedAtMillis,
             maxPollGapMillis = maxOf(current.maxPollGapMillis, gap),
+            cycleMetrics = cycleMetrics ?: current.cycleMetrics,
             endedAtMillis = opportunity.atMillis.takeIf { opportunity.state == DaemonDiagnosticsState.NORMAL_END },
             endedElapsedMillis = opportunity.elapsedMillis.takeIf { opportunity.state == DaemonDiagnosticsState.NORMAL_END })
         var update = value.copy(sessions = value.sessions.dropLast(1) + next, skippedSamples = add(value.skippedSamples, skipped),
@@ -70,7 +73,9 @@ internal class DaemonDiagnosticsJournal(private val storage: DaemonDiagnosticsSt
             lastSampleElapsed = captured.elapsedMillis
         }
         // Regular opportunities update RAM, while disk writes remain low frequency.
-        return if (transition || due) commit(update) else freeze(update.copy(generation = Math.addExact(value.generation, 1))).also { value = it }
+        // No collection membership changed: all optional metadata widths, including metrics, were
+        // reserved by the last bounded publication. Do not scan unchanged history on each poll.
+        return if (transition || due) commit(update) else publish(update, checkBudget = false).also { value = it }
     }
     private fun event(snapshot: DaemonDiagnosticsSnapshot, event: DaemonDiagnosticsEvent): DaemonDiagnosticsSnapshot {
         val all = snapshot.events + event
@@ -78,14 +83,24 @@ internal class DaemonDiagnosticsJournal(private val storage: DaemonDiagnosticsSt
             evictedEvents = add(snapshot.evictedEvents, (all.size - DaemonDiagnosticsCodec.MAX_EVENTS).coerceAtLeast(0).toLong()))
     }
     private fun commit(snapshot: DaemonDiagnosticsSnapshot): DaemonDiagnosticsSnapshot {
-        val next = freeze(snapshot.copy(generation = Math.addExact(value.generation, 1)))
+        val next = publish(snapshot)
         storage.write(next); value = next; return next
+    }
+    private fun publish(snapshot: DaemonDiagnosticsSnapshot, checkBudget: Boolean = true): DaemonDiagnosticsSnapshot {
+        val updated = snapshot.copy(generation = add(value.generation, 1))
+        val bounded = if (checkBudget) budget(updated) else updated
+        // Published collections are immutable. Unchanged resource/event rings share their storage.
+        return bounded.copy(
+            sessions = immutable(bounded.sessions),
+            events = if (bounded.events === value.events) value.events else immutable(bounded.events),
+            samples = if (bounded.samples === value.samples) value.samples else immutable(bounded.samples))
     }
     companion object {
         const val SAMPLE_INTERVAL_MILLIS = 300_000L
-        fun add(a: Long, b: Long) = if (Long.MAX_VALUE - a < b) Long.MAX_VALUE else a + b
-        fun freeze(v: DaemonDiagnosticsSnapshot) = v.copy(sessions = Collections.unmodifiableList(v.sessions.toList()),
-            events = Collections.unmodifiableList(v.events.toList()), samples = Collections.unmodifiableList(v.samples.toList()))
+        fun add(a: Long, b: Long) = saturatedAdd(a, b)
+        private fun <T> immutable(list: List<T>): List<T> = Collections.unmodifiableList(list.toList())
+        fun freeze(v: DaemonDiagnosticsSnapshot) = v.copy(sessions = immutable(v.sessions),
+            events = immutable(v.events), samples = immutable(v.samples))
     }
 }
 
@@ -98,6 +113,9 @@ internal class DaemonDiagnosticsRuntime(
     private val elapsed: () -> Long = SystemClock::elapsedRealtime,
     private val processStartTicks: () -> Long? = { session.processStartTicks },
 ) {
+    private val cycleMetrics = AtomicReference(DaemonCycleMetrics(startedAtMillis = session.startedAtMillis,
+        startedElapsedMillis = session.startedElapsedMillis, lastCheckpointAtMillis = session.startedAtMillis,
+        lastCheckpointElapsedMillis = session.startedElapsedMillis))
     private val latest = AtomicReference(DaemonDiagnosticsSnapshot(DaemonDiagnosticsAvailability.INITIALIZING,
         currentSessionId = session.sessionId))
     private val monitor = Any()
@@ -113,6 +131,14 @@ internal class DaemonDiagnosticsRuntime(
     private val worker = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(1),
         { task -> Thread(task, "guardian-daemon-diagnostics").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
     init { synchronized(monitor) { schedule() } }
+    /** Independent of diagnostic queue coalescing and blocked storage. No I/O or worker submission. */
+    fun cycleCompleted(stage: DaemonCycleStage, durationMillis: Long, outcome: DaemonCycleOutcome) {
+        runCatching {
+            val checkpointWall = wall().coerceAtLeast(1); val checkpointElapsed = elapsed()
+            if (durationMillis < 0 || checkpointElapsed < session.startedElapsedMillis) return
+            cycleMetrics.updateAndGet { it.record(stage, durationMillis, outcome, checkpointWall, checkpointElapsed) }
+        }
+    }
     fun opportunity(state: DaemonDiagnosticsState, stoppedCheckedAtMillis: Long?, fcmCheckedAtMillis: Long?) {
         val opportunity = DaemonDiagnosticsOpportunity(wall().coerceAtLeast(1), elapsed(), state, stoppedCheckedAtMillis, fcmCheckedAtMillis)
         synchronized(monitor) {
@@ -137,7 +163,13 @@ internal class DaemonDiagnosticsRuntime(
         ending = DaemonDiagnosticsOpportunity(wall().coerceAtLeast(1), elapsed(), DaemonDiagnosticsState.NORMAL_END)
         schedule()
     }
-    fun snapshot(): DaemonDiagnosticsSnapshot = latest.get().copy(generatedAtMillis = wall().coerceAtLeast(1), generatedElapsedMillis = elapsed())
+    fun snapshot(): DaemonDiagnosticsSnapshot {
+        val value = latest.get()
+        // Include completions even while the independent diagnostic writer is blocked or coalescing.
+        val sessions = if (value.sessions.lastOrNull()?.sessionId == session.sessionId)
+            Collections.unmodifiableList(value.sessions.dropLast(1) + value.sessions.last().copy(cycleMetrics = cycleMetrics.get())) else value.sessions
+        return value.copy(sessions = sessions, generatedAtMillis = wall().coerceAtLeast(1), generatedElapsedMillis = elapsed())
+    }
     fun isFinished(): Boolean = synchronized(monitor) { disabled }
     private fun schedule() {
         if (scheduled || disabled) return
@@ -154,7 +186,8 @@ internal class DaemonDiagnosticsRuntime(
                     // transitions must not manufacture closely spaced backdated resource samples.
                     capture(source.copy(atMillis = wall().coerceAtLeast(1), elapsedMillis = elapsed()))
                 }; journal = writer
-                latest.set(writer.begin(session.copy(processStartTicks = runCatching(processStartTicks).getOrNull()), lockFailures))
+                latest.set(writer.begin(session.copy(processStartTicks = runCatching(processStartTicks).getOrNull(),
+                    cycleMetrics = cycleMetrics.get()), lockFailures))
             }
             while (true) {
                 val work = synchronized(monitor) {
@@ -162,7 +195,7 @@ internal class DaemonDiagnosticsRuntime(
                     if (next == null) { scheduled = false; return }
                     val drops = skipped; skipped = 0; next to drops
                 }
-                latest.set(checkNotNull(journal).observe(work.first, work.second))
+                latest.set(checkNotNull(journal).observe(work.first, work.second, cycleMetrics.get()))
                 if (work.first.state == DaemonDiagnosticsState.NORMAL_END) {
                     synchronized(monitor) { disabled = true; scheduled = false }
                     storage?.close(); worker.shutdown(); return

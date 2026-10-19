@@ -125,6 +125,12 @@ internal fun mergeProtectionResourceExits(prior: ProtectionResourceSnapshot, exi
         evictedExits = saturatedDiagnosticAdd(prior.evictedExits, (all.size - ProtectionResourceCodec.MAX_EXITS).coerceAtLeast(0).toLong()))
 }
 
+/** Startup enrichment must keep new exit/coverage evidence, without rewriting unchanged history. */
+internal fun persistChangedProtectionResources(prior: ProtectionResourceSnapshot, next: ProtectionResourceSnapshot,
+    write: (ProtectionResourceSnapshot) -> Unit) {
+    if (next != prior) write(next)
+}
+
 /** All admission is memory-only. Denied attempts never advance the monotonic cadence. */
 internal class ProtectionResourceAdmission(private val intervalMillis: Long = 300_000) {
     private var last: Long? = null
