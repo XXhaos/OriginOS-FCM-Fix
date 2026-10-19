@@ -309,7 +309,8 @@ internal class DaemonRootControlPort(
                 val current = requireNotNull(before.bytes(role)?.let(HeartbeatSnapshotCodec::decode))
                 val configOnly = current.copy(configured = proposed.configured, bindingDigest = proposed.bindingDigest,
                     durableConsent = proposed.durableConsent)
-                check(proposed == configOnly || proposed == normalizeDaemonHeartbeatOff(before, configOnly)) {
+                check(proposed == configOnly || proposed == normalizeDaemonHeartbeatOff(before, configOnly) ||
+                    proposed == daemonHeartbeatConfirmationRetirement(before, plan)) {
                     "Configuration proposal cannot replace heartbeat bookkeeping"
                 }
             }
@@ -335,6 +336,8 @@ internal fun projectDaemonControl(snapshot: DaemonProtectionRootSnapshot,
 }
 
 private fun applyDaemonControlConfiguration(change: DaemonRootMutation, plan: DaemonControlTransitionPlan) {
+        val retirement = daemonHeartbeatConfirmationRetirement(change.freeze(), plan)
+        check(!daemonRequestsHeartbeatRetirement(plan) || retirement != null) { "Heartbeat retirement evidence changed" }
         for ((role, bytes) in plan.patch()) when (role) {
             DaemonDomainRole.AUTHORITY -> {
                 check(bytes != null && !ProtectionAuthorityCodec.decode(bytes).storageBlocked)
@@ -353,7 +356,12 @@ private fun applyDaemonControlConfiguration(change: DaemonRootMutation, plan: Da
                 // Preserve generation, sessions, pending operations, results and caller evidence.
                 val configOnly = current.copy(configured = proposed.configured,
                     bindingDigest = proposed.bindingDigest, durableConsent = proposed.durableConsent)
-                change.put(role, HeartbeatSnapshotCodec.encode(normalizeDaemonHeartbeatOff(change.freeze(), configOnly)))
+                if (retirement != null) {
+                    // Original closure/drain was attested before staging. Exact retired bytes are
+                    // revalidated above, including every pending/result/identity field.
+                    change.put(role, HeartbeatSnapshotCodec.encode(retirement))
+                    change.put(DaemonDomainRole.HEARTBEAT_DAEMON_OWNER, null)
+                } else change.put(role, HeartbeatSnapshotCodec.encode(normalizeDaemonHeartbeatOff(change.freeze(), configOnly)))
             }
             DaemonDomainRole.SELECTION -> {
                 if (bytes != null) {

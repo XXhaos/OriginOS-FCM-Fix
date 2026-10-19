@@ -39,7 +39,8 @@ internal fun interface DaemonControlTargetValidationPort {
  * environment, owner/quiescence and network; fcmRecoveryReady means those preparation gates passed.
  */
 internal data class DaemonControlCommandContext(val clock: BudgetClock, val fingerprint: String,
-    val nowElapsed: Long, val explicitConfirmation: Boolean, val fcmRecoveryReady: Boolean = false)
+    val nowElapsed: Long, val explicitConfirmation: Boolean, val fcmRecoveryReady: Boolean = false,
+    val fcmHeartbeatClosure: DaemonHeartbeatConfirmationClosure? = null)
 
 /**
  * Pure preparation over scratch stores. Existing consent/store operations supply all new tokens,
@@ -117,7 +118,13 @@ internal class DaemonControlCommandPlanner(private val targets: DaemonControlTar
                 if (old.mode != ProtectionConsentMode.ACTIVE || expected.mode != DaemonControlMode.ACTIVE ||
                     !context.fcmRecoveryReady || context.nowElapsed < 0 ||
                     !FcmRecoveryPolicy.qualified(command.sample, context.nowElapsed) ||
-                    command.historicalCaller.kernelBootId != command.sample.bootId || !cleanHeartbeat(snapshot)) return null
+                    command.historicalCaller.kernelBootId != command.sample.bootId) return null
+                if (!cleanHeartbeat(snapshot)) {
+                    val previous = daemonHeartbeatConfirmationCandidate(snapshot) ?: return null
+                    if (context.fcmHeartbeatClosure?.matches(snapshot) != true) return null
+                    patch[DaemonDomainRole.HEARTBEAT] = HeartbeatSnapshotCodec.encode(previous.retiredForExplicitConfirmation())
+                    patch[DaemonDomainRole.HEARTBEAT_HALT] = null
+                }
                 val parentStorage = ScratchParent(snapshot)
                 val parent = FcmProtectionStore(parentStorage)
                 val recoveryStorage = ScratchRecovery(snapshot)

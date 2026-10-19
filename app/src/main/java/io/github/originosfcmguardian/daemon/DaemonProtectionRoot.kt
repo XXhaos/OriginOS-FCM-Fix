@@ -128,6 +128,22 @@ internal class DaemonProtectionRoot(private val storage: DaemonProtectionRootSto
     fun snapshot(): DaemonProtectionRootSnapshot = synchronized(monitor) {
         staged.get()?.freeze() ?: guarded { check(!failed); storage.withOwnerLease { readCommitted() } }
     }
+    /** Kernel-only fixed continuation CAS; ordinary store writes cannot release this halt. */
+    fun renewRevokedHeartbeat(expected: DaemonControlRecord, expectedDataRevision: Long,
+        closure: DaemonHeartbeatConfirmationClosure,
+        sample: io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample, bootId: String,
+        observedAtElapsed: Long, nowElapsed: Long, maximumAgeMillis: Long): io.github.originosfcmguardian.gmsheartbeat.HeartbeatSnapshot? = synchronized(monitor) {
+        check(!failed && staged.get() == null)
+        require(maximumAgeMillis in 0..60_000)
+        storage.withOwnerLease {
+            val before = guarded { readCommitted() }
+            if (before.control != expected || before.dataRevision != expectedDataRevision) return@withOwnerLease null
+            val next = daemonHeartbeatRenewal(before, closure, sample, bootId, observedAtElapsed,
+                nowElapsed, maximumAgeMillis) ?: return@withOwnerLease null
+            guarded { commit(DaemonProtectionRootCodec.encode(next.second)) }
+            next.first
+        }
+    }
     /** Kernel-only narrow boot-binding CAS; ordinary domain mutations cannot change these fields. */
     fun rebindBundledRecovery(expected: DaemonControlRecord, expectedDataRevision: Long,
         sample: io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample, bootId: String,

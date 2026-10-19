@@ -90,7 +90,8 @@ internal suspend fun waitHeartbeatDeadline(remaining: Long, manual: Channel<Unit
 internal fun heartbeatResultNeedsConfirmation(result: GmsHeartbeatResult): Boolean =
     result.status == GmsHeartbeatStatus.UNKNOWN || result.status == GmsHeartbeatStatus.NOT_SENT &&
         result.reason !in setOf(GmsHeartbeatReason.OBSERVATION_UNKNOWN, GmsHeartbeatReason.REPORTED_DISCONNECTED,
-            GmsHeartbeatReason.STALE_OBSERVATION, GmsHeartbeatReason.BUSY, GmsHeartbeatReason.INTERVAL_NOT_ELAPSED)
+            GmsHeartbeatReason.STALE_OBSERVATION, GmsHeartbeatReason.BUSY, GmsHeartbeatReason.INTERVAL_NOT_ELAPSED,
+            GmsHeartbeatReason.EXECUTION_NOT_READY)
 
 /** One heartbeat owner; its scope outlives UI and service cancellation solely to acknowledge revoke. */
 internal class GmsAutoHeartbeatController(

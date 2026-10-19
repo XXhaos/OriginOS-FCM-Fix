@@ -81,6 +81,8 @@ internal class GmsAutomaticHeartbeatGate(private val clock: () -> Long) {
     }
     @Synchronized fun workerEntered() { workerActive = true }
     @Synchronized fun workerExited() { workerActive = false; blocked = false }
+    /** Cold-closure proof only: no capability has ever been armed in this runner. */
+    @Synchronized fun isFreshEndpoint() = !closed && !blocked && !workerActive && capability == null && lastGeneration == 0L
     @Synchronized fun retiredLifetime() = capability?.takeIf { !it.live.get() }?.lifetime
     @Synchronized fun close() { capability?.live?.set(false); closed = true }
     fun newCapability(generation: Long, sample: GmsConnectionObservation.Sample, uid: Int, lifetime: GmsHeartbeatLifetime) =

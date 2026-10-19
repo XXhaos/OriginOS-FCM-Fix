@@ -169,6 +169,19 @@ internal class DaemonOwnerControl(
             maximumEvidenceAgeMillis) } catch (_: Exception) { fault(); null }
     }
 
+    /** Same-consent native continuation; OFF and any other admitted flight win this boundary. */
+    fun renewRevokedHeartbeat(root: DaemonProtectionRoot, expected: DaemonControlRecord, expectedDataRevision: Long,
+        closure: DaemonHeartbeatConfirmationClosure,
+        sample: io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample,
+        bootId: String, observedAtElapsed: Long): io.github.originosfcmguardian.gmsheartbeat.HeartbeatSnapshot? = synchronized(lock) {
+        if (status != DaemonOwnerStatus.ACTIVE || admissionClosed || record != expected || expected.owner != owner ||
+            expected.mode != DaemonControlMode.ACTIVE || flight != null || probing || prepared != null) return@synchronized null
+        val now = try { elapsed() } catch (_: Exception) { return@synchronized null }
+        if (observedAtElapsed < 0 || now < observedAtElapsed || now - observedAtElapsed > maximumEvidenceAgeMillis) return@synchronized null
+        try { root.renewRevokedHeartbeat(expected, expectedDataRevision, closure, sample, bootId, observedAtElapsed, now,
+            maximumEvidenceAgeMillis) } catch (_: Exception) { fault(); null }
+    }
+
     /** Fixed boot-binding maintenance; fresh environment reads must finish before this boundary. */
     fun rebindBundledRecovery(root: DaemonProtectionRoot, expected: DaemonControlRecord, expectedDataRevision: Long,
         sample: io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Sample,

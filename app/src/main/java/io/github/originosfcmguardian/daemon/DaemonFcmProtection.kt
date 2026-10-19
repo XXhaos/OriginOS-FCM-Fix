@@ -62,6 +62,8 @@ internal interface DaemonFcmShellPort : AutoCloseable {
     fun heartbeat(id: Long, uid: Int, session: GmsAutoSession, attempt: String,
         cancelled: () -> Boolean, fence: PrivilegedExecutionFence): GmsHeartbeatResult
     fun revoke(uid: Int, session: GmsAutoSession): Boolean
+    /** True only before this native runner has ever owned a capability; not merely no live worker. */
+    fun freshHeartbeatEndpoint(): Boolean = false
     /** Actual executor workers, including tasks whose Future has timed out/cancelled. */
     fun isQuiescent(): Boolean = true
 }
@@ -98,6 +100,7 @@ internal class SystemDaemonFcmShellPort : DaemonFcmShellPort {
         cancelled: () -> Boolean, fence: PrivilegedExecutionFence) =
         heartbeat.requestAutomaticGuarded(id, uid, session, attempt, cancelled, fence)
     override fun revoke(uid: Int, session: GmsAutoSession) = heartbeat.revokeAutomatic(uid, session.generation, session.id)
+    override fun freshHeartbeatEndpoint() = heartbeat.isFreshAutomaticEndpoint()
     override fun isQuiescent() = reads.isQuiescent() && recovery.isQuiescent() && heartbeat.isQuiescent()
     override fun close() { reads.close(); recovery.close(); heartbeat.close() }
 }
@@ -165,6 +168,8 @@ internal fun interface DaemonHeartbeatHandoffPort {
 internal fun interface DaemonBundledHeartbeatPort {
     fun derive(record: DaemonControlRecord, sample: GmsConnectionObservation.Sample): HeartbeatSnapshot?
     fun rebindRecovery(record: DaemonControlRecord, sample: GmsConnectionObservation.Sample): Boolean = false
+    fun renewRevoked(record: DaemonControlRecord, sample: GmsConnectionObservation.Sample,
+        closeOriginal: (DaemonProtectionRootSnapshot) -> DaemonHeartbeatConfirmationClosure?): HeartbeatSnapshot? = null
 }
 
 internal interface DaemonHeartbeatOwnerStorage {
@@ -389,9 +394,19 @@ internal class DaemonFcmProtection(
     }
 
     private fun heartbeatCycle(pinned: DaemonControlRecord): GmsHeartbeatResult? {
-        val bundled = parent.read()
+        var bundled = parent.read()
         var derived: HeartbeatSnapshot? = null
-        val baseline = heartbeat.read()
+        val baseline = heartbeat.read().let { original ->
+            val sample = observation as? GmsConnectionObservation.Sample
+            val changed = sample != null && original?.bindingDigest != gmsHeartbeatBindingDigest(sample)
+            if (original != null && (changed || original.resumeBlock == HeartbeatResumeBlock.SECURITY_FAILURE &&
+                original.lastStatus == GmsHeartbeatStatus.NOT_SENT && original.lastReason == GmsHeartbeatReason.SESSION_REVOKED)) {
+                revokeRetained()
+                if (sample != null && authorized(pinned))
+                    bundledHeartbeat.renewRevoked(pinned, sample, ::closedHeartbeatProof)?.also { bundled = parent.read() }
+                        ?: heartbeat.read() ?: original else heartbeat.read() ?: original
+            } else original
+        }
         val cleanOff = baseline != null && !baseline.configured && baseline.pause == null &&
             baseline.remoteSessionId == null && baseline.pendingArm == null && baseline.pendingAttempt == null &&
             baseline.resumeBlock == null && baseline.lastStatus != GmsHeartbeatStatus.UNKNOWN
@@ -608,6 +623,33 @@ internal class DaemonFcmProtection(
             reap(); revokeRetained()
             session == null && shell.isQuiescent() && synchronized(flights) { flights.isEmpty() }
         } finally { busy.set(false) }
+    }
+    /** Called only by the authenticated explicit control actor after it closes admission. */
+    fun confirmationClosure(snapshot: DaemonProtectionRootSnapshot): DaemonHeartbeatConfirmationClosure? {
+        if (!busy.compareAndSet(false, true)) return null
+        return try { closedHeartbeatProof(snapshot) } finally { busy.set(false) }
+    }
+    /** Both callers hold the FCM cycle/control busy token through closure and the consuming CAS. */
+    private fun closedHeartbeatProof(snapshot: DaemonProtectionRootSnapshot): DaemonHeartbeatConfirmationClosure? {
+        val saved = daemonHeartbeatConfirmationCandidate(snapshot, allowSettledIdentityChange = true)
+        if (saved == null) return null
+        reap()
+        fun stable() = !closed.get() && !failed && owner.snapshot() == snapshot.control &&
+            heartbeat.read() == saved && session == null && shell.isQuiescent() &&
+            synchronized(flights) { flights.isEmpty() }
+        if (!stable()) return null
+        val endpoint = saved.remoteSessionId?.let { GmsAutoSession(it, saved.generation, requireNotNull(saved.bindingDigest)) }
+        val closedHere = closedEndpoint == saved || endpoint?.let { shell.revoke(guardian.identity.uid, it) } == true
+        // The owner lifetime lease excludes an older daemon. A fresh native runner PLUS the
+        // independently qualified historical App's death excludes both possible old owners.
+        // Never let old-App absence override an existing/mismatched native capability.
+        val closedCold = !closedHere && shell.freshHeartbeatEndpoint() &&
+            shell.previousHeartbeatOwnerGone(saved) { closed.get() || owner.snapshot() != snapshot.control } &&
+            shell.freshHeartbeatEndpoint()
+        if ((!closedHere && !closedCold) || !stable()) return null
+        closedEndpoint = saved
+        return DaemonHeartbeatConfirmationClosure(snapshot.control,
+            DaemonProtectionRootSnapshot.digest(requireNotNull(snapshot.bytes(DaemonDomainRole.HEARTBEAT))))
     }
     /** Host must retain its storage lifetime lease until this returns true after close. */
     fun isQuiescent(): Boolean {

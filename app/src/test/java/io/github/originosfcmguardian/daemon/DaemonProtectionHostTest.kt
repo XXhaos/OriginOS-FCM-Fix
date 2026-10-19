@@ -44,8 +44,13 @@ class DaemonProtectionHostTest {
         var reads = 0
         var arms = 0
         var oldAppGone = false
+        var revokeAcknowledged = true
+        var freshHeartbeatEndpoint = false
+        var beforeHeartbeatRevoke: (() -> Unit)? = null
         var connection = GcmConnectionState.SERVICE_ABSENT
         var beforeFcmRead: (() -> Unit)? = null
+        var gmsVersion = 263737035L
+        var gmsUpdatedAt = 2_000L
         var released = 0
         var releaseFailures = 0
         var stoppedCloseFailures = 0
@@ -59,7 +64,7 @@ class DaemonProtectionHostTest {
         var fence: PrivilegedExecutionFence? = null
         val child = Child()
         fun wall() = 1_000_000L + now.get()
-        fun sample() = GmsConnectionObservation.Sample(1, 10208, 263737035, 1_000, 2_000,
+        fun sample() = GmsConnectionObservation.Sample(1, 10208, gmsVersion, 1_000, gmsUpdatedAt,
             FcmRecoveryPolicy.SIGNER, boot, wall(), now.get(), SocketSource(SourceCompleteness.COMPLETE, false),
             SocketSource(SourceCompleteness.COMPLETE, connection == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
             GcmServiceSource(connection, SourceCompleteness.COMPLETE, wall(), now.get(), 0))
@@ -115,7 +120,11 @@ class DaemonProtectionHostTest {
             }
             override fun heartbeat(id: Long, uid: Int, session: GmsAutoSession, attempt: String,
                 cancelled: () -> Boolean, fence: PrivilegedExecutionFence): GmsHeartbeatResult = error("No heartbeat")
-            override fun revoke(uid: Int, session: GmsAutoSession) = true
+            override fun revoke(uid: Int, session: GmsAutoSession): Boolean {
+                beforeHeartbeatRevoke?.also { beforeHeartbeatRevoke = null }?.invoke()
+                return revokeAcknowledged
+            }
+            override fun freshHeartbeatEndpoint() = this@Fixture.freshHeartbeatEndpoint
             override fun isQuiescent() = idle
             override fun close() { fcmCloses++ }
         }
@@ -718,6 +727,199 @@ class DaemonProtectionHostTest {
             f.poll()
             assertEquals(2, f.arms); assertEquals(0, f.writes)
             assertNotEquals(epoch, FcmProtectionCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_PROTECTION))).epoch)
+        }
+    }
+
+    private fun settledRevocationRoot(f: Fixture, recoveryBoot: String = boot): DaemonProtectionRoot {
+        val heartbeat = f.importedHeartbeat().copy(pause = null, remoteSessionId = epoch,
+            lastStatus = GmsHeartbeatStatus.NOT_SENT, lastReason = GmsHeartbeatReason.SESSION_REVOKED,
+            lastResultEpoch = epoch, resumeBlock = HeartbeatResumeBlock.SECURITY_FAILURE,
+            callerIdentity = historicalCaller.copy(kernelBootId = recoveryBoot))
+        val parent = f.parent.copy(recoveryBinding = FcmRecoveryPolicy.binding(f.sample().copy(bootId = recoveryBoot)))
+        return RootFixtures.root(DaemonProtectionRootSnapshot(f.initial.control, f.initial.domains() + mapOf(
+            DaemonDomainRole.FCM_PROTECTION to FcmProtectionCodec.encode(parent),
+            DaemonDomainRole.FCM_RECOVERY to FcmRecoveryStoreCodec.encode(FcmRecoverySnapshot(true, parent.recoveryBinding)),
+            DaemonDomainRole.HEARTBEAT to HeartbeatSnapshotCodec.encode(heartbeat),
+            DaemonDomainRole.HEARTBEAT_INITIALIZED to byteArrayOf(1),
+            DaemonDomainRole.HEARTBEAT_HALT to byteArrayOf(1)))).first
+    }
+
+    @Test fun explicitConfirmationRepairsKnownUnsentSessionAfterOriginalRevokeAndReadback() = runBlocking {
+        Fixture().use { template ->
+            Fixture(existingRoot = settledRevocationRoot(template)).use { f ->
+                f.reconcile()
+                val before = f.root.snapshot()
+                f.revokeAcknowledged = false
+                assertNull(f.host.stageFcmOn(caller, before.control, "no-ack", historicalCaller))
+                assertArrayEquals(before.bytes(DaemonDomainRole.HEARTBEAT), f.root.bytes(DaemonDomainRole.HEARTBEAT))
+                assertNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+                f.revokeAcknowledged = true
+                f.idle = false
+                assertNull(f.host.stageFcmOn(caller, before.control, "not-drained", historicalCaller))
+                f.idle = true
+                val challenge = requireNotNull(f.host.stageFcmOn(caller, before.control, "confirmed", historicalCaller))
+                // Staging changes no saved consent, failure evidence or execution state.
+                assertArrayEquals(before.bytes(DaemonDomainRole.HEARTBEAT), f.root.bytes(DaemonDomainRole.HEARTBEAT))
+                f.applyActivation(challenge)
+                assertNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+                val saved = HeartbeatSnapshotCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT)))
+                assertFalse(saved.configured); assertNull(saved.remoteSessionId); assertNull(saved.resumeBlock)
+                assertEquals(GmsHeartbeatStatus.NOT_SENT, saved.lastStatus)
+                assertEquals(GmsHeartbeatReason.SESSION_REVOKED, saved.lastReason)
+                assertArrayEquals(before.bytes(DaemonDomainRole.AUTHORITY), f.root.bytes(DaemonDomainRole.AUTHORITY))
+                f.connection = GcmConnectionState.REPORTED_CONNECTED
+                f.poll()
+                assertEquals(1, f.arms)
+                assertNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_DAEMON_OWNER))
+                assertNotEquals(epoch, FcmProtectionCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_PROTECTION))).epoch)
+            }
+        }
+    }
+
+    @Test fun coldConfirmationRequiresBothNeverArmedNativeEndpointAndOldAppGone() = runBlocking {
+        Fixture().use { template ->
+            Fixture(existingRoot = settledRevocationRoot(template)).use { f ->
+                f.reconcile(); f.revokeAcknowledged = false
+                val before = f.root.snapshot()
+                f.oldAppGone = true
+                assertNull(f.host.stageFcmOn(caller, before.control, "native-still-possible", historicalCaller))
+                f.freshHeartbeatEndpoint = true; f.oldAppGone = false
+                assertNull(f.host.stageFcmOn(caller, before.control, "old-app-still-possible", historicalCaller))
+                f.oldAppGone = true
+                val challenge = requireNotNull(f.host.stageFcmOn(caller, before.control, "cold-confirmed", historicalCaller))
+                f.applyActivation(challenge)
+                f.connection = GcmConnectionState.REPORTED_CONNECTED; f.poll()
+                assertEquals(1, f.arms)
+            }
+            Fixture(existingRoot = settledRevocationRoot(template)).use { f ->
+                f.reconcile(); assertTrue(f.off() is DaemonControlReply.Acknowledged)
+                f.oldAppGone = true; f.freshHeartbeatEndpoint = true
+                assertNull(f.host.stageFcmOn(caller, f.root.snapshot().control, "master-stays-off", historicalCaller))
+                assertEquals(DaemonControlMode.OFF, f.root.snapshot().control.mode)
+            }
+        }
+    }
+
+    @Test fun normalDaemonPollRenewsSettledSessionWithoutNewConsentOrAppConfirmation() = runBlocking {
+        Fixture().use { template ->
+            for (cold in listOf(false, true)) Fixture(existingRoot = settledRevocationRoot(template)).use { f ->
+                f.reconcile()
+                f.connection = GcmConnectionState.REPORTED_CONNECTED
+                f.revokeAcknowledged = !cold; f.freshHeartbeatEndpoint = cold; f.oldAppGone = cold
+                val before = f.root.snapshot()
+                val oldChild = HeartbeatSnapshotCodec.decode(requireNotNull(before.bytes(DaemonDomainRole.HEARTBEAT)))
+                f.poll()
+                assertEquals(1, f.arms)
+                assertEquals(before.control, f.root.snapshot().control)
+                assertArrayEquals(before.bytes(DaemonDomainRole.FCM_PROTECTION), f.root.bytes(DaemonDomainRole.FCM_PROTECTION))
+                assertArrayEquals(before.bytes(DaemonDomainRole.AUTHORITY), f.root.bytes(DaemonDomainRole.AUTHORITY))
+                assertArrayEquals(before.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION), f.root.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION))
+                val resumed = HeartbeatSnapshotCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT)))
+                assertEquals(oldChild.durableConsent, resumed.durableConsent)
+                assertEquals(oldChild.generation + 1, resumed.generation)
+                assertEquals(oldChild.lastStatus, resumed.lastStatus)
+                assertEquals(oldChild.lastReason, resumed.lastReason)
+                assertEquals(oldChild.lastResultEpoch, resumed.lastResultEpoch)
+                assertNull(resumed.resumeBlock); assertNull(resumed.pause); assertNotNull(resumed.remoteSessionId)
+                assertNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+                f.poll(); assertEquals(1, f.arms)
+            }
+        }
+    }
+
+    @Test fun automaticRenewalKeepsBlockWithoutClosureAndOffWinsDuringClosureProbe() = runBlocking {
+        Fixture().use { template ->
+            Fixture(existingRoot = settledRevocationRoot(template)).use { f ->
+                f.reconcile(); f.connection = GcmConnectionState.REPORTED_CONNECTED
+                f.gmsVersion++; f.gmsUpdatedAt++
+                f.revokeAcknowledged = false
+                val original = f.root.bytes(DaemonDomainRole.HEARTBEAT)
+                f.poll()
+                assertEquals(0, f.arms); assertArrayEquals(original, f.root.bytes(DaemonDomainRole.HEARTBEAT))
+                assertNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+                f.revokeAcknowledged = true
+                f.beforeHeartbeatRevoke = { assertTrue(f.off() is DaemonControlReply.Acknowledged) }
+                f.poll()
+                assertEquals(0, f.arms)
+                assertEquals(DaemonControlMode.OFF, f.root.snapshot().control.mode)
+                assertArrayEquals(original, f.root.bytes(DaemonDomainRole.HEARTBEAT))
+                assertNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+            }
+        }
+    }
+
+    @Test fun trustedGmsUpdateRenewsExistingBlockedOrLiveChildWithoutAnotherOptIn() = runBlocking {
+        Fixture().use { template ->
+            for (terminal in listOf<GmsHeartbeatReason?>(null, GmsHeartbeatReason.SESSION_REVOKED, GmsHeartbeatReason.IDENTITY_CHANGED)) {
+                val root = settledRevocationRoot(template)
+                if (terminal != GmsHeartbeatReason.SESSION_REVOKED) {
+                    val before = root.snapshot()
+                    val child = HeartbeatSnapshotCodec.decode(requireNotNull(before.bytes(DaemonDomainRole.HEARTBEAT)))
+                    val roles = before.domains() + mapOf(
+                        DaemonDomainRole.HEARTBEAT to HeartbeatSnapshotCodec.encode(child.copy(
+                            resumeBlock = if (terminal == null) null else HeartbeatResumeBlock.SECURITY_FAILURE,
+                            lastReason = terminal ?: child.lastReason)),
+                        DaemonDomainRole.HEARTBEAT_HALT to if (terminal == null) null else byteArrayOf(1))
+                    Fixture(existingRoot = RootFixtures.root(DaemonProtectionRootSnapshot(before.control, roles)).first).use { f ->
+                        assertUpdateContinues(f, liveFirst = terminal == null)
+                    }
+                } else Fixture(existingRoot = root).use { f -> assertUpdateContinues(f, liveFirst = false) }
+            }
+        }
+    }
+
+    private suspend fun assertUpdateContinues(f: Fixture, liveFirst: Boolean) {
+        f.reconcile(); f.connection = GcmConnectionState.REPORTED_CONNECTED
+        f.oldAppGone = true
+        if (liveFirst) { f.poll(); assertEquals(1, f.arms) }
+        val before = f.root.snapshot()
+        val old = HeartbeatSnapshotCodec.decode(requireNotNull(before.bytes(DaemonDomainRole.HEARTBEAT)))
+        f.gmsVersion++; f.gmsUpdatedAt++
+        f.poll()
+        assertEquals(if (liveFirst) 2 else 1, f.arms)
+        val parent = FcmProtectionCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_PROTECTION)))
+        val resumed = HeartbeatSnapshotCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT)))
+        assertEquals(epoch, parent.epoch)
+        assertEquals(gmsHeartbeatBindingDigest(f.sample()), parent.installationBinding)
+        assertEquals(FcmRecoveryPolicy.binding(f.sample()), parent.recoveryBinding)
+        assertEquals(parent.installationBinding, resumed.bindingDigest)
+        assertEquals(old.durableConsent!!.copy(bindingDigest = requireNotNull(parent.installationBinding)), resumed.durableConsent)
+        assertEquals(old.generation + 1, resumed.generation)
+        assertEquals(old.lastReason, resumed.lastReason); assertEquals(old.lastResultEpoch, resumed.lastResultEpoch)
+        assertNull(resumed.resumeBlock); assertNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+        assertEquals(before.control, f.root.snapshot().control)
+        for (role in listOf(DaemonDomainRole.AUTHORITY, DaemonDomainRole.SELECTION, DaemonDomainRole.RECOVERY_COUNTS,
+            DaemonDomainRole.HEARTBEAT_DERIVATION, DaemonDomainRole.FCM_CONSUMED, DaemonDomainRole.FCM_MCS_CONSUMED))
+            assertArrayEquals(role.name, before.bytes(role), f.root.bytes(role))
+    }
+
+    @Test fun bootContinuationUnblocksExistingRecoveryBeforeConnectionWithoutArmingHeartbeat() = runBlocking {
+        val previousBoot = "11234567-89ab-cdef-0123-456789abcdef"
+        Fixture().use { template ->
+            for (state in listOf(GcmConnectionState.SERVICE_ABSENT, GcmConnectionState.REPORTED_DISCONNECTED)) {
+                Fixture(existingRoot = settledRevocationRoot(template, previousBoot)).use { f ->
+                    f.reconcile(); f.connection = state
+                    f.revokeAcknowledged = false; f.freshHeartbeatEndpoint = true; f.oldAppGone = true
+                    val before = f.root.snapshot()
+                    val original = HeartbeatSnapshotCodec.decode(requireNotNull(before.bytes(DaemonDomainRole.HEARTBEAT)))
+                    f.poll()
+                    assertEquals(0, f.arms); assertEquals(0, f.writes)
+                    assertNull(f.root.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+                    val waiting = HeartbeatSnapshotCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT)))
+                    assertEquals(HeartbeatPause.WAITING_HOST, waiting.pause)
+                    assertEquals(original.durableConsent, waiting.durableConsent)
+                    assertEquals(original.lastStatus, waiting.lastStatus)
+                    assertEquals(original.lastReason, waiting.lastReason)
+                    assertArrayEquals(before.bytes(DaemonDomainRole.FCM_PROTECTION), f.root.bytes(DaemonDomainRole.FCM_PROTECTION))
+                    f.poll()
+                    assertEquals(0, f.arms); assertEquals(1, f.writes)
+                    val continued = FcmProtectionCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_PROTECTION)))
+                    assertEquals(epoch, continued.epoch)
+                    assertEquals(FcmRecoveryPolicy.binding(f.sample()), continued.recoveryBinding)
+                    assertEquals(before.control, f.root.snapshot().control)
+                    assertArrayEquals(before.bytes(DaemonDomainRole.AUTHORITY), f.root.bytes(DaemonDomainRole.AUTHORITY))
+                }
+            }
         }
     }
 }

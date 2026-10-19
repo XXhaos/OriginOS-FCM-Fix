@@ -218,7 +218,7 @@ class GmsAutoHeartbeatControllerTest {
         val terminal = GmsHeartbeatReason.entries.filter {
             it != GmsHeartbeatReason.COMMAND_ACCEPTED && it !in setOf(GmsHeartbeatReason.OBSERVATION_UNKNOWN,
                 GmsHeartbeatReason.REPORTED_DISCONNECTED, GmsHeartbeatReason.STALE_OBSERVATION,
-                GmsHeartbeatReason.BUSY, GmsHeartbeatReason.INTERVAL_NOT_ELAPSED)
+                GmsHeartbeatReason.BUSY, GmsHeartbeatReason.INTERVAL_NOT_ELAPSED, GmsHeartbeatReason.EXECUTION_NOT_READY)
         }
         for (reason in terminal) Fixture().use { f ->
             f.backend.result = GmsHeartbeatResult.notSent(1, reason)
@@ -232,8 +232,8 @@ class GmsAutoHeartbeatControllerTest {
         }
     }
     @Test fun transientUnsentObservationWaitsAnotherFullIntervalWithoutRevocation() = runBlocking {
-        Fixture().use { f ->
-            f.backend.result = GmsHeartbeatResult.notSent(1, GmsHeartbeatReason.OBSERVATION_UNKNOWN)
+        for (reason in listOf(GmsHeartbeatReason.OBSERVATION_UNKNOWN, GmsHeartbeatReason.EXECUTION_NOT_READY)) Fixture().use { f ->
+            f.backend.result = GmsHeartbeatResult.notSent(1, reason)
             assertTrue(f.controller.confirm()); f.due()
             assertEquals(0, f.backend.revokes); assertTrue(f.controller.state.value.active)
             assertFalse(f.controller.state.value.requiresConfirmation); assertEquals(900_000L, f.waits.last())

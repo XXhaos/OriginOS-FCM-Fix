@@ -19,7 +19,8 @@ internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
     state.storageBlocked -> "记录异常 · 已暂停"
     state.maintenance == FcmMaintenanceState.STOP_PENDING -> "停止待确认"
     state.busy -> "处理中…"
-    state.requiresConfirmation -> "需要重新确认"
+    state.configured && (state.requiresConfirmation || state.maintenance == FcmMaintenanceState.RECONFIRM ||
+        state.confirmationFailure != null) -> "FCM 保护暂不可用"
     !state.configured -> "尚未开启"
     state.maintenance == FcmMaintenanceState.ACTIVE -> "已开启"
     state.maintenance == FcmMaintenanceState.WAITING_HOST -> "等待启动"
@@ -40,13 +41,13 @@ internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
     val guidance = fcmProtectionGuidance(state)
     if (guidance.isNotEmpty()) Text(guidance, style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.requiresConfirmation && hostReady && !state.busy && state.maintenance != FcmMaintenanceState.STOP_PENDING)
-        TextButton(onClick = onEnable) { Text("重新确认 FCM 保护") }
     if (state.maintenance == FcmMaintenanceState.STOP_PENDING)
         TextButton(onClick = onDisable, enabled = !state.busy) { Text("重试确认停止") }
 }
 internal fun fcmProtectionGuidance(state: FcmProtectionUiState): String = when {
-    state.storageBlocked -> "记录无法确认，请关闭后重新检查。"
+    state.storageBlocked -> "记录暂不可用，保护已暂停。"
+    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "请重试确认停止。"
+    state.configured && (state.requiresConfirmation || state.confirmationFailure != null) -> "FCM 保护暂不可用。"
     state.confirmationFailure != null -> when (state.confirmationFailure) {
         FcmProtectionConfirmationFailure.HOST_UNAVAILABLE -> "请开启自动保护，并启动 Shizuku。"
         FcmProtectionConfirmationFailure.BUSY -> "请稍后重试。"
@@ -57,8 +58,6 @@ internal fun fcmProtectionGuidance(state: FcmProtectionUiState): String = when {
         FcmProtectionConfirmationFailure.NETWORK_UNAVAILABLE -> "请检查网络后重试。"
         FcmProtectionConfirmationFailure.HOST_CHANGED -> "开启未完成，请重试。"
     }
-    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "请重试确认停止。"
-    state.requiresConfirmation -> "请重新确认以继续保护。"
     state.maintenance == FcmMaintenanceState.WAITING_HOST -> "请开启自动保护，并启动 Shizuku。"
     else -> ""
 }

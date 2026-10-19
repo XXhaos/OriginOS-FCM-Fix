@@ -9,6 +9,7 @@ import io.github.originosfcmguardian.core.gms.SocketSource
 import io.github.originosfcmguardian.core.gms.SourceCompleteness
 import io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState
 import io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState
+import io.github.originosfcmguardian.fcmprotection.FcmProtectionConfirmationFailure
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -118,10 +119,10 @@ class PushProtectionPresentationTest {
         assertTrue(ready.automaticProtection.configuredIdentities.isEmpty())
     }
 
-    @Test fun completionActionIsOnlyForMissingOrExplicitlyUnconfirmedFcmConsent() {
+    @Test fun completionActionIsOnlyForMissingFcmConsent() {
         val on = ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true))
         assertTrue(canCompletePushProtection(on))
-        assertTrue(canCompletePushProtection(on.copy(fcmProtection = FcmProtectionUiState(
+        assertFalse(canCompletePushProtection(on.copy(fcmProtection = FcmProtectionUiState(
             configured = true, requiresConfirmation = true))))
         assertFalse(canCompletePushProtection(ready))
         assertFalse(canCompletePushProtection(on.copy(pushProtectionBusy = true)))
@@ -130,5 +131,35 @@ class PushProtectionPresentationTest {
             configured = true, maintenance = FcmMaintenanceState.WAITING_HOST))))
         assertEquals("等待 Shizuku", pushProtectionStatus(on.copy(
             automaticProtection = on.automaticProtection.copy(waitingForPrivilege = true))))
+    }
+
+    @Test fun configuredUnavailableParentNeverOffersAnotherConfirmationOrClaimsRecovery() {
+        val on = ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true, enabled = true))
+        val configured = FcmProtectionUiState(configured = true)
+        listOf(configured.copy(requiresConfirmation = true, maintenance = FcmMaintenanceState.ACTIVE),
+            configured.copy(storageBlocked = true), configured.copy(maintenance = FcmMaintenanceState.RECONFIRM),
+            configured.copy(confirmationFailure = FcmProtectionConfirmationFailure.READ_UNAVAILABLE)).forEach { fcm ->
+            val state = on.copy(fcmProtection = fcm)
+            assertFalse(canCompletePushProtection(state))
+            assertEquals(PushProtectionEnableAction.NONE, pushProtectionEnableAction(state))
+            assertEquals("FCM 保护暂不可用", pushProtectionStatus(state))
+            assertFalse(fcmProtectionGuidance(fcm).contains("重新确认"))
+            assertFalse(fcmProtectionGuidance(fcm).contains("关闭后"))
+        }
+    }
+
+    @Test fun resumingMasterWithAnExistingBlockedParentKeepsItsOriginalConsent() {
+        val configured = ready.copy(fcmProtection = FcmProtectionUiState(configured = true,
+            requiresConfirmation = true, storageBlocked = true, maintenance = FcmMaintenanceState.RECONFIRM))
+        assertTrue(canStartPushProtection(configured))
+        assertEquals(PushProtectionEnableAction.ENABLE_MASTER, pushProtectionEnableAction(configured))
+        var enabled = 0
+        dispatchPushProtectionToggle(configured, true, { enabled++ }, { fail("ON cannot dispatch OFF") })
+        assertEquals(1, enabled)
+        assertTrue(configured.fcmProtection.configured)
+        assertTrue(configured.fcmProtection.requiresConfirmation)
+        assertEquals(PushProtectionEnableAction.INITIAL_FCM_CONFIRMATION, pushProtectionEnableAction(ready))
+        assertFalse(canStartPushProtection(configured.copy(fcmProtection = configured.fcmProtection.copy(
+            maintenance = FcmMaintenanceState.STOP_PENDING))))
     }
 }

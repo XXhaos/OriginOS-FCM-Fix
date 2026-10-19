@@ -19,6 +19,15 @@ class PushProtectionActivationTest {
         shizuku = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "ready"),
         automaticProtection = AutomaticProtectionState(masterEnabled = true, enabled = true))
 
+    @Test fun onlyMissingConsentCanDispatchAnInitialFcmConfirmation() {
+        val configured = ready().copy(fcmProtection = FcmProtectionUiState(configured = true,
+            requiresConfirmation = true, maintenance = FcmMaintenanceState.RECONFIRM))
+        assertEquals(PushProtectionEnableAction.NONE, pushProtectionEnableAction(configured))
+        assertEquals(PushProtectionEnableAction.ENABLE_MASTER, pushProtectionEnableAction(configured.copy(
+            automaticProtection = configured.automaticProtection.copy(masterEnabled = false))))
+        assertEquals(PushProtectionEnableAction.INITIAL_FCM_CONFIRMATION, pushProtectionEnableAction(ready()))
+    }
+
     @Test fun initialOffIsNotMistakenForARejectedAsynchronousEnable() = runBlocking {
         val states = MutableStateFlow(HomeUiState())
         val waiting = async(start = CoroutineStart.UNDISPATCHED) { awaitPushProtectionHost(states, 1_000) }

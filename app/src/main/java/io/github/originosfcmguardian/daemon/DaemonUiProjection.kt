@@ -206,7 +206,7 @@ internal object DaemonUiProjection {
         val sample = observation as? GmsConnectionObservation.Sample
         val fresh = sample?.isFresh(elapsed) == true
         val confirmation = configured && (!consent.recoveryPrepared || blocked ||
-            sample != null && !consent.accepts(sample, true))
+            fresh && sample != null && !consent.accepts(sample, true))
         val owner = runCatching { root.bytes(DaemonDomainRole.HEARTBEAT_DAEMON_OWNER)?.let(DaemonHeartbeatOwnerCodec::decode) }.getOrNull()
         val native = heartbeat != null && owner != null && owner.record == root.control && owner.epoch == consent.epoch &&
             owner.generation == heartbeat.generation && owner.binding == heartbeat.bindingDigest &&

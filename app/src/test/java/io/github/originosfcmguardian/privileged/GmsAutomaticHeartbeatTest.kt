@@ -82,6 +82,45 @@ class GmsAutomaticHeartbeatTest {
             } finally { runner.close() }
         }
     }
+    @Test fun preDispatchFenceRefusalRemainsRetryableWithSameCapabilityAfterNormalInterval() {
+        var time = 0L
+        var launches = 0
+        var ready = false
+        val workerThread = AtomicReference<Thread>()
+        val runner = GmsHeartbeatRunner({ workerThread.set(Thread.currentThread()); Port() },
+            { launches++; Child(accepted) }, clock = { time })
+        val executorField = GmsHeartbeatRunner::class.java.getDeclaredField("worker").apply { isAccessible = true }
+        (executorField.get(runner) as ThreadPoolExecutor).setKeepAliveTime(1, TimeUnit.MILLISECONDS)
+        val settlements = mutableListOf<PrivilegedExecutionSettlement>()
+        val fence = object : PrivilegedExecutionFence {
+            override fun prepare() = ready
+            override fun start(launch: () -> Process) = launch()
+            override fun workerSettled(value: PrivilegedExecutionSettlement) { settlements += value }
+        }
+        fun drain() { val thread = checkNotNull(workerThread.get()); thread.join(5_000); assertFalse(thread.isAlive) }
+        try {
+            assertTrue(runner.isFreshAutomaticEndpoint())
+            val session = requireNotNull(runner.armAutomatic(1, caller, 1, gmsHeartbeatBindingDigest(sample), Lifetime()) { false }.session)
+            drain()
+            assertFalse(runner.isFreshAutomaticEndpoint())
+            time += GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
+            val declined = runner.requestAutomaticGuarded(2, caller, session, UUID.randomUUID().toString(), { false }, fence)
+            drain()
+            assertEquals(GmsHeartbeatResult.notSent(2, GmsHeartbeatReason.EXECUTION_NOT_READY), declined)
+            assertEquals(listOf(PrivilegedExecutionSettlement.NOT_STARTED), settlements)
+            assertEquals(0, launches)
+            assertFalse(io.github.originosfcmguardian.gmsheartbeat.heartbeatResultNeedsConfirmation(declined))
+            assertTrue(io.github.originosfcmguardian.gmsheartbeat.heartbeatResultNeedsConfirmation(
+                GmsHeartbeatResult.unknown(3, GmsHeartbeatReason.EXECUTION_NOT_READY)))
+            ready = true; time += GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
+            assertEquals(GmsHeartbeatStatus.REQUESTED, runner.requestAutomaticGuarded(4, caller, session,
+                UUID.randomUUID().toString(), { false }, fence).status)
+            drain()
+            assertEquals(1, launches)
+            assertTrue(runner.revokeAutomatic(caller, session.generation, session.id))
+            assertFalse("A retired capability is not a fresh cold endpoint", runner.isFreshAutomaticEndpoint())
+        } finally { runner.close() }
+    }
     @Test fun armRequiresExclusiveGuardianCallerAndExactFreshBinding() {
         val bad = Port().apply { callerOwners = listOf("other.pkg") }
         val runner = GmsHeartbeatRunner({ bad }, { error("arm never launches") })

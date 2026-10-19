@@ -85,13 +85,14 @@ private fun pushProtectionCommandBusy(state: HomeUiState): Boolean =
 
 internal fun canStartPushProtection(state: HomeUiState): Boolean =
     !pushProtectionCommandBusy(state) && canEnableAutomaticProtection(state) &&
-        !state.fcmProtection.storageBlocked && state.fcmProtection.maintenance != FcmMaintenanceState.STOP_PENDING
+        (state.fcmProtection.configured || !state.fcmProtection.storageBlocked) &&
+        state.fcmProtection.maintenance != FcmMaintenanceState.STOP_PENDING
 
 internal fun canCompletePushProtection(state: HomeUiState): Boolean =
     state.automaticProtection.masterEnabled && !state.automaticProtection.revocationSaveFailed &&
         !pushProtectionCommandBusy(state) && !state.fcmProtection.storageBlocked &&
         state.fcmProtection.maintenance != FcmMaintenanceState.STOP_PENDING &&
-        (!state.fcmProtection.configured || state.fcmProtection.requiresConfirmation)
+        !state.fcmProtection.configured
 
 internal fun pushProtectionToggleEnabled(state: HomeUiState): Boolean =
     state.automaticProtection.masterEnabled || canStartPushProtection(state)
@@ -110,13 +111,14 @@ internal fun pushProtectionStatus(state: HomeUiState): String = when {
     state.automaticProtection.waitingForReconciliation -> "等待复检"
     state.automaticProtection.waitingForPrivilege -> "等待 Shizuku"
     state.automaticProtection.waitingForService -> "等待保护服务"
-    state.fcmProtection.storageBlocked -> "FCM 记录异常，请关闭后重试"
+    state.fcmProtection.storageBlocked -> "FCM 保护暂不可用"
+    state.fcmProtection.configured && (state.fcmProtection.requiresConfirmation ||
+        state.fcmProtection.confirmationFailure != null) -> "FCM 保护暂不可用"
     !state.automaticProtection.enabled -> "等待保护恢复"
-    state.fcmProtection.requiresConfirmation -> "FCM 保护待确认"
     !state.fcmProtection.configured -> "FCM 保护待完成"
     state.fcmProtection.maintenance == FcmMaintenanceState.WAITING_HOST -> "等待保护恢复"
     state.fcmProtection.maintenance == FcmMaintenanceState.ACTIVE -> "保护已开启"
-    state.fcmProtection.maintenance == FcmMaintenanceState.RECONFIRM -> "FCM 保护待确认"
+    state.fcmProtection.maintenance == FcmMaintenanceState.RECONFIRM -> "FCM 保护暂不可用"
     state.fcmProtection.maintenance == FcmMaintenanceState.WAITING_CONNECTED -> "已开启，等待 FCM 连接"
     else -> "FCM 保护等待启动"
 }

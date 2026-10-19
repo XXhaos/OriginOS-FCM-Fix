@@ -161,9 +161,15 @@ function New-DaemonSession([string]$Id = '000000000000000000000001') {
 }
 $report | Add-Member -NotePropertyName daemonDiagnostics -NotePropertyValue @{
     availability='AVAILABLE'; collectionScope='GUARDIAN_PRIVILEGED_DAEMON_HISTORY'
-    generatedAtEpochMillis=2100; currentSession='000000000000000000000001'; generation=3
+    generatedAtEpochMillis=2100; generatedElapsedMillis=1200; currentSession='000000000000000000000001'; generation=3
+    cpuScope='SAME_HOST_SESSION_PROCESS_CPU_EXCLUDES_CHILDREN_GMS_AND_RADIO'
+    batteryScope='WHOLE_PHONE_CONTEXT_NOT_GUARDIAN_ENERGY'; capacityScope='COUNT_BOUND_NOT_SEVEN_DAY_TTL'
+    snapshotScope='INDEPENDENT_DIAGNOSTIC_SNAPSHOT_NOT_CONTROL_TRANSACTION'
+    unknownIntervalScope='UNSETTLED_SESSIONS_OR_POLL_GAPS_NOT_CONFIRMED_KILLS'
     retainedSessionCount=1; retainedSampleCount=2; evictedSessions=0; evictedSamples=0; evictedEvents=0
-    skippedSamples=1; failedOperations=0; unknownIntervals=1; omittedTimeBuckets=0
+    skippedSamples=1; failedOperations=0; unknownIntervals=1; omittedTimeBuckets=0; omittedRawSamples=1
+    events=@(@{ session='000000000000000000000001'; atEpochMillis=1000; elapsedMillis=100; state='BEGIN' },
+        @{ session='000000000000000000000001'; atEpochMillis=2000; elapsedMillis=1100; state='READY' })
     sessions=@((New-DaemonSession)); timeBuckets=@(); recentSamples=@(
         @{ session='000000000000000000000001'; atEpochMillis=2000; elapsedMillis=1100; cpuTimeMillis=50
            rssKiB=100; threads=8; batteryPercent=$null; chargingStatus='UNKNOWN'; interactive=$false; deviceIdle=$null })
@@ -178,6 +184,16 @@ Assert-Equal 1 $daemon.daemonEvidence.unknownIntervals 'unknown interval retaine
 Assert-Equal 2.0 $daemon.daemonEvidence.sessions[0].summary.cpuSingleCorePercent 'daemon CPU summary retained'
 Assert-Equal -20 $daemon.daemonEvidence.sessions[0].summary.rssDeltaKiB 'negative RSS change is valid'
 Assert-Equal $null $daemon.daemonEvidence.recentSamples[0].batteryPercent 'missing device battery is unknown'
+Assert-Equal 1200 $daemon.daemonEvidence.generatedElapsedMillis 'snapshot monotonic time retained'
+Assert-Equal 1 $daemon.daemonEvidence.omittedRawSamples 'omitted samples separate from preview'
+Assert-Equal 2 $daemon.daemonEvidence.events.Count 'state transitions retained'
+Assert-Equal 'BEGIN' $daemon.daemonEvidence.events[0].state 'begin event is not ready'
+Assert-Equal 1100 $daemon.daemonEvidence.events[1].elapsedMillis 'event monotonic time retained'
+Assert-Equal 'WHOLE_PHONE_CONTEXT_NOT_GUARDIAN_ENERGY' $daemon.daemonEvidence.batteryScope 'battery attribution limit retained'
+Assert-Equal 'SAME_HOST_SESSION_PROCESS_CPU_EXCLUDES_CHILDREN_GMS_AND_RADIO' $daemon.daemonEvidence.sourceCpuScope 'child CPU exclusion retained'
+Assert-Equal 'COUNT_BOUND_NOT_SEVEN_DAY_TTL' $daemon.daemonEvidence.capacityScope 'capacity is not fixed retention'
+Assert-Equal 'INDEPENDENT_DIAGNOSTIC_SNAPSHOT_NOT_CONTROL_TRANSACTION' $daemon.daemonEvidence.snapshotScope 'snapshot transaction limit retained'
+Assert-Equal 'UNSETTLED_SESSIONS_OR_POLL_GAPS_NOT_CONFIRMED_KILLS' $daemon.daemonEvidence.unknownIntervalScope 'gaps are not death counts'
 Assert-Equal 'START_AND_PENDING_AND_RETURNED_RESULT' $daemon.fcm.episodes.requestTimingScope 'v13 inherits v12 timing semantics'
 foreach ($source in @('NOT_COLLECTED','INITIALIZING','UNAVAILABLE','CORRUPT','LOCKED')) {
     $report.daemonDiagnostics.availability=$source
@@ -187,6 +203,10 @@ foreach ($source in @('NOT_COLLECTED','INITIALIZING','UNAVAILABLE','CORRUPT','LO
     Assert-Equal 0 $unknownDaemon.daemonEvidence.sessions.Count 'unavailable stale daemon sessions omitted'
     Assert-Equal 0 $unknownDaemon.daemonEvidence.timeBuckets.Count 'unavailable daemon buckets omitted'
     Assert-Equal 0 $unknownDaemon.daemonEvidence.recentSamples.Count 'unavailable daemon sample preview omitted'
+    Assert-Equal $null $unknownDaemon.daemonEvidence.events 'unavailable stale daemon events omitted'
+    Assert-Equal $null $unknownDaemon.daemonEvidence.generatedElapsedMillis 'unavailable snapshot clock unknown'
+    Assert-Equal $null $unknownDaemon.daemonEvidence.omittedRawSamples 'unavailable omission count unknown'
+    Assert-Equal $null $unknownDaemon.daemonEvidence.sourceCpuScope 'unavailable stale source scopes omitted'
     Assert-Equal 2 $unknownDaemon.retainedNaturalLowMemoryCount 'daemon unavailable does not erase app history'
 }
 $report.daemonDiagnostics.availability='AVAILABLE'
@@ -214,6 +234,25 @@ Assert-RejectedDaemon { $report.daemonDiagnostics.timeBuckets=@(@{session='00000
 Assert-RejectedDaemon { $report.daemonDiagnostics.retainedSessionCount=0 } 'reject false daemon retained count'
 Assert-RejectedDaemon { $report.daemonDiagnostics.sessions=$null } 'missing sessions cannot be empty successful history'
 Assert-RejectedDaemon { $report.daemonDiagnostics.availability='available' } 'daemon availability case exact'
+Assert-RejectedDaemon { $report.daemonDiagnostics.events=@(1..257 | ForEach-Object { $report.daemonDiagnostics.events[0] }) } 'reject 257 daemon events'
+Assert-RejectedDaemon { $report.daemonDiagnostics.events[0].session='000000000000000000000999' } 'reject unrelated daemon event'
+Assert-RejectedDaemon { $report.daemonDiagnostics.events[0].state='ready' } 'event state case exact'
+Assert-RejectedDaemon { $report.daemonDiagnostics.events[0].elapsedMillis=-1 } 'reject negative event monotonic time'
+Assert-RejectedDaemon { $report.daemonDiagnostics.generatedElapsedMillis=-1 } 'reject negative snapshot monotonic time'
+Assert-RejectedDaemon { $report.daemonDiagnostics.omittedRawSamples=0 } 'reject hidden raw sample omissions'
+Assert-RejectedDaemon { $report.daemonDiagnostics.batteryScope='GUARDIAN_ENERGY' } 'reject false battery attribution scope'
+Assert-RejectedDaemon { $report.daemonDiagnostics.cpuScope='SYSTEM_CPU' } 'reject merged CPU scope'
+$optionalDaemon = $report.daemonDiagnostics | ConvertTo-Json -Depth 20
+$report.daemonDiagnostics.PSObject.Properties.Remove('generatedElapsedMillis')
+$report.daemonDiagnostics.PSObject.Properties.Remove('events')
+$report.daemonDiagnostics.PSObject.Properties.Remove('omittedRawSamples')
+$report.daemonDiagnostics.PSObject.Properties.Remove('cpuScope')
+$legacyDaemon = (Get-GuardianSurvivalSummary $report).daemonEvidence
+Assert-Equal $null $legacyDaemon.generatedElapsedMillis 'missing legacy clock stays unknown'
+Assert-Equal $null $legacyDaemon.events 'missing legacy events stay unknown'
+Assert-Equal $null $legacyDaemon.omittedRawSamples 'missing legacy omissions stay unknown'
+Assert-Equal $null $legacyDaemon.sourceCpuScope 'missing legacy source CPU scope stays unknown'
+$report.daemonDiagnostics = $optionalDaemon | ConvertFrom-Json
 Assert-RejectedEpisode { $report.fcmRecoveryEpisodes.episodes=@((New-EpisodePreview 1 'OBSERVING')); $report.fcmRecoveryEpisodes.episodes[0].requestPending=$null; $report.fcmRecoveryEpisodes.retainedEpisodeCount=1 } 'v13 still requires explicit pending state'
 # Exercise the documented maxima together, preserving the independent App history.
 $report.daemonDiagnostics.sessions=@(1..32 | ForEach-Object { New-DaemonSession ('{0:x24}' -f $_) })
@@ -224,12 +263,17 @@ $report.daemonDiagnostics.timeBuckets=@(0..167 | ForEach-Object {
     @{session='000000000000000000000001'; hourEpochMillis=[long]$_*3600000; summary=(New-DaemonSummary)}
 })
 $report.daemonDiagnostics.recentSamples=@(1..16 | ForEach-Object { @{session='000000000000000000000001'; atEpochMillis=2000; elapsedMillis=1100} })
+$report.daemonDiagnostics.omittedRawSamples=2000
+$report.daemonDiagnostics.events=@(1..256 | ForEach-Object {
+    @{session='000000000000000000000001'; atEpochMillis=2000; elapsedMillis=1100; state='READY'}
+})
 $boundedDaemon=Get-GuardianSurvivalSummary $report
 Assert-Equal 32 $boundedDaemon.daemonEvidence.sessions.Count '32 daemon sessions accepted'
 Assert-Equal 168 $boundedDaemon.daemonEvidence.timeBuckets.Count '168 hourly buckets accepted'
 Assert-Equal 2.0 $boundedDaemon.daemonEvidence.timeBuckets[0].summary.cpuSingleCorePercent 'mapper nested hourly summary retained'
 Assert-Equal 16 $boundedDaemon.daemonEvidence.recentSamples.Count '16 recent samples accepted'
 Assert-Equal 2016 $boundedDaemon.daemonEvidence.retainedSampleCount 'retained count independent of recent preview'
+Assert-Equal 256 $boundedDaemon.daemonEvidence.events.Count '256 state events accepted'
 $taskReportFile=[System.IO.Path]::GetTempFileName()
 try {
     $report | Add-Member -NotePropertyName testPadding -NotePropertyValue ('x'*131072)

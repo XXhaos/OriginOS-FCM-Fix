@@ -48,6 +48,12 @@ internal class GmsHeartbeatRunner(
     private val automatic = GmsAutomaticHeartbeatGate(clock)
     private val activity = PrivilegedWorkerActivity()
     fun isQuiescent(): Boolean = activity.isQuiescent()
+    fun isFreshAutomaticEndpoint(): Boolean = isQuiescent() && automatic.isFreshEndpoint()
+
+    private fun declined(stage: String, reason: GmsHeartbeatReason) {
+        // At most one bounded record per declined request; no package/process/session identities.
+        runCatching { android.util.Log.w("GuardianHeartbeat", "dispatch=NOT_SENT stage=$stage reason=$reason") }
+    }
 
     fun request(requestId: Long, wasCancelled: () -> Boolean): GmsHeartbeatResult {
         automatic.manualEvent()
@@ -62,6 +68,7 @@ internal class GmsHeartbeatRunner(
         val (cap, reason) = automatic.prepare(session, callerUid, attemptId)
         if (reason != null) {
             PrivilegedWorkSettlement(execution).abandonQueued()
+            if (reason == GmsHeartbeatReason.SESSION_REVOKED) declined("CAPABILITY", reason)
             return GmsHeartbeatResult.notSent(requestId, reason)
         }
         return perform(requestId, wasCancelled, checkNotNull(cap), execution)
@@ -188,7 +195,10 @@ internal class GmsHeartbeatRunner(
                 if (cap != null && !guardianCaller(port, cap.callerUid)) return@submit gate.failure(requestId, GmsHeartbeatReason.CALLER_UNAVAILABLE)
                 if (execution != null) {
                     // Ownership reads can block: repeat GMS service/socket evidence afterwards.
-                    if (!execution.prepare()) return@submit gate.failure(requestId, GmsHeartbeatReason.SESSION_REVOKED)
+                    if (!execution.prepare()) {
+                        declined("OWNER_PREPARE", GmsHeartbeatReason.EXECUTION_NOT_READY)
+                        return@submit gate.failure(requestId, GmsHeartbeatReason.EXECUTION_NOT_READY)
+                    }
                     val fresh = observeGmsConnection(requestId, port, {
                         if (interruption() == null) null else GmsUnknown.CANCELLED
                     })

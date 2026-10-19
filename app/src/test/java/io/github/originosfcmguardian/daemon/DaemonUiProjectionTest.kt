@@ -161,6 +161,20 @@ class DaemonUiProjectionTest {
         assertFalse(DaemonUiProjection.project(root, status.copy(recoveryReadiness = null), 90_000, 100_000).fcm.recoveryReady)
     }
 
+    @Test fun staleIdentityObservationWaitsForFreshEvidenceWithoutDemandingNewConsent() {
+        val (root, sample, status) = readinessFixture()
+        val changed = status.copy(latestGmsObservation = sample.copy(versionCode = sample.versionCode + 1))
+        assertTrue(DaemonUiProjection.project(root, changed, 90_000, 100_000).fcm.requiresConfirmation)
+        val stale = DaemonUiProjection.project(root, changed, 120_001, 130_001).fcm
+        assertTrue(stale.configured)
+        assertFalse(stale.requiresConfirmation)
+        assertFalse(stale.recoveryReady)
+        assertEquals(FcmMaintenanceState.WAITING_CONNECTED, stale.maintenance)
+        val blocked = DaemonProtectionRootSnapshot(root.control,
+            root.domains() + (DaemonDomainRole.HEARTBEAT_HALT to byteArrayOf(1)), dataRevision = root.dataRevision)
+        assertTrue(DaemonUiProjection.project(blocked, changed, 120_001, 130_001).fcm.requiresConfirmation)
+    }
+
     @Test fun recoveryReadinessRequiresExactRecordRequestSampleAndMonotonicSessionTimes() {
         val (root, sample, status) = readinessFixture()
         val evidence = requireNotNull(status.recoveryReadiness)

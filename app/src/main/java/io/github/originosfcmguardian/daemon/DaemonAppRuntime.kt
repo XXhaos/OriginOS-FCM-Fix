@@ -44,6 +44,8 @@ internal object DaemonAppRuntime {
     val state = projected.asStateFlow()
     private val readIds = AtomicLong()
     private val commandAdmission = DaemonAppCommandAdmission()
+    // Protected by commandAdmission, so accepting OFF and publishing an ON result have one order.
+    private var fcmConfirmation: DaemonFcmCommandCompletion? = null
     private val unsavedStop = DaemonUnsavedStop()
     private val binderReceived = Shizuku.OnBinderReceivedListener {
         onPrivilegeEvent()
@@ -252,52 +254,111 @@ internal object DaemonAppRuntime {
     fun enableMaster(context: Context) = launchCommand(context, DaemonWire.MASTER_ON)
     fun enableTarget(context: Context, identity: SelectedTargetIdentity) = launchCommand(context, DaemonWire.TARGET_ON, identity)
     fun disableTarget(context: Context, identity: SelectedTargetIdentity) = launchCommand(context, DaemonWire.TARGET_OFF, identity)
-    fun enableFcm(context: Context) = launchCommand(context, DaemonWire.FCM_ON)
+    fun enableFcm(context: Context): Deferred<DaemonFcmCommandResult> {
+        val completion = DaemonFcmCommandCompletion(UUID.randomUUID().toString())
+        // This scope belongs to the App. Cancelling a screen's await never cancels remote work.
+        completion.bound(scope)
+        try { launchCommand(context, DaemonWire.FCM_ON, completion = completion) }
+        catch (_: Exception) { completion.finish(DaemonFcmCommandOutcome.FAILED, DaemonFcmCommandReason.PREPARATION) }
+        return completion.result
+    }
     fun disableFcm(context: Context) = launchCommand(context, DaemonWire.FCM_OFF)
 
-    private fun launchCommand(context: Context, command: Int, target: SelectedTargetIdentity? = null) {
+    private fun launchCommand(context: Context, command: Int, target: SelectedTargetIdentity? = null,
+        completion: DaemonFcmCommandCompletion? = null) {
         initialize(context)
-        if (!isRemoteOwned(context)) return
+        if (!isRemoteOwned(context)) {
+            completion?.finish(DaemonFcmCommandOutcome.REJECTED, DaemonFcmCommandReason.NOT_REMOTE)
+            return
+        }
+        if (completion?.result?.isCompleted == true) return
         val first = DaemonAppCommand(command, target)
         // Before waiting for the migration/control mutex, remember an OFF against its INTENT.
         // This is local durable negative intent only; it is never reported as a remote OFF ACK.
-        val offer = commandAdmission.offer(first)
+        val offer = synchronized(commandAdmission) {
+            commandAdmission.offer(first).also { offered ->
+                if (offered == DaemonAppCommandAdmission.Offer.START && completion != null) fcmConfirmation = completion
+                if (first.disabling && offered != DaemonAppCommandAdmission.Offer.REJECTED)
+                    fcmConfirmation?.finish(DaemonFcmCommandOutcome.REJECTED, DaemonFcmCommandReason.STOP_REQUESTED)
+            }
+        }
         if (first.disabling && offer != DaemonAppCommandAdmission.Offer.REJECTED) retainMigrationStop(first)
-        if (offer != DaemonAppCommandAdmission.Offer.START) return
+        if (offer != DaemonAppCommandAdmission.Offer.START) {
+            completion?.finish(DaemonFcmCommandOutcome.REJECTED, DaemonFcmCommandReason.BUSY)
+            return
+        }
         publishBusy(true)
         scope.launch {
             var next: DaemonAppCommand? = first
+            var reporting = completion
             while (next != null) {
                 val request = next
-                runCatching { withTimeout(90_000) { control.withLock {
-                    if (request.disabling) {
-                        unsavedStop.persist(pointerStore!!::saveStopIntent)?.let { resolveStopLocked(it) }
-                        pointerStore!!.readStopIntent()?.let { resolveStopLocked(it) }
-                        val saved = pointerStore!!.read()
-                        val intent = when (saved) {
-                            is DaemonMigrationRead.Remote -> saved.pointer.intent
-                            is DaemonMigrationRead.Migrating -> saved.intent
-                            else -> error("Migration pending")
-                        }
-                        val stop = DaemonAppStopIntent(UUID.randomUUID().toString(), intent, request)
-                        unsavedStop.retain(stop)
-                        resolveStopLocked(checkNotNull(unsavedStop.persist(pointerStore!!::saveStopIntent)))
-                        return@withLock
-                    }
-                    restoreLocked()
-                    val saved = pointerStore!!.read() as? DaemonMigrationRead.Remote ?: error("Migration pending")
-                    val expected = checkNotNull(mutable.value).control
-                    val staged = stage(expected, request.kind, request.target)
-                    applyStaged(saved.pointer.intent, saved.pointer.importDigest, staged)
-                    refreshLocked()
-                } } }.onFailure {
+                if (reporting != null) runFcmCommand(request, reporting)
+                else runCatching { withTimeout(90_000) { control.withLock { executeCommandLocked(request) } } }.onFailure {
                     // One bounded reconciliation, not an indefinite retry or old executor fallback.
                     if (runCatching { withTimeout(60_000) { control.withLock { restoreLocked() } } }.isFailure) unavailable()
                 }
-                next = commandAdmission.finishAndNext()
+                next = synchronized(commandAdmission) {
+                    if (fcmConfirmation === reporting) fcmConfirmation = null
+                    commandAdmission.finishAndNext()
+                }
+                reporting = null
             }
             publishBusy(false)
         }
+    }
+
+    private suspend fun runFcmCommand(request: DaemonAppCommand, completion: DaemonFcmCommandCompletion) {
+        try {
+            // Reserve time for one reconciliation of this exact request after a lost reply.
+            withTimeout(65_000) { control.withLock { executeCommandLocked(request, completion) } }
+        } catch (_: Exception) {
+            if (!completion.hasExpectation()) {
+                unavailable()
+                completion.finish(DaemonFcmCommandOutcome.FAILED, DaemonFcmCommandReason.PREPARATION)
+            } else try {
+                withTimeout(20_000) { control.withLock {
+                    restoreLocked()
+                    refreshLocked { root, status, ui -> synchronized(commandAdmission) {
+                        completion.observed(root, status, ui)
+                    } }
+                } }
+            } catch (_: Exception) { unavailable() }
+        } finally {
+            completion.finish(DaemonFcmCommandOutcome.UNKNOWN, DaemonFcmCommandReason.UNAVAILABLE)
+        }
+    }
+
+    private suspend fun executeCommandLocked(request: DaemonAppCommand, completion: DaemonFcmCommandCompletion? = null) {
+        if (request.disabling) {
+            unsavedStop.persist(pointerStore!!::saveStopIntent)?.let { resolveStopLocked(it) }
+            pointerStore!!.readStopIntent()?.let { resolveStopLocked(it) }
+            val saved = pointerStore!!.read()
+            val intent = when (saved) {
+                is DaemonMigrationRead.Remote -> saved.pointer.intent
+                is DaemonMigrationRead.Migrating -> saved.intent
+                else -> error("Migration pending")
+            }
+            val stop = DaemonAppStopIntent(UUID.randomUUID().toString(), intent, request)
+            unsavedStop.retain(stop)
+            resolveStopLocked(checkNotNull(unsavedStop.persist(pointerStore!!::saveStopIntent)))
+            return
+        }
+        restoreLocked()
+        val saved = pointerStore!!.read() as? DaemonMigrationRead.Remote ?: error("Migration pending")
+        val expected = checkNotNull(mutable.value).control
+        // An accepted OFF/deadline may already have settled this request while it waited for control.
+        if (completion != null && !synchronized(commandAdmission) { completion.expect(expected) }) return
+        val staged = stage(expected, request.kind, request.target, completion?.requestId ?: UUID.randomUUID().toString())
+        if (completion != null) {
+            val stagedRequest = DaemonWire.request(DaemonWire.nested(staged, "request"))
+            val challenge = DaemonWire.challenge(DaemonWire.nested(staged, "challenge"))
+            completion.staged(stagedRequest, challenge.pointer.record, challenge.patchDigest)
+        }
+        applyStaged(saved.pointer.intent, saved.pointer.importDigest, staged)
+        refreshLocked { root, status, ui -> if (completion != null) synchronized(commandAdmission) {
+            completion.observed(root, status, ui)
+        } }
     }
 
     private fun retainMigrationStop(command: DaemonAppCommand) {
@@ -325,19 +386,29 @@ internal object DaemonAppRuntime {
         })
 
     private suspend fun applyStaged(intent: DaemonMigrationIntent, digest: String, staged: Bundle,
-        drainedImport: String? = null, drainedHeartbeat: String? = null) {
+        drainedImport: String? = null, drainedHeartbeat: String? = null): DaemonControlReceipt {
         val challenge = DaemonWire.challenge(DaemonWire.nested(staged, "challenge"))
         val request = DaemonWire.request(DaemonWire.nested(staged, "request"))
         check(challenge.purpose == DaemonPointerPurpose.TRANSITION)
+        synchronized(commandAdmission) {
+            fcmConfirmation?.takeIf { it.requestId == request.requestId }
+                ?.staged(request, challenge.pointer.record, challenge.patchDigest)
+        }
         checkStopAdmission(request)
         checkNotNull(pointerStore!!.commit(intent, digest, challenge))
         checkStopAdmission(request)
-        client!!.call(DaemonWire.ATTEST_APPLY, Bundle().apply {
+        val reply = client!!.call(DaemonWire.ATTEST_APPLY, Bundle().apply {
             putBundle("challenge", DaemonWire.challenge(challenge)); putBundle("request", DaemonWire.request(request))
             if (drainedImport != null) {
                 putString("drainedImport", drainedImport); putString("drainedHeartbeat", checkNotNull(drainedHeartbeat))
             }
         })
+        DaemonWire.keys(reply, "ok", "request", "record", "currentRevision")
+        val receipt = DaemonControlReceipt(DaemonWire.request(DaemonWire.nested(reply, "request")),
+            DaemonWire.record(DaemonWire.nested(reply, "record")))
+        check(receipt.request == request && receipt.committed == challenge.pointer.record &&
+            DaemonWire.long(reply, "currentRevision") >= receipt.committed.revision)
+        return receipt
     }
 
     private fun checkStopAdmission(request: DaemonControlRequest) {
@@ -516,7 +587,7 @@ internal object DaemonAppRuntime {
         }.getOrElse { GmsConnectionObservation.Unknown(id, GmsUnknown.BRIDGE_UNAVAILABLE) }
     }
 
-    private suspend fun refreshLocked(): DaemonProtectionRootSnapshot {
+    private suspend fun refreshLocked(observed: ((DaemonProtectionRootSnapshot, DaemonAppStatus, DaemonUiSnapshot) -> Unit)? = null): DaemonProtectionRootSnapshot {
         var snapshot = client!!.snapshot()
         var status = DaemonWire.appStatus(client!!.call(DaemonWire.STATUS))
         if (status.record != snapshot.control || status.dataRevision != snapshot.dataRevision) {
@@ -530,6 +601,7 @@ internal object DaemonAppRuntime {
         projected.value = result
         AutomaticProtectionRuntime.publishDaemonState(result.automatic)
         FcmProtectionRuntime.publishDaemonState(result.fcm)
+        observed?.invoke(snapshot, status, result)
         return snapshot
     }
 

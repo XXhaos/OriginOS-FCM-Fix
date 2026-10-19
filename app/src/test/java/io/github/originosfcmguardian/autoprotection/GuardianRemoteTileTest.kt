@@ -22,6 +22,7 @@ class GuardianRemoteTileTest {
         val collected = snapshot(ready = true)
         assertFalse(guardianTilePresentation(oldLocalMirror, true).active) // The old mixed-read race.
         assertTrue(guardianRemoteTilePresentation(collected).active)
+        assertTrue(guardianRemoteTilePresentation(collected).available)
         assertEquals("检测已开启", guardianRemoteTilePresentation(collected).subtitle)
         assertEquals(collected.automatic, snapshot(ready = true).automatic)
     }
@@ -33,6 +34,53 @@ class GuardianRemoteTileTest {
         assertFalse(guardianRemoteTilePresentation(ready.copy(automatic = ready.automatic.copy(enabled = false))).active)
         assertFalse(guardianRemoteTilePresentation(ready.copy(automatic = ready.automatic.copy(waitingForReconciliation = true))).active)
         assertFalse(guardianRemoteTilePresentation(ready.copy(automatic = ready.automatic.copy(revocationSaveFailed = true))).active)
+    }
+
+    @Test fun coldProjectionIsUnknownUntilTheCoherentLiveSnapshotArrives() {
+        val synchronizing = guardianRemoteTilePresentation(null)
+        assertFalse(synchronizing.active)
+        assertFalse(synchronizing.available)
+        assertEquals("正在同步保护状态", synchronizing.subtitle)
+        val live = guardianRemoteTilePresentation(snapshot(ready = true))
+        assertTrue(live.available)
+        assertTrue(live.active)
+    }
+
+    @Test fun knownMasterOffIsInactiveWhileMissingHostOrConfigurationIsUnavailable() {
+        val off = guardianRemoteTilePresentation(snapshot(master = false))
+        assertTrue(off.available)
+        assertFalse(off.active)
+        assertEquals("自动保护未开启", off.subtitle)
+        val waiting = guardianRemoteTilePresentation(snapshot())
+        assertFalse(waiting.available)
+        assertFalse(waiting.active)
+        assertEquals("等待保护服务", waiting.subtitle)
+        val ready = snapshot(ready = true)
+        for (unknown in listOf(ready.copy(configurationAvailable = false),
+            ready.copy(automatic = ready.automatic.copy(configurationAvailable = false)))) {
+            val presentation = guardianRemoteTilePresentation(unknown)
+            assertFalse(presentation.available)
+            assertFalse(presentation.active)
+            assertEquals("保护配置暂不可用", presentation.subtitle)
+        }
+        // Master OFF must win even if an inconsistent old ready flag is supplied.
+        val inconsistentOff = guardianRemoteTilePresentation(snapshot(ready = true, master = false))
+        assertFalse(inconsistentOff.active)
+        assertEquals("自动保护未开启", inconsistentOff.subtitle)
+    }
+
+    @Test fun pendingStopAndReconciliationRemainUnavailableWithTheirActualExplanation() {
+        val ready = snapshot(ready = true)
+        val pending = guardianRemoteTilePresentation(ready.copy(automatic = ready.automatic.copy(
+            waitingForReconciliation = true)))
+        assertFalse(pending.available)
+        assertFalse(pending.active)
+        assertEquals("等待只读复检，当前未执行保护", pending.subtitle)
+        val failedStop = guardianRemoteTilePresentation(ready.copy(automatic = ready.automatic.copy(
+            masterEnabled = false, revocationSaveFailed = true)))
+        assertFalse(failedStop.available)
+        assertFalse(failedStop.active)
+        assertEquals("关闭结果待确认", failedStop.subtitle)
     }
 
     @Test fun coldHostGetsFourReadOnlyOpportunitiesAcrossTheFirstThirtySecondPoll() = runBlocking {

@@ -6,6 +6,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 
+internal enum class PushProtectionEnableAction { INITIAL_FCM_CONFIRMATION, ENABLE_MASTER, NONE }
+
+/** Existing FCM consent is resumed by its owner; an unavailable branch is never a new opt-in. */
+internal fun pushProtectionEnableAction(state: HomeUiState): PushProtectionEnableAction = when {
+    !state.fcmProtection.configured -> PushProtectionEnableAction.INITIAL_FCM_CONFIRMATION
+    !state.automaticProtection.masterEnabled -> PushProtectionEnableAction.ENABLE_MASTER
+    else -> PushProtectionEnableAction.NONE
+}
+
 /** Readiness for composing existing Home commands; this grants no execution authority. */
 internal fun pushProtectionHostReady(state: HomeUiState): Boolean =
     state.automaticProtection.masterEnabled && state.automaticProtection.enabled &&

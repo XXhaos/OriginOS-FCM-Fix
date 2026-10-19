@@ -7,7 +7,8 @@ param(
 )
 
 # Read-only metadata; optional target summary exposes only the requested package/UID/install time.
-# Never exports signer digests, raw authority, caller IDs, consent IDs or diagnostic content.
+# Exposes only structural status and historical caller UID/PID/start ticks for closure checks.
+# Never exports signer digests, raw authority, boot IDs, consent IDs or diagnostic content.
 # CapturedFile is an optional LOCAL binary shell CONTROL envelope for offline inspection.
 # CurrentBootId is optional: without it callerBootMatchesCurrent is unknown, never inferred.
 $ErrorActionPreference = 'Stop'
@@ -262,19 +263,21 @@ public static class GuardianDaemonMetadataV2 {
             string pause=Ordinal(r,"RECONFIRM,HOST_LOST,UNKNOWN_RESULT,LEFTOVER_PENDING,OFF_PENDING,STORAGE_FAILURE,WAITING_HOST",true);
             bool pending=r.Text().Length>0;r.Text();bool session=r.Text().Length>0;
             string status=Ordinal(r,"NOT_SENT,REQUESTED,UNKNOWN",true);
-            string reason=Ordinal(r,"INVALID_REQUEST,SHELL_UNAVAILABLE,WRONG_USER,IDENTITY_UNKNOWN,IDENTITY_CHANGED,SHARED_UID,OBSERVATION_UNKNOWN,REPORTED_DISCONNECTED,STALE_OBSERVATION,BUSY,TIMED_OUT,CANCELLED,BRIDGE_UNAVAILABLE,COMMAND_ACCEPTED,COMMAND_FAILED,OUTPUT_INCOMPLETE,MALFORMED_RESPONSE,SESSION_REVOKED,INTERVAL_NOT_ELAPSED,DUPLICATE_ATTEMPT,CALLER_UNAVAILABLE",true);
+            string reason=Ordinal(r,"INVALID_REQUEST,SHELL_UNAVAILABLE,WRONG_USER,IDENTITY_UNKNOWN,IDENTITY_CHANGED,SHARED_UID,OBSERVATION_UNKNOWN,REPORTED_DISCONNECTED,STALE_OBSERVATION,BUSY,TIMED_OUT,CANCELLED,BRIDGE_UNAVAILABLE,COMMAND_ACCEPTED,COMMAND_FAILED,OUTPUT_INCOMPLETE,MALFORMED_RESPONSE,SESSION_REVOKED,INTERVAL_NOT_ELAPSED,DUPLICATE_ATTEMPT,CALLER_UNAVAILABLE,EXECUTION_NOT_READY",true);
             bool durable=false;int? consentVersion=null;string block=null;bool caller=false;object bootEqual=null;bool arm=false;
+            int? callerUid=null,callerPid=null;long? callerStartTicks=null;
             if(schema>=2) {
                 durable=r.Flag();if(durable){consentVersion=r.Int();Need(consentVersion>=1 && consentVersion<=3);r.Text();Need(r.Int()==0);r.Text();}
                 block=Ordinal(r,"COLD_RECONSTRUCTION,UNKNOWN_RESULT,LEFTOVER_PENDING,IDENTITY_CHANGED,SECURITY_FAILURE,STORAGE_FAILURE,UNCERTAIN_OWNER",true);r.Text();
             }
             if(schema==3) {
-                caller=r.Flag();if(caller){r.Int();r.Int();r.Long();string boot=r.Text();if(!String.IsNullOrEmpty(currentBoot))bootEqual=boot==currentBoot;}
+                caller=r.Flag();if(caller){callerUid=r.Int();callerPid=r.Int();callerStartTicks=r.Long();string boot=r.Text();if(!String.IsNullOrEmpty(currentBoot))bootEqual=boot==currentBoot;}
                 arm=r.Text().Length>0;
             }
             r.End();return Map("schema",schema,"generation",generation,"configured",configured,"pause",pause,
                 "sessionPresent",session,"pendingAttempt",pending,"pendingArm",arm,"resumeBlock",block,"lastStatus",status,
-                "lastReason",reason,"durableConsent",durable,"consentVersion",consentVersion,"callerPresent",caller,"callerBootMatchesCurrent",bootEqual);
+                "lastReason",reason,"durableConsent",durable,"consentVersion",consentVersion,"callerPresent",caller,"callerBootMatchesCurrent",bootEqual,
+                "callerUid",callerUid,"callerPid",callerPid,"callerStartTicks",callerStartTicks);
         }
     }
     static object Pending(byte[] bytes) {
@@ -334,7 +337,7 @@ public static class GuardianDaemonMetadataV2 {
                 "revision",control.Revision,"dataRevision",dataRevision,"halt",halt,"receiptCount",receipts,"roles",metadata,
                 "parent",Inspect(()=>Parent(domains[8])),"heartbeat",Inspect(()=>Heartbeat(domains[15],currentBoot)),
                 "heartbeatPending",Inspect(()=>Pending(domains[18])),"recovery",Inspect(()=>Recovery(domains[10])),
-                "scope","READ_ONLY_METADATA; not full authorization validation; only requested target package/UID/install time; no signers, consent IDs or content");
+                "scope","READ_ONLY_METADATA; not full authorization validation; requested target and historical Guardian process metadata only; no signers, boot IDs, consent IDs or content");
             if(!String.IsNullOrEmpty(targetPackage)) {
                 Identity selected=null;
                 object selection=Inspect(()=>Selection(domains[3],targetPackage,out selected));

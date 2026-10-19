@@ -147,7 +147,11 @@ class GuardianTileService : TileService() {
             label = GUARDIAN_TILE_LABEL
             subtitle = presentation.subtitle
             contentDescription = "$GUARDIAN_TILE_LABEL，${presentation.subtitle}"
-            state = if (presentation.active) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+            state = when {
+                !presentation.available -> Tile.STATE_UNAVAILABLE
+                presentation.active -> Tile.STATE_ACTIVE
+                else -> Tile.STATE_INACTIVE
+            }
             updateTile()
         }
     }

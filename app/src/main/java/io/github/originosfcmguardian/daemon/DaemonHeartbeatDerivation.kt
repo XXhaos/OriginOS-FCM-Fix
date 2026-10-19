@@ -275,6 +275,21 @@ internal class DaemonBundledHeartbeatDerivation(
     private val bootId: String,
     private val elapsed: () -> Long,
 ) : DaemonBundledHeartbeatPort {
+    override fun renewRevoked(record: DaemonControlRecord, sample: GmsConnectionObservation.Sample,
+        closeOriginal: (DaemonProtectionRootSnapshot) -> DaemonHeartbeatConfirmationClosure?): HeartbeatSnapshot? = try {
+        val before = root.snapshot()
+        val observedAt = elapsed()
+        val enabledAt = DaemonHeartbeatDerivation.masterEnabledAt(before)
+        if (before.control != record || enabledAt == null ||
+            daemonHeartbeatRenewalCandidate(before, sample, bootId, observedAt, observedAt, 8_000)
+                ?.callerIdentity?.uid != guardian.identity.uid ||
+            environment.read(guardian, bootId, enabledAt) != DaemonOwnerEnvironmentStatus.READY) null
+        else {
+            val closure = closeOriginal(before)
+            if (closure == null) null else owner.renewRevokedHeartbeat(root, record, before.dataRevision,
+                closure, sample, bootId, observedAt)
+        }
+    } catch (_: Exception) { null }
     override fun rebindRecovery(record: DaemonControlRecord, sample: GmsConnectionObservation.Sample): Boolean = try {
         val before = root.snapshot()
         val enabledAt = DaemonHeartbeatDerivation.masterEnabledAt(before)

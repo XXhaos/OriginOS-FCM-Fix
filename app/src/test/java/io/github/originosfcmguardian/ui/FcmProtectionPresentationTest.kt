@@ -13,7 +13,7 @@ class FcmProtectionPresentationTest {
     @Test fun `waiting maintenance partial reboot and pending stop remain honest`() {
         assertEquals("等待连接", fcmProtectionHeadline(FcmProtectionUiState(
             configured = true, maintenance = FcmMaintenanceState.WAITING_CONNECTED)))
-        assertEquals("需要重新确认", fcmProtectionHeadline(FcmProtectionUiState(
+        assertEquals("FCM 保护暂不可用", fcmProtectionHeadline(FcmProtectionUiState(
             configured = true, requiresConfirmation = true, maintenance = FcmMaintenanceState.ACTIVE)))
         assertEquals("停止待确认", fcmProtectionHeadline(FcmProtectionUiState(
             configured = false, maintenance = FcmMaintenanceState.STOP_PENDING)))
@@ -23,8 +23,10 @@ class FcmProtectionPresentationTest {
         assertEquals("处理中…", fcmProtectionHeadline(FcmProtectionUiState(busy = true)))
         assertEquals("等待启动", fcmProtectionHeadline(FcmProtectionUiState(
             configured = true, maintenance = FcmMaintenanceState.WAITING_HOST)))
-        assertTrue(fcmProtectionGuidance(FcmProtectionUiState(requiresConfirmation = true))
-            .contains("请重新确认"))
+        assertEquals("FCM 保护暂不可用。", fcmProtectionGuidance(FcmProtectionUiState(
+            configured = true, requiresConfirmation = true)))
+        assertFalse(fcmProtectionGuidance(FcmProtectionUiState(requiresConfirmation = true))
+            .contains("重新确认"))
         assertTrue(fcmProtectionGuidance(FcmProtectionUiState()).isEmpty())
     }
 

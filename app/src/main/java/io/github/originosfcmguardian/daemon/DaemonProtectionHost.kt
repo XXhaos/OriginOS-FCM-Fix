@@ -240,7 +240,8 @@ internal class DaemonProtectionHost(
             val ready = if (actualCommand is DaemonProtectionCommand.FcmOn)
                 runCatching(recoveryReady).getOrDefault(false) else false
             val context = DaemonControlCommandContext(clock, fingerprint(), elapsed(), explicitConfirmation = true,
-                fcmRecoveryReady = ready)
+                fcmRecoveryReady = ready, fcmHeartbeatClosure = if (actualCommand is DaemonProtectionCommand.FcmOn)
+                    live.fcm.confirmationClosure(snapshot) else null)
             if (actualCommand == DaemonProtectionCommand.MasterOff && expected.mode == DaemonControlMode.PREPARED)
                 return stagePreparedMasterOff(caller, live, snapshot, requestId, context, challengeVersion)
             val ordinary = planner.plan(snapshot, expected, requestId, actualCommand, context) ?: return null

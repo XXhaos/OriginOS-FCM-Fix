@@ -153,14 +153,22 @@ function Get-GuardianDaemonEvidence {
         $result.cpuSingleCorePercent = Read-DaemonNumber $Value.cpuSingleCorePercent $false 0 ([long]::MaxValue) $false
         [pscustomobject]$result
     }
+    function Read-DaemonScope($Value, [string]$Expected) {
+        if ($null -eq $Value) { return $null }
+        if ($Value -isnot [string] -or $Value -cne $Expected) { throw 'Invalid daemon evidence scope' }
+        $Value
+    }
     $output = [ordered]@{
         availability = $availability
         collectionScope = 'GUARDIAN_PRIVILEGED_DAEMON_HISTORY'
-        generatedAtEpochMillis = $null; currentSession = $null; generation = $null
+        generatedAtEpochMillis = $null; generatedElapsedMillis = $null; currentSession = $null; generation = $null
         retainedSessionCount = $null; retainedSampleCount = $null
         evictedSessions = $null; evictedSamples = $null; evictedEvents = $null
         skippedSamples = $null; failedOperations = $null; unknownIntervals = $null
         sessions = @(); timeBuckets = @(); omittedTimeBuckets = $null; recentSamples = @()
+        events = $null; omittedRawSamples = $null
+        sourceCpuScope = $null; batteryScope = $null; capacityScope = $null
+        snapshotScope = $null; unknownIntervalScope = $null
         daemonTerminationCount = $null
         terminationAttribution = 'UNKNOWN_END_OR_MISSING_NORMAL_END_DOES_NOT_PROVE_KILL'
         cpuScope = 'DAEMON_PROCESS_SINGLE_CORE_PERCENT_NOT_SYSTEM_CPU_OR_BATTERY_DRAIN'
@@ -172,18 +180,29 @@ function Get-GuardianDaemonEvidence {
     $sessions = @(if ($null -ne $section.sessions) { $section.sessions })
     $buckets = @(if ($null -ne $section.timeBuckets) { $section.timeBuckets })
     $samples = @(if ($null -ne $section.recentSamples) { $section.recentSamples })
-    if ($sessions.Count -gt 32 -or $buckets.Count -gt 168 -or $samples.Count -gt 16) { throw 'Daemon preview limit exceeded' }
+    $daemonEvents = @(if ($null -ne $section.events) { $section.events })
+    if ($sessions.Count -gt 32 -or $buckets.Count -gt 168 -or $samples.Count -gt 16 -or $daemonEvents.Count -gt 256) { throw 'Daemon preview limit exceeded' }
     if ($availability -ne 'AVAILABLE') { return [pscustomobject]$output }
     if ($null -eq $section.sessions -or $null -eq $section.timeBuckets -or $null -eq $section.recentSamples) {
         throw 'Missing available daemon history'
     }
     $output.generatedAtEpochMillis = Read-DaemonNumber $section.generatedAtEpochMillis $true 1
+    $output.generatedElapsedMillis = Read-DaemonNumber $section.generatedElapsedMillis
+    $output.sourceCpuScope = Read-DaemonScope $section.cpuScope 'SAME_HOST_SESSION_PROCESS_CPU_EXCLUDES_CHILDREN_GMS_AND_RADIO'
+    $output.batteryScope = Read-DaemonScope $section.batteryScope 'WHOLE_PHONE_CONTEXT_NOT_GUARDIAN_ENERGY'
+    $output.capacityScope = Read-DaemonScope $section.capacityScope 'COUNT_BOUND_NOT_SEVEN_DAY_TTL'
+    $output.snapshotScope = Read-DaemonScope $section.snapshotScope 'INDEPENDENT_DIAGNOSTIC_SNAPSHOT_NOT_CONTROL_TRANSACTION'
+    $output.unknownIntervalScope = Read-DaemonScope $section.unknownIntervalScope 'UNSETTLED_SESSIONS_OR_POLL_GAPS_NOT_CONFIRMED_KILLS'
     $output.currentSession = Read-DaemonText $section.currentSession $false
     $output.generation = Read-DaemonNumber $section.generation $true
     $output.retainedSessionCount = Read-DaemonNumber $section.retainedSessionCount $true 0 32
     $output.retainedSampleCount = Read-DaemonNumber $section.retainedSampleCount $true 0 2016
     if ($output.retainedSessionCount -ne $sessions.Count -or $samples.Count -gt $output.retainedSampleCount) {
         throw 'Daemon retained count mismatch'
+    }
+    $output.omittedRawSamples = Read-DaemonNumber $section.omittedRawSamples $false 0 2016
+    if ($null -ne $output.omittedRawSamples -and $output.omittedRawSamples -ne $output.retainedSampleCount - $samples.Count) {
+        throw 'Daemon sample omission count mismatch'
     }
     foreach ($name in @('evictedSessions','evictedSamples','evictedEvents','skippedSamples','failedOperations','unknownIntervals','omittedTimeBuckets')) {
         $output[$name] = Read-DaemonNumber $section.$name $true
@@ -217,6 +236,18 @@ function Get-GuardianDaemonEvidence {
         [pscustomobject]$entry
     })
     if ($null -ne $output.currentSession -and -not $knownSessions.ContainsKey($output.currentSession)) { throw 'Unknown current daemon session' }
+    if ($null -ne $section.events) {
+        $output.events = @(foreach ($event in $daemonEvents) {
+            $id = Read-DaemonText $event.session
+            if (-not $knownSessions.ContainsKey($id) -or $event.state -cnotin @('BEGIN','READY','OFF','WAITING','CLOSING','NORMAL_END','UNKNOWN_END')) {
+                throw 'Invalid daemon event identity/state'
+            }
+            [pscustomobject]@{ session = $id
+                atEpochMillis = Read-DaemonNumber $event.atEpochMillis $true 1
+                elapsedMillis = Read-DaemonNumber $event.elapsedMillis $true
+                state = $event.state }
+        })
+    }
     $bucketKeys = @{}
     $output.timeBuckets = @(foreach ($bucket in $buckets) {
         $id = Read-DaemonText $bucket.session

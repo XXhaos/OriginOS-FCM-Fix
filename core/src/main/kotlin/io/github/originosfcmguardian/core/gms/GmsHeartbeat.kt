@@ -6,6 +6,8 @@ enum class GmsHeartbeatReason {
     OBSERVATION_UNKNOWN, REPORTED_DISCONNECTED, STALE_OBSERVATION, BUSY, TIMED_OUT, CANCELLED,
     BRIDGE_UNAVAILABLE, COMMAND_ACCEPTED, COMMAND_FAILED, OUTPUT_INCOMPLETE, MALFORMED_RESPONSE,
     SESSION_REVOKED, INTERVAL_NOT_ELAPSED, DUPLICATE_ATTEMPT, CALLER_UNAVAILABLE,
+    /** The external execution fence declined before dispatch; fresh checks may retry later. */
+    EXECUTION_NOT_READY,
 }
 
 /** Request outcome only: REQUESTED never asserts receiver delivery, protocol ACK or repair. */

@@ -36,6 +36,8 @@ import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
 import io.github.originosfcmguardian.autoprotection.ProtectionNotificationVisibility
 import io.github.originosfcmguardian.protection.ReadSessionCoordinator
 import io.github.originosfcmguardian.daemon.DaemonAppRuntime
+import io.github.originosfcmguardian.daemon.DaemonFcmCommandOutcome
+import io.github.originosfcmguardian.daemon.DaemonFcmCommandReason
 import io.github.originosfcmguardian.daemon.DaemonUiSnapshot
 import io.github.originosfcmguardian.diagnostics.CombinedDiagnosticExportResult
 import io.github.originosfcmguardian.diagnostics.DiagnosticEnvironment
@@ -53,13 +55,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 data class HomeUiState(
@@ -189,7 +189,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun requestFcmProtection() {
-        if (_uiState.value.fcmProtection.busy || _uiState.value.gmsAutoHeartbeat.stopPending) return
+        if (_uiState.value.fcmProtection.configured || _uiState.value.fcmProtection.busy ||
+            _uiState.value.gmsAutoHeartbeat.stopPending) return
         _uiState.update { it.copy(fcmProtectionConfirmation = true) }
     }
 
@@ -199,17 +200,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (!recoveryUiActive || state.pushProtectionBusy || state.automaticProtection.busy ||
             state.fcmProtection.busy || state.automaticProtection.revocationSaveFailed) return
         _uiState.update { it.copy(pushProtectionMessage = null) }
-        if (!state.fcmProtection.configured || state.fcmProtection.requiresConfirmation) {
-            requestFcmProtection()
-        } else {
-            // Existing FCM consent follows the existing master host on its own.
-            requestAutomaticProtection()
+        when (pushProtectionEnableAction(state)) {
+            PushProtectionEnableAction.INITIAL_FCM_CONFIRMATION -> requestFcmProtection()
+            PushProtectionEnableAction.ENABLE_MASTER -> requestAutomaticProtection()
+            PushProtectionEnableAction.NONE -> Unit
         }
     }
 
     fun confirmPushProtection() {
         if (!_uiState.value.fcmProtectionConfirmation || !recoveryUiActive || pushProtectionJob?.isActive == true) return
         dismissFcmProtection()
+        if (_uiState.value.fcmProtection.configured) {
+            if (!_uiState.value.automaticProtection.masterEnabled) requestAutomaticProtection()
+            return
+        }
         val action = ++pushProtectionAction
         _uiState.update { it.copy(pushProtectionBusy = true, pushProtectionMessage = null) }
         pushProtectionJob = viewModelScope.launch {
@@ -231,15 +235,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         "请先在应用页选择需要保护的应用。" else "等待 Shizuku 和保护服务就绪后，请完成开启。") }
                     return@launch
                 }
-                if (host.fcmProtection.configured && !host.fcmProtection.requiresConfirmation) return@launch
+                if (host.fcmProtection.configured) return@launch
                 if (remoteOwned()) {
-                    DaemonAppRuntime.enableFcm(getApplication())
-                    val completed = withTimeoutOrNull(30_000) {
-                        uiState.first { value -> !value.fcmProtection.busy &&
-                            (value.fcmProtection.configured && !value.fcmProtection.requiresConfirmation ||
-                                value.fcmProtection.confirmationFailure != null || value.fcmProtection.storageBlocked) }
+                    val completed = DaemonAppRuntime.enableFcm(getApplication()).await()
+                    coroutineContext.ensureActive()
+                    if (action != pushProtectionAction || !recoveryUiActive) return@launch
+                    val message = if (_uiState.value.fcmProtection.configured && completed.outcome != DaemonFcmCommandOutcome.APPLIED)
+                        "FCM 保护暂不可用，请查看保护状态。" else when (completed.outcome) {
+                        DaemonFcmCommandOutcome.APPLIED -> null
+                        DaemonFcmCommandOutcome.REJECTED -> if (completed.reason == DaemonFcmCommandReason.STOP_REQUESTED)
+                            "已取消开启，请查看关闭结果。" else "此次开启未受理，请稍后重新确认。"
+                        DaemonFcmCommandOutcome.FAILED -> "此次开启未完成，请检查连接和保护状态后重新确认。"
+                        DaemonFcmCommandOutcome.UNKNOWN -> "此次开启结果暂无法确认，请刷新保护状态后再操作。"
                     }
-                    if (completed == null) _uiState.update { it.copy(pushProtectionMessage = "正在接续保护，请稍后查看。") }
+                    _uiState.update { it.copy(pushProtectionMessage = message) }
                 } else {
                     withContext(Dispatchers.IO) {
                         io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.confirm(getApplication())
@@ -270,10 +279,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun dismissFcmProtection() { _uiState.update { it.copy(fcmProtectionConfirmation = false) } }
     fun confirmFcmProtection() {
-        if (!_uiState.value.fcmProtectionConfirmation) return
-        dismissFcmProtection()
-        if (remoteOwned()) { DaemonAppRuntime.enableFcm(getApplication()); return }
-        viewModelScope.launch(Dispatchers.IO) { io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.confirm(getApplication()) }
+        confirmPushProtection()
     }
     fun disableFcmProtection() {
         dismissFcmProtection()
@@ -348,10 +354,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (!remoteOwned()) io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.initialize(application)
         viewModelScope.launch {
             io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.state.collectLatest { snapshot ->
-                if (!remoteOwned()) _uiState.update { it.copy(fcmProtection = snapshot) }
+                if (!remoteOwned()) _uiState.update { it.copy(fcmProtection = snapshot,
+                    fcmProtectionConfirmation = it.fcmProtectionConfirmation && !snapshot.configured,
+                    pushProtectionMessage = it.pushProtectionMessage.takeUnless { snapshot.configured }) }
                 else if (DaemonAppRuntime.state.value == null) _uiState.update { it.copy(fcmProtection = snapshot.copy(
                     maintenance = io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState.WAITING_HOST,
-                    recoveryReady = false, detail = "等待保护服务")) }
+                    recoveryReady = false, detail = "等待保护服务"),
+                    fcmProtectionConfirmation = it.fcmProtectionConfirmation && !snapshot.configured,
+                    pushProtectionMessage = it.pushProtectionMessage.takeUnless { snapshot.configured }) }
             }
         }
         viewModelScope.launch {
@@ -439,6 +449,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(enabled = false, busy = false, savedAuthorization = false, waitingForPrivilege = false)
                 }) else snapshot.automatic
             current.copy(automaticProtectionFromDaemon = true, automaticProtection = automatic, fcmProtection = snapshot.fcm,
+                fcmProtectionConfirmation = current.fcmProtectionConfirmation && !snapshot.fcm.configured,
+                pushProtectionMessage = current.pushProtectionMessage.takeUnless { snapshot.fcm.configured },
                 gmsAutoHeartbeat = snapshot.heartbeatUi, fcmRecovery = snapshot.recoveryUi,
                 selectedTargets = targets,
                 targetSelectionLoadState = if (snapshot.configurationAvailable) HomeSourceLoadState.LOADED else HomeSourceLoadState.FAILED,

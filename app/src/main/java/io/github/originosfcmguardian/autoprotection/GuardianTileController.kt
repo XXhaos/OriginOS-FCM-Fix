@@ -54,7 +54,11 @@ internal fun guardianTileMayRestore(result: StartupProbeResult): Boolean {
         result.leases.containsAll(invalid) && result.leases.any { it !in invalid && it.consent.restartConsented() }
 }
 
-internal data class GuardianTilePresentation(val active: Boolean, val subtitle: String)
+internal data class GuardianTilePresentation(
+    val active: Boolean,
+    val subtitle: String,
+    val available: Boolean = true,
+)
 
 internal fun guardianTilePresentation(
     runtime: AutomaticProtectionState,
