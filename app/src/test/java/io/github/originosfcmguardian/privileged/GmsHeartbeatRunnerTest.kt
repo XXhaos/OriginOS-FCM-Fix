@@ -70,6 +70,42 @@ class GmsHeartbeatRunnerTest {
             finally { runner.close() }
         }
     }
+    @Test fun rotatedGoogleSignerCanPassFreshFinalIdentityCheck() {
+        val port = Port().apply {
+            identity = identity.copy(signerSha256 = "b".repeat(64),
+                signingCertificateHistorySha256 = listOf(FcmRecoveryPolicy.SIGNER, "b".repeat(64)))
+        }
+        var launches = 0
+        val runner = GmsHeartbeatRunner({ port }, { launches++; Child(accepted) })
+        try {
+            assertEquals(GmsHeartbeatStatus.REQUESTED, runner.request(1) { false }.status)
+            assertEquals(1, launches)
+            assertEquals(3, port.reads)
+        } finally { runner.close() }
+    }
+
+    @Test fun finalGoogleProofOrInstallationTupleDriftNeverLaunches() {
+        val mutations = listOf<(GmsPackageIdentity) -> GmsPackageIdentity>(
+            { it.copy(packageName = "other.pkg") }, { it.copy(applicationPackageName = "other.pkg") },
+            { it.copy(uid = it.uid + 1) }, { it.copy(versionCode = it.versionCode + 1) },
+            { it.copy(firstInstallTime = it.firstInstallTime + 1) }, { it.copy(lastUpdateTime = it.lastUpdateTime + 1) },
+            { it.copy(signingCertificateHistorySha256 = null) }, { it.copy(hasMultipleSigners = true) },
+            { it.copy(signingCertificateHistorySha256 = listOf(FcmRecoveryPolicy.SIGNER)) },
+            { it.copy(signerSha256 = "c".repeat(64)) })
+        for (mutation in mutations) {
+            val port = Port().apply {
+                identity = identity.copy(signerSha256 = "b".repeat(64),
+                    signingCertificateHistorySha256 = listOf(FcmRecoveryPolicy.SIGNER, "b".repeat(64)))
+                identityRead = { if (reads == 3) identity = mutation(identity) }
+            }
+            var launches = 0
+            val runner = GmsHeartbeatRunner({ port }, { launches++; Child(accepted) })
+            try {
+                assertEquals(GmsHeartbeatReason.IDENTITY_CHANGED, runner.request(1) { false }.reason)
+                assertEquals(0, launches)
+            } finally { runner.close() }
+        }
+    }
     @Test fun cancellationBeforeDispatchIsUnsentButAfterLaunchIntentIsUnknown() {
         val runner = GmsHeartbeatRunner({ Port() }, { error("must not launch") })
         try { assertEquals(GmsHeartbeatStatus.NOT_SENT, runner.request(1) { true }.status) } finally { runner.close() }

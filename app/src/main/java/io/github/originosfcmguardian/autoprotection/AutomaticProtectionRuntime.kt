@@ -309,7 +309,7 @@ object AutomaticProtectionRuntime {
                         else -> {
                             val packageProbe = TargetPackageProbe(app)
                             val packageRead = StartupTargetReader.read(listOf(StartupPackageInput(selected, true))) { input ->
-                                StartupPackageEvidence(packageProbe.identity(input.identity.packageName),
+                                StartupPackageEvidence(packageProbe.identity(input.identity),
                                     packageProbe.isRecoveryCandidate(input.identity))
                             }
                             when (packageRead) {
@@ -489,7 +489,7 @@ object AutomaticProtectionRuntime {
                     val packageInputs = candidates.map { StartupPackageInput(
                         it.identity.copy(signerSha256 = it.identity.signerSha256.toList()), it !is TargetConsent.Legacy) }
                     requireMasterTargetEvidence(StartupTargetReader.read(packageInputs) { input ->
-                        StartupPackageEvidence(packageProbe.identity(input.identity.packageName),
+                        StartupPackageEvidence(packageProbe.identity(input.identity),
                             !input.requiresQualification || packageProbe.isRecoveryCandidate(input.identity))
                     }, candidates)
                     check(current())

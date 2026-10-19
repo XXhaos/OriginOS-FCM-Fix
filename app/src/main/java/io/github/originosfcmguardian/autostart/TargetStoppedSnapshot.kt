@@ -19,7 +19,11 @@ data class TargetStoppedSnapshot(
     }
 }
 
-internal data class TargetPackageSnapshot(val identity: SelectedTargetIdentity, val stopped: Boolean)
+internal data class TargetPackageSnapshot(
+    val identity: SelectedTargetIdentity,
+    val stopped: Boolean,
+    val signing: TargetSigningEvidence? = null,
+)
 
 /** Both reads bind the flag to the full installation identity. This is not continuous observation. */
 internal fun readTargetStoppedSnapshot(
@@ -30,9 +34,12 @@ internal fun readTargetStoppedSnapshot(
     fun unavailable() = TargetStoppedSnapshot(TargetStoppedStatus.UNKNOWN, now())
     return try {
         val first = read() ?: return unavailable()
-        if (first.identity != expected) return TargetStoppedSnapshot(TargetStoppedStatus.IDENTITY_CHANGED, now())
         val second = read() ?: return unavailable()
-        if (second.identity != expected) return TargetStoppedSnapshot(TargetStoppedStatus.IDENTITY_CHANGED, now())
+        // Compare raw current identities before projecting either read to an older baseline.
+        if (first.identity != second.identity || first.identityFor(expected) != expected ||
+            second.identityFor(expected) != expected) {
+            return TargetStoppedSnapshot(TargetStoppedStatus.IDENTITY_CHANGED, now())
+        }
         TargetStoppedSnapshot(
             if (second.stopped) TargetStoppedStatus.STOPPED else TargetStoppedStatus.NOT_STOPPED,
             now(),

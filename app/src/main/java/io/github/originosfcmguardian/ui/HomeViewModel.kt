@@ -428,7 +428,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val labels = if (snapshot.configurationAvailable) withContext(Dispatchers.IO) {
             snapshot.selectedIdentities.map { stored ->
                 Triple(stored, runCatching { targetProbe.label(stored.packageName) }.getOrDefault(stored.packageName),
-                    targetProbe.identity(stored.packageName))
+                    targetProbe.identity(stored))
             }
         } else null
         if (DaemonAppRuntime.state.value !== snapshot) return
@@ -984,7 +984,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val expectedIdentity = app.identity ?: return@launch
             val identity = probeAppProtectionConfirmation(expectedIdentity,
-                identity = { withContext(Dispatchers.IO) { targetProbe.identity(packageName) } },
+                identity = { withContext(Dispatchers.IO) { targetProbe.identity(expectedIdentity) } },
                 qualified = { withContext(Dispatchers.IO) { targetProbe.isRecoveryCandidate(it) } },
                 current = { appProtectionRequestGate.current(token) && recoveryUiActive })
             if (!appProtectionRequestGate.current(token) || !recoveryUiActive) return@launch
@@ -1014,7 +1014,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (remoteOwned()) {
             viewModelScope.launch {
                 val fresh = withContext(Dispatchers.IO) {
-                    targetProbe.identity(identity.packageName) == identity && targetProbe.isRecoveryCandidate(identity)
+                    targetProbe.identity(identity) == identity && targetProbe.isRecoveryCandidate(identity)
                 }
                 if (!appProtectionRequestGate.current(token)) return@launch
                 val ready = fresh && recoveryUiActive && appProtectionPrerequisites(_uiState.value, app)
@@ -1027,7 +1027,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val prepared = runCatching {
                 prepareAppProtectionIdentity(identity.packageName, identity,
-                    identity = { withContext(Dispatchers.IO) { targetProbe.identity(identity.packageName) } },
+                    identity = { withContext(Dispatchers.IO) { targetProbe.identity(identity) } },
                     qualified = { withContext(Dispatchers.IO) { targetProbe.isRecoveryCandidate(it) } },
                     selected = { withContext(Dispatchers.IO) { targetStore.load() } },
                     authorized = { _uiState.value.automaticProtection.configuredIdentities },
@@ -1041,7 +1041,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             if (!appProtectionRequestGate.current(token)) return@launch
             val ready = prepared.getOrNull() == identity && recoveryUiActive &&
                 canEnableTargetAutomaticProtection(_uiState.value, identity) &&
-                withContext(Dispatchers.IO) { targetProbe.identity(identity.packageName) == identity && targetProbe.isRecoveryCandidate(identity) }
+                withContext(Dispatchers.IO) { targetProbe.identity(identity) == identity && targetProbe.isRecoveryCandidate(identity) }
             if (!appProtectionRequestGate.current(token)) return@launch
             dismissAutomaticProtection()
             if (ready && recoveryUiActive && canEnableTargetAutomaticProtection(_uiState.value, identity)) {
@@ -1061,10 +1061,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (!preserve) _uiState.update(::beginVisibleAppsRefresh)
         visibleAppsRefreshJob = viewModelScope.launch {
             loadSelectedTargetsNow()
+            val baselineState = _uiState.value
+            val baselines = io.github.originosfcmguardian.autostart.uniqueTargetBaselines(
+                baselineState.selectedTargets.map { it.identity } + baselineState.automaticProtection.configuredIdentities)
             val result = runCatching { withContext(Dispatchers.IO) {
                 val inventory = targetProbe.userInstalledApps(emptySet())
                 inventory.candidates.map { candidate ->
-                    val identity = targetProbe.identity(candidate.packageName)
+                    val identity = baselines[candidate.packageName]?.let(targetProbe::identity)
+                        ?: targetProbe.identity(candidate.packageName)
                     VisibleProtectionApp(candidate.packageName, candidate.label, identity,
                         identity != null && targetProbe.isRecoveryCandidate(identity))
                 } to inventory.hiddenPreinstalledPackages
@@ -1109,7 +1113,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val loadedResult = withContext(Dispatchers.IO) {
             runCatching {
                 targetStore.load().map { stored ->
-                    Triple(stored, targetProbe.label(stored.packageName), targetProbe.identity(stored.packageName))
+                    Triple(stored, targetProbe.label(stored.packageName), targetProbe.identity(stored))
                 }
             }
         }

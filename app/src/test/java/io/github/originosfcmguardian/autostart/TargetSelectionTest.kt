@@ -21,13 +21,15 @@ class TargetSelectionTest {
         }
     }
 
-    @Test fun signerDigestsKeepSortedDeduplicationAndFreshIdentityValidation() {
+    @Test fun signerDigestsStaySortedAndRejectDuplicateOrInvalidFreshEvidence() {
         val certificates = listOf(byteArrayOf(0, 127, 128.toByte(), 255.toByte()), byteArrayOf(1, 2, 3))
         val expected = certificates.map { certificate -> MessageDigest.getInstance("SHA-256").digest(certificate)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) } }.sorted()
         val selected = targetPackageIdentity(identity.packageName, identity.packageName, identity.packageName,
-            identity.uid, identity.firstInstallTime, listOf(certificates[1], certificates[0], certificates[1]))
+            identity.uid, identity.firstInstallTime, listOf(certificates[1], certificates[0]))
         assertEquals(identity.copy(signerSha256 = expected), selected)
+        assertNull(targetPackageIdentity(identity.packageName, identity.packageName, identity.packageName,
+            identity.uid, identity.firstInstallTime, listOf(certificates[1], certificates[0], certificates[1])))
         assertNull(targetPackageIdentity(identity.packageName, "different.package", identity.packageName,
             identity.uid, identity.firstInstallTime, certificates))
     }

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import time
@@ -20,6 +19,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+
+import private_host_files as private_files
 
 
 API_ROOT = "https://fcm.googleapis.com/v1/projects"
@@ -159,40 +160,21 @@ def _json_line(record: Mapping[str, object]) -> bytes:
     return (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def create_intent_artifact(path: Path, record: Mapping[str, object]) -> None:
+def create_intent_artifact(path: Path, record: Mapping[str, object]) -> private_files.PrivateMarker:
     try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb", closefd=False) as stream:
-                stream.write(_json_line(record))
-                stream.flush()
-                os.fsync(stream.fileno())
-        finally:
-            os.close(descriptor)
-        parent_descriptor = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_descriptor)
-        finally:
-            os.close(parent_descriptor)
+        # Return only after the exclusive, private intent has been fully flushed.
+        # Keep this exact handle through the request and outcome; do not reopen a path.
+        return private_files.create_private_marker(path, _json_line(record))
     except FileExistsError:
         raise ProbeError("OUTPUT_ALREADY_EXISTS") from None
-    except (OSError, TypeError, ValueError):
+    except (private_files.PrivateFileError, OSError, TypeError, ValueError):
         raise ProbeError("INTENT_PERSIST_FAILED") from None
 
 
-def append_outcome(path: Path, record: Mapping[str, object]) -> None:
+def append_outcome(marker: private_files.PrivateMarker, record: Mapping[str, object]) -> None:
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND)
-        try:
-            with os.fdopen(descriptor, "ab", closefd=False) as stream:
-                stream.write(_json_line(record))
-                stream.flush()
-                os.fsync(stream.fileno())
-        finally:
-            os.close(descriptor)
-    except (OSError, TypeError, ValueError):
+        marker.append(_json_line(record))
+    except (private_files.PrivateFileError, OSError, TypeError, ValueError):
         raise ProbeError("OUTCOME_PERSIST_FAILED", exit_code=1) from None
 
 
@@ -317,49 +299,54 @@ def execute_send(
         "message": _sanitized_message(message),
         "single_attempt": True,
     }
-    create_intent_artifact(output, intent)
-
     encoded = json.dumps(message, separators=(",", ":")).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json; charset=utf-8",
     }
+    marker = create_intent_artifact(output, intent)
     try:
-        response = transport(
-            endpoint, headers, encoded, REQUEST_TIMEOUT_SECONDS, MAX_RESPONSE_BYTES
-        )
-    except Exception:
-        after_ms = clock()
-        outcome = {
-            "record_type": "OUTCOME",
-            "send_status": "SEND_OUTCOME_UNCERTAIN",
-            "delivery_status": "UNKNOWN",
-            "host_after_response_epoch_ms": after_ms,
-            "retry_performed": False,
-            "error_status": "TRANSPORT_ERROR",
-        }
         try:
-            append_outcome(output, outcome)
-        except ProbeError:
-            raise ProbeError(
-                "SEND_OUTCOME_UNCERTAIN_AND_OUTCOME_PERSIST_FAILED_NO_RETRY", exit_code=1
-            ) from None
-        raise ProbeError("SEND_OUTCOME_UNCERTAIN_NO_RETRY", exit_code=1) from None
+            response = transport(
+                endpoint, headers, encoded, REQUEST_TIMEOUT_SECONDS, MAX_RESPONSE_BYTES
+            )
+        except Exception:
+            after_ms = clock()
+            outcome = {
+                "record_type": "OUTCOME",
+                "send_status": "SEND_OUTCOME_UNCERTAIN",
+                "delivery_status": "UNKNOWN",
+                "host_after_response_epoch_ms": after_ms,
+                "retry_performed": False,
+                "error_status": "TRANSPORT_ERROR",
+            }
+            try:
+                append_outcome(marker, outcome)
+            except ProbeError:
+                raise ProbeError(
+                    "SEND_OUTCOME_UNCERTAIN_AND_OUTCOME_PERSIST_FAILED_NO_RETRY", exit_code=1
+                ) from None
+            raise ProbeError("SEND_OUTCOME_UNCERTAIN_NO_RETRY", exit_code=1) from None
 
-    after_ms = clock()
-    if 200 <= response.http_status < 300:
-        outcome = _accepted_outcome(response, after_ms, (device_token, access_token))
-    else:
-        outcome = _failure_outcome(response, after_ms, (device_token, access_token))
-    try:
-        append_outcome(output, outcome)
-    except ProbeError:
-        if outcome["send_status"] == "SENT_ACCEPTED":
-            code = "SEND_ACCEPTED_BUT_OUTCOME_PERSIST_FAILED"
+        after_ms = clock()
+        if 200 <= response.http_status < 300:
+            outcome = _accepted_outcome(response, after_ms, (device_token, access_token))
         else:
-            code = "SEND_OUTCOME_UNCERTAIN_AND_OUTCOME_PERSIST_FAILED_NO_RETRY"
-        raise ProbeError(code, exit_code=1) from None
-    return outcome
+            outcome = _failure_outcome(response, after_ms, (device_token, access_token))
+        try:
+            append_outcome(marker, outcome)
+        except ProbeError:
+            if outcome["send_status"] == "SENT_ACCEPTED":
+                code = "SEND_ACCEPTED_BUT_OUTCOME_PERSIST_FAILED"
+            else:
+                code = "SEND_OUTCOME_UNCERTAIN_AND_OUTCOME_PERSIST_FAILED_NO_RETRY"
+            raise ProbeError(code, exit_code=1) from None
+        return outcome
+    finally:
+        try:
+            marker.close()
+        except (private_files.PrivateFileError, OSError, TypeError, ValueError):
+            raise ProbeError("OUTPUT_CLOSE_FAILED_NO_RETRY", exit_code=1) from None
 
 
 def dry_run(*, project: str, test_id: str, priority: str, clock: Clock = epoch_ms) -> dict:

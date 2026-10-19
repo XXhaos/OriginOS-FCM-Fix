@@ -8,7 +8,6 @@ import android.content.pm.PackageManager
 import io.github.originosfcmguardian.core.GuardianAutostartRead
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import io.github.originosfcmguardian.core.isUserZeroTargetAppUid
-import java.security.MessageDigest
 
 internal const val MAX_TARGET_SELECTION_BYTES = 256 * 1024
 private val signerSha256Pattern = Regex("[0-9a-f]{64}")
@@ -223,6 +222,7 @@ class TargetSelectionStore internal constructor(
 internal data class RecoveryCandidatePackageEvidence(
     val identity: SelectedTargetIdentity?,
     val qualifications: RecoveryTargetQualifications,
+    val signing: TargetSigningEvidence? = null,
 )
 
 /** One fresh signed package read supplies both qualification and identity; no retained cache. */
@@ -233,7 +233,9 @@ internal fun readRecoveryCandidate(
 ): Boolean = runCatching {
     if (!isRecoveryTargetPackage(expected.packageName)) return@runCatching false
     val evidence = readPackage() ?: return@runCatching false
-    evidence.qualifications.eligible && evidence.identity == expected &&
+    evidence.qualifications.eligible && evidence.identity?.let {
+        targetSigningContinues(expected, it, evidence.signing)
+    } == true &&
         validTargetUidMembers(expected.packageName, readUidMembers(expected.uid))
 }.getOrDefault(false)
 
@@ -245,9 +247,7 @@ internal fun targetPackageIdentity(
     require(isSafeAndroidPackageName(requestedPackage) && packageName == requestedPackage &&
         applicationPackageName == requestedPackage)
     require(isUserZeroTargetAppUid(uid) && firstInstallTime > 0)
-    val digests = requireNotNull(certificates).map { certificate ->
-        lowerHexDigest(MessageDigest.getInstance("SHA-256").digest(certificate))
-    }.distinct().sorted()
+    val digests = requireNotNull(targetCertificateDigests(certificates, MAX_TARGET_CURRENT_SIGNERS))
     SelectedTargetIdentity(requestedPackage, uid, firstInstallTime, digests)
 }.getOrNull()
 
@@ -262,8 +262,8 @@ class TargetPackageProbe(private val context: Context) {
             app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
             app.flags and ApplicationInfo.FLAG_PERSISTENT != 0,
         )
-        RecoveryCandidatePackageEvidence(
-            if (qualifications.eligible) packageSnapshot(expected.packageName, info)?.identity else null, qualifications)
+        val snapshot = if (qualifications.eligible) packageSnapshot(expected.packageName, info) else null
+        RecoveryCandidatePackageEvidence(snapshot?.identity, qualifications, snapshot?.signing)
     }, { uid -> context.packageManager.getPackagesForUid(uid)?.toList() })
 
     /** Kept for existing selection callers; candidates now include apps without a launcher. */
@@ -304,6 +304,9 @@ class TargetPackageProbe(private val context: Context) {
         return packageSnapshot(packageName)?.identity
     }
 
+    fun identity(expected: SelectedTargetIdentity): SelectedTargetIdentity? =
+        packageSnapshot(expected.packageName)?.identityFor(expected)
+
     fun stoppedSnapshot(expected: SelectedTargetIdentity): TargetStoppedSnapshot =
         readTargetStoppedSnapshot(expected, { packageSnapshot(expected.packageName) })
 
@@ -324,9 +327,16 @@ class TargetPackageProbe(private val context: Context) {
         if (info.packageName != packageName || app.packageName != packageName ||
             !isUserZeroTargetAppUid(app.uid) || info.firstInstallTime <= 0) return null
         val signing = info.signingInfo ?: return null
+        val currentSigners = signing.apkContentsSigners ?: return null
+        if (currentSigners.size !in 1..MAX_TARGET_CURRENT_SIGNERS) return null
         val identity = targetPackageIdentity(packageName, info.packageName, app.packageName, app.uid,
-            info.firstInstallTime, signing.apkContentsSigners.orEmpty().map { it.toByteArray() }) ?: return null
-        return TargetPackageSnapshot(identity, app.flags and ApplicationInfo.FLAG_STOPPED != 0)
+            info.firstInstallTime, currentSigners.map { it.toByteArray() }) ?: return null
+        val multiple = signing.hasMultipleSigners()
+        val history = if (!multiple) signing.signingCertificateHistory?.takeIf {
+            it.size in 1..MAX_TARGET_SIGNING_HISTORY
+        }?.map { it.toByteArray() } else null
+        return TargetPackageSnapshot(identity, app.flags and ApplicationInfo.FLAG_STOPPED != 0,
+            TargetSigningEvidence(multiple, targetCertificateDigests(history, MAX_TARGET_SIGNING_HISTORY)))
     }
 
     @Suppress("DEPRECATION")

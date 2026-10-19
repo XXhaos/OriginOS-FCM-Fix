@@ -1,6 +1,24 @@
 # OriginOS FCM Guardian
 
-## 当前版本：0.1.0／内部91（2026-10-19）
+## 当前版本：0.1.0／内部92（2026-10-19）
+
+已完成普通目标应用与GMS的合法单签名轮换兼容：只接受系统PM验证且有界的继承历史，
+先比较原始双读身份再保留原授权基准；不改身份相等语义、RPC或持久schema。GMS继续使用既有Google信任锚。
+12:16:53原签名正常覆盖安装，未卸载/清数据；1378项单测（1333 app＋45 core）零失败/错误/跳过，
+三类APK构建、lint 0E31W、两类产物门、PowerShell分析及独立Astra审查通过，无P1/P2。
+独立测试包实际A(v1)→B(v2)轮换获系统接受，当前签名改变、UID/firstInstall保留，App和shell均认可原基准；
+无关签名被拒绝，claims=0，无恢复写入。临时测试包和Guardian AndroidTest均已卸载并确认不存在。
+升级及轮换测试前后四类授权/选择/计数/FCM文件hash不变；随后正常Home OFF rev11→ON rev12获得ACK，
+原23项、124确认/高水位133/55日桶和首页6/6保留，原FCM父授权不变、无需再次确认。
+正常JSON v13报告137875字节及分析通过：核心READY、master enabled=true、FCM ACTIVE/recoveryReady=true，
+HB184/session存在，无pause/pending/block。instrumentation触发的系统停止门槛已按正常OFF→ON处理，未绕过。
+当前没有有限实现待办；日常存活/资源观察不阻断交付，实际Google证书轮换、OTA和所有设备未实测，不重跑旧故障矩阵。
+[签名继承与验证](docs/SIGNING_LINEAGE_COMPATIBILITY_V92.md)／[当前状态](docs/PROJECT_STATE.md)／[换电脑接续](START_HERE.md)。
+随后按用户要求完成Windows主机实验工具兼容：完整Python套件90项，89通过/1个符号链接权限跳过/零失败错误，
+严格私有目录、ACL、持有句柄和发送前落盘规则已核验；仅电脑端，不改变APK或日常保护。[使用说明](docs/HOST_TOOL_WINDOWS_COMPATIBILITY.md)。
+本次授权备份以实际Git refs为准；私钥、签名材料、APK和原始报告不入Git。Windows保持解锁，手机结束息屏。
+
+## v91自动续接记录（历史，2026-10-19）
 
 修复Google Play服务正常升级后，原FCM授权被旧目标身份阻断、维护停在待确认的问题。
 在当前Google签名、user0及非共享UID等资格重新核验后，以精确CAS续接已有授权；不改变父授权epoch，不需再次确认。

@@ -55,6 +55,43 @@ class GmsConnectionProbeTest {
             assertEquals(GmsUnknown.IDENTITY_CHANGED, reason(observe(port)))
         }
     }
+    @Test fun googleRotationCanonicalizesOnlyAfterRawIdentityIsStable() {
+        val anchor = FcmRecoveryPolicy.SIGNER
+        val rotated = identity.copy(signerSha256 = "b".repeat(64),
+            signingCertificateHistorySha256 = listOf(anchor, "b".repeat(64)))
+        val port = Port().apply { currentIdentity = rotated }
+        val sample = observe(port) as GmsConnectionObservation.Sample
+        assertEquals(anchor, sample.signerSha256)
+        assertEquals(rotated, port.currentIdentity)
+        assertEquals(sample, GmsObservationCodec.decode(GmsObservationCodec.encode(sample), 1))
+        assertFalse(GmsObservationCodec.encode(sample).contains("b".repeat(64)))
+
+        // Both installations are Google-anchored, but raw signer drift still discards the read.
+        val drift = Port().apply {
+            currentIdentity = identity.copy(signerSha256 = anchor)
+            afterSockets = { currentIdentity = rotated }
+        }
+        assertEquals(GmsUnknown.IDENTITY_CHANGED, reason(observe(drift)))
+        val historyDrift = Port().apply {
+            currentIdentity = rotated
+            afterSockets = { currentIdentity = rotated.copy(signingCertificateHistorySha256 =
+                listOf(anchor, "c".repeat(64), rotated.signerSha256)) }
+        }
+        assertEquals(GmsUnknown.IDENTITY_CHANGED, reason(observe(historyDrift)))
+    }
+
+    @Test fun unanchoredAndMultisignerHistoriesDoNotAcquireGoogleAuthority() {
+        val anchor = FcmRecoveryPolicy.SIGNER
+        val rotated = identity.copy(signerSha256 = "b".repeat(64))
+        listOf(rotated, rotated.copy(signingCertificateHistorySha256 = listOf("c".repeat(64), rotated.signerSha256)),
+            rotated.copy(signingCertificateHistorySha256 = listOf(anchor)),
+            rotated.copy(signingCertificateHistorySha256 = listOf(anchor, rotated.signerSha256), hasMultipleSigners = true)
+        ).forEach { current ->
+            val sample = observe(Port().apply { currentIdentity = current }) as GmsConnectionObservation.Sample
+            assertEquals(current.signerSha256, sample.signerSha256)
+            assertFalse(FcmRecoveryPolicy.qualified(sample, 900))
+        }
+    }
     @Test fun bootUserAndShellDriftDiscardsPositiveSockets() {
         listOf(environment.copy(currentUser = 10), environment.copy(serviceUid = 0),
             environment.copy(bootId = "87654321-1234-1234-1234-123456789abc")).forEach { drift ->

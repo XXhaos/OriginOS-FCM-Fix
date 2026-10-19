@@ -5,15 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import socket
-import stat
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+
+from private_host_files import PrivateFileError, create_private_marker, open_private_token
 
 
 ENDPOINT = "https://us-central1-fir-cloudmessaging-4e2cd.cloudfunctions.net/send"
@@ -58,85 +58,76 @@ def _marker_path(run_dir: Path, test_id: str) -> Path:
 
 
 def _safe_existing(marker: Path) -> dict:
+    file = None
     try:
-        value = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        file = open_private_token(marker, 16 * 1024)
+        value = json.loads(file.raw.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError()
+    except (OSError, PrivateFileError, UnicodeError, ValueError):
         raise SenderError("ATTEMPT_MARKER_EXISTS_UNREADABLE", 1) from None
-    allowed = {"status", "http", "messageId", "start", "end", "testId", "tokenDelete"}
-    return {key: value[key] for key in allowed if key in value} | {"existingAttempt": True}
+    finally:
+        if file is not None:
+            file.close()
+    result = {"existingAttempt": True, "status": "UNKNOWN"}
+    if value.get("status") in ("ATTEMPTING", "ACCEPTED", "REJECTED", "UNKNOWN"):
+        result["status"] = value["status"]
+    for key in ("http", "start", "end"):
+        item = value.get(key)
+        if item is None or (type(item) is int and 0 <= item <= 9_223_372_036_854_775_807):
+            result[key] = item
+    message_id = value.get("messageId")
+    result["messageId"] = message_id if isinstance(message_id, str) and MESSAGE_ID_RE.fullmatch(message_id) else None
+    if isinstance(value.get("testId"), str) and TEST_ID_RE.fullmatch(value["testId"]):
+        result["testId"] = value["testId"]
+    if value.get("tokenDelete") in ("DELETED", "IDENTITY_GUARD_REFUSED", "DELETE_FAILED"):
+        result["tokenDelete"] = value["tokenDelete"]
+    return result
 
 
-def _write_marker_exclusive(path: Path, record: Mapping[str, object]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+def _write_marker_exclusive(path: Path, record: Mapping[str, object]):
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        return create_private_marker(path, json.dumps(record, separators=(",", ":")).encode())
     except FileExistsError:
         raise SenderError("ATTEMPT_ALREADY_EXISTS") from None
+    except (OSError, PrivateFileError):
+        raise SenderError("ATTEMPT_PERSIST_FAILED") from None
+
+
+def _replace_marker(marker, record: Mapping[str, object]) -> None:
     try:
-        os.write(fd, json.dumps(record, separators=(",", ":")).encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    parent_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+        marker.replace(json.dumps(record, separators=(",", ":")).encode())
+    except (OSError, PrivateFileError):
+        raise SenderError("OUTCOME_PERSIST_FAILED", 1) from None
 
 
-def _replace_marker(path: Path, record: Mapping[str, object]) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
-    try:
-        os.write(fd, json.dumps(record, separators=(",", ":")).encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _open_token(token_file: Path, run_dir: Path) -> tuple[int, str, os.stat_result]:
+def _open_token(token_file: Path, run_dir: Path):
     if token_file.parent.resolve() != run_dir.resolve():
         raise SenderError("TOKEN_FILE_OUTSIDE_RUN_DIR")
     try:
-        before = token_file.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise SenderError("TOKEN_FILE_UNSAFE")
-        if stat.S_IMODE(before.st_mode) != 0o600:
-            raise SenderError("TOKEN_FILE_MODE_NOT_0600")
-        fd = os.open(token_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        current = os.fstat(fd)
-        if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
-            os.close(fd)
-            raise SenderError("TOKEN_FILE_CHANGED")
-        raw = os.read(fd, MAX_TOKEN_BYTES + 1)
-    except SenderError:
-        raise
+        file = open_private_token(token_file, MAX_TOKEN_BYTES)
+        raw = file.raw
+    except PrivateFileError as error:
+        code = "TOKEN_FILE_MODE_NOT_0600" if error.code == "TOKEN_FILE_MODE_NOT_0600" else "TOKEN_FILE_UNSAFE"
+        if error.code == "PRIVATE_FILE_TOO_LARGE":
+            code = "TOKEN_INVALID"
+        raise SenderError(code) from None
     except OSError:
         raise SenderError("TOKEN_FILE_UNREADABLE") from None
-    if len(raw) > MAX_TOKEN_BYTES:
-        os.close(fd)
-        raise SenderError("TOKEN_INVALID")
     try:
         token = raw.decode().rstrip("\r\n")
     except UnicodeDecodeError:
-        os.close(fd)
+        file.close()
         raise SenderError("TOKEN_INVALID") from None
     if not TOKEN_RE.fullmatch(token):
-        os.close(fd)
+        file.close()
         raise SenderError("TOKEN_INVALID")
-    return fd, token, current
+    return file, token
 
 
-def _consume_token(path: Path, fd: int, identity: os.stat_result) -> str:
-    try:
-        current = path.lstat()
-        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-            return "IDENTITY_GUARD_REFUSED"
-        path.unlink()
-        return "DELETED"
-    except OSError:
-        return "DELETE_FAILED"
-    finally:
-        os.close(fd)
+def _consume_token(file) -> str:
+    return {"CONSUMED": "DELETED", "TOKEN_PATH_CHANGED": "IDENTITY_GUARD_REFUSED",
+            "TOKEN_DELETE_FAILED": "DELETE_FAILED"}[file.consume()]
 
 
 def http_post(body: bytes) -> tuple[int, bytes]:
@@ -161,16 +152,19 @@ def send_once(*, token_file: Path, run_dir: Path, test_id: str,
     marker = _marker_path(run_dir, test_id)
     if marker.exists():
         return _safe_existing(marker)
-    fd, token, identity = _open_token(token_file, run_dir)
-    start = clock()
-    pending = {"status": "ATTEMPTING", "http": None, "messageId": None,
-               "start": start, "end": None, "testId": test_id}
+    token_handle, token = _open_token(token_file, run_dir)
     try:
-        _write_marker_exclusive(marker, pending)
+        start = clock()
+        pending = {"status": "ATTEMPTING", "http": None, "messageId": None,
+                   "start": start, "end": None, "testId": test_id}
+        marker_handle = _write_marker_exclusive(marker, pending)
     except SenderError as error:
-        os.close(fd)
+        token_handle.close()
         if error.code == "ATTEMPT_ALREADY_EXISTS":
             return _safe_existing(marker)
+        raise
+    except BaseException:
+        token_handle.close()
         raise
     record = dict(pending)
     try:
@@ -198,9 +192,15 @@ def send_once(*, token_file: Path, run_dir: Path, test_id: str,
     except (TimeoutError, socket.timeout, urllib.error.URLError, OSError, SenderError):
         record["status"] = "UNKNOWN"
     finally:
-        record["end"] = clock()
-        record["tokenDelete"] = _consume_token(token_file, fd, identity)
-        _replace_marker(marker, record)
+        try:
+            record["end"] = clock()
+        finally:
+            try:
+                record["tokenDelete"] = _consume_token(token_handle)
+                _replace_marker(marker_handle, record)
+            finally:
+                token_handle.close()
+                marker_handle.close()
     return record
 
 

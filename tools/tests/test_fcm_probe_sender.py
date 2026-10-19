@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +24,8 @@ ACCESS_TOKEN = "oauth-access-token-value"
 class FcmProbeSenderTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name) / "private-run"
+        sender.private_files.ensure_private_directory(self.root)
         self.token_file = self.root / "device-token.txt"
         self.auth_file = self.root / "access-token.txt"
         self.token_file.write_text(DEVICE_TOKEN + "\n", encoding="utf-8")
@@ -154,11 +156,22 @@ class FcmProbeSenderTest(unittest.TestCase):
     def test_single_attempt_and_intent_is_durable_before_transport(self):
         output = self.root / "ordered.jsonl"
         attempts = []
+        markers = []
+        real_create = sender.create_intent_artifact
+
+        def retain_marker(path, record):
+            marker = real_create(path, record)
+            markers.append(marker)
+            return marker
 
         def inspect_transport(_url, _headers, body, _timeout, _limit):
             attempts.append(1)
             self.assertTrue(output.exists())
-            self.assertEqual(0o600, os.stat(output).st_mode & 0o777)
+            marker = markers[0]
+            self.assertIsNotNone(marker.handle)
+            marker._validate()  # Actual descriptor/NTFS protected ACL check, not Windows mode bits.
+            if os.name == "posix":
+                self.assertEqual(0o600, os.stat(output).st_mode & 0o777)
             records = output.read_text(encoding="utf-8").splitlines()
             self.assertEqual(1, len(records))
             self.assertEqual("INTENT", json.loads(records[0])["record_type"])
@@ -168,16 +181,17 @@ class FcmProbeSenderTest(unittest.TestCase):
                 200, b'{"name":"projects/example-project/messages/abc123"}'
             )
 
-        outcome = sender.execute_send(
-            project="example-project",
-            token_file=self.token_file,
-            access_token_file=self.auth_file,
-            test_id="ordered_1",
-            priority="high",
-            output=output,
-            transport=inspect_transport,
-            clock=iter((3000, 3005)).__next__,
-        )
+        with mock.patch.object(sender, "create_intent_artifact", side_effect=retain_marker):
+            outcome = sender.execute_send(
+                project="example-project",
+                token_file=self.token_file,
+                access_token_file=self.auth_file,
+                test_id="ordered_1",
+                priority="high",
+                output=output,
+                transport=inspect_transport,
+                clock=iter((3000, 3005)).__next__,
+            )
         self.assertEqual([1], attempts)
         self.assertEqual("SENT_ACCEPTED", outcome["send_status"])
         self.assertEqual("UNKNOWN", outcome["delivery_status"])
@@ -185,6 +199,111 @@ class FcmProbeSenderTest(unittest.TestCase):
         self.assertEqual("HIGH", records[0]["message"]["android"]["priority"])
         self.assertEqual(3000, records[0]["host_before_request_epoch_ms"])
         self.assertEqual(3005, records[1]["host_after_response_epoch_ms"])
+        self.assertIsNone(markers[0].handle)
+        self.assertNotIn(b"\r", output.read_bytes())
+
+    def test_partial_intent_write_and_flush_failure_block_transport_and_keep_exclusive_marker(self):
+        for failure in ("partial_write", "flush"):
+            with self.subTest(failure=failure):
+                output = self.root / (failure + ".jsonl")
+                transport = mock.Mock()
+                if failure == "partial_write":
+                    def partial(marker, data):
+                        marker.append(data[:5])
+                        raise sender.private_files.PrivateFileError("PRIVATE_FILE_WRITE_FAILED")
+                    fault = mock.patch.object(sender.private_files.PrivateMarker, "replace", partial)
+                elif os.name == "nt":
+                    fault = mock.patch.object(sender.private_files._windows(), "flush", return_value=False)
+                else:
+                    fault = mock.patch.object(sender.private_files.os, "fsync", side_effect=OSError("private path"))
+                with fault, self.assertRaisesRegex(sender.ProbeError, "^INTENT_PERSIST_FAILED$"):
+                    sender.execute_send(
+                        project="example-project", token_file=self.token_file,
+                        access_token_file=self.auth_file, test_id="persist_failure",
+                        priority="normal", output=output, transport=transport, clock=lambda: 4000,
+                    )
+                transport.assert_not_called()
+                self.assertTrue(output.exists())
+                before = output.read_bytes()
+                self.assertTrue(before)
+                self.assertNotIn(DEVICE_TOKEN.encode(), before)
+                self.assertNotIn(ACCESS_TOKEN.encode(), before)
+                with self.assertRaisesRegex(sender.ProbeError, "^OUTPUT_ALREADY_EXISTS$"):
+                    sender.execute_send(
+                        project="example-project", token_file=self.token_file,
+                        access_token_file=self.auth_file, test_id="persist_failure",
+                        priority="normal", output=output, transport=transport, clock=lambda: 4000,
+                    )
+                transport.assert_not_called()
+                self.assertEqual(before, output.read_bytes())
+
+    def test_outcome_failure_closes_same_marker_and_never_retries(self):
+        for transport_error in (False, True):
+            with self.subTest(transport_error=transport_error):
+                output = self.root / ("outcome-%s.jsonl" % transport_error)
+                markers = []
+                real_create = sender.create_intent_artifact
+
+                def retain_marker(path, record):
+                    marker = real_create(path, record)
+                    markers.append(marker)
+                    return marker
+
+                transport = mock.Mock(side_effect=RuntimeError(ACCESS_TOKEN)) if transport_error else mock.Mock(
+                    return_value=sender.TransportResponse(200, b"{}"))
+                expected = "SEND_OUTCOME_UNCERTAIN_AND_OUTCOME_PERSIST_FAILED_NO_RETRY" if transport_error else \
+                    "SEND_ACCEPTED_BUT_OUTCOME_PERSIST_FAILED"
+                with mock.patch.object(sender, "create_intent_artifact", side_effect=retain_marker), \
+                    mock.patch.object(sender.private_files.PrivateMarker, "append", side_effect=
+                        sender.private_files.PrivateFileError("PRIVATE_FILE_FLUSH_FAILED")), \
+                    self.assertRaisesRegex(sender.ProbeError, "^" + expected + "$"):
+                    sender.execute_send(
+                        project="example-project", token_file=self.token_file,
+                        access_token_file=self.auth_file, test_id="outcome_failure",
+                        priority="normal", output=output, transport=transport,
+                        clock=iter((5000, 5001)).__next__,
+                    )
+                transport.assert_called_once()
+                self.assertIsNone(markers[0].handle)
+                records = output.read_bytes().splitlines()
+                self.assertEqual(1, len(records))
+                self.assertEqual("INTENT", json.loads(records[0])["record_type"])
+
+    def test_output_replacement_cannot_redirect_outcome_to_an_unverified_file(self):
+        output = self.root / "pinned.jsonl"
+        moved = self.root / "original.jsonl"
+        replacement = b"unrelated-user-data"
+        attempts = []
+        swapped = []
+
+        def transport(*_args):
+            attempts.append(1)
+            try:
+                output.rename(moved)
+            except PermissionError:
+                self.assertEqual("nt", os.name)  # Held NTFS handle denies rename/delete sharing.
+            else:
+                output.write_bytes(replacement)
+                swapped.append(True)
+            return sender.TransportResponse(200, b"{}")
+
+        try:
+            result = sender.execute_send(
+                project="example-project", token_file=self.token_file,
+                access_token_file=self.auth_file, test_id="pinned_output",
+                priority="normal", output=output, transport=transport,
+                clock=iter((5000, 5001)).__next__,
+            )
+        except sender.ProbeError as error:
+            self.assertTrue(swapped)
+            self.assertEqual("SEND_ACCEPTED_BUT_OUTCOME_PERSIST_FAILED", error.code)
+        else:
+            self.assertFalse(swapped)
+            self.assertEqual("SENT_ACCEPTED", result["send_status"])
+        self.assertEqual([1], attempts)
+        if swapped:
+            self.assertEqual(replacement, output.read_bytes())
+            self.assertEqual(1, len(moved.read_bytes().splitlines()))
 
     def test_error_status_cannot_echo_uppercase_secrets(self):
         for secret in ("PRIVATE_BEARER_SECRET", "INVALID_ARGUMENT"):
@@ -261,6 +380,7 @@ class FcmProbeSenderTest(unittest.TestCase):
 
         class RedirectServer(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 requests.append((self.path, self.headers.get("Authorization")))
                 if self.path.startswith("/initial-"):
                     redirect_status = int(self.path.rsplit("-", 1)[1])
@@ -288,17 +408,25 @@ class FcmProbeSenderTest(unittest.TestCase):
         thread.start()
         try:
             responses = []
-            for redirect_status in (301, 302, 303, 307, 308):
-                responses.append(sender.urllib_transport(
-                    f"http://127.0.0.1:{server.server_port}/initial-{redirect_status}",
-                    {
-                        "Authorization": f"Bearer {secret}",
-                        "Content-Type": "application/json",
-                    },
-                    b"{}",
-                    2.0,
-                    sender.MAX_RESPONSE_BYTES,
-                ))
+            real_build_opener = urllib.request.build_opener
+
+            def direct_opener(*handlers):
+                self.assertTrue(any(isinstance(handler, sender._RejectRedirectHandler) for handler in handlers))
+                return real_build_opener(urllib.request.ProxyHandler({}), *handlers)
+
+            # Test isolation only: real local HTTP and the production redirect handler remain.
+            with mock.patch.object(sender.urllib.request, "build_opener", side_effect=direct_opener):
+                for redirect_status in (301, 302, 303, 307, 308):
+                    responses.append(sender.urllib_transport(
+                        f"http://127.0.0.1:{server.server_port}/initial-{redirect_status}",
+                        {
+                            "Authorization": f"Bearer {secret}",
+                            "Content-Type": "application/json",
+                        },
+                        b"{}",
+                        2.0,
+                        sender.MAX_RESPONSE_BYTES,
+                    ))
         finally:
             server.shutdown()
             server.server_close()

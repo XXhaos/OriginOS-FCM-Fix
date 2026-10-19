@@ -5,6 +5,10 @@ import io.github.originosfcmguardian.autoprotection.AutomaticProtectionTargetSta
 import io.github.originosfcmguardian.autoprotection.waitingForNextAutomaticCheckState
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
+import io.github.originosfcmguardian.autostart.TargetPackageSnapshot
+import io.github.originosfcmguardian.autostart.TargetSigningEvidence
+import io.github.originosfcmguardian.autostart.identityFor
+import io.github.originosfcmguardian.autostart.uniqueTargetBaselines
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatusSnapshot
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
@@ -26,6 +30,23 @@ class AppsProtectionPresentationTest {
     private fun authority(vararg identities: SelectedTargetIdentity) = AutomaticProtectionState(masterEnabled = true, targets = identities.map {
         AutomaticProtectionTargetState(it, savedAuthorization = true, enabled = true)
     })
+
+    @Test fun rotatedInventoryRetainsOneRevocableProtectedRowAndOffDoesNotRecreateConsent() {
+        val raw = first.copy(signerSha256 = listOf("b".repeat(64)))
+        val sample = TargetPackageSnapshot(raw, false, TargetSigningEvidence(false, first.signerSha256 + raw.signerSha256))
+        val baselines = uniqueTargetBaselines(listOf(first, first))
+        val projected = sample.identityFor(baselines.getValue(first.packageName))
+        val state = ready.copy(visibleApps = listOf(firstApp.copy(identity = projected)),
+            selectedTargets = listOf(SelectedTargetUiState(first, "Zulu")), automaticProtection = authority(first))
+        val groups = protectionAppGroups(state, "")
+        assertEquals(1, groups.protected.size)
+        assertTrue(groups.protected.single().currentInstallation)
+        assertTrue(groups.all.isEmpty())
+        val off = state.copy(automaticProtection = AutomaticProtectionState())
+        assertTrue(protectionAppGroups(off, "").protected.isEmpty())
+        assertFalse(targetAutomaticProtectionState(off.automaticProtection, projected).savedAuthorization)
+        assertEquals(raw, sample.identity)
+    }
 
     @Test fun onlyExactCurrentSavedConsentIsProtectedAndRemainingAppsAreSorted() {
         val state = ready.copy(selectedTargets = listOf(SelectedTargetUiState(second, "Alpha")),

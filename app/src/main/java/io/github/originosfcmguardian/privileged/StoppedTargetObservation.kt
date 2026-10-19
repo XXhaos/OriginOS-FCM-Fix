@@ -6,6 +6,8 @@ import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.autostart.RecoveryTargetQualifications
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
 import io.github.originosfcmguardian.autostart.validTargetUidMembers
+import io.github.originosfcmguardian.autostart.TargetSigningEvidence
+import io.github.originosfcmguardian.autostart.targetSigningContinues
 import io.github.originosfcmguardian.autostart.hasVerifiedPackageUid as verifiedRecoveryPackageUid
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import java.security.MessageDigest
@@ -64,6 +66,7 @@ internal data class StoppedPackageFields(
     val currentSignerCertificates: List<ByteArray>?,
     val stopped: Boolean?,
     val qualifications: RecoveryTargetQualifications? = null,
+    val signing: TargetSigningEvidence? = null,
 )
 
 internal interface StoppedIdentityReadPort {
@@ -171,10 +174,13 @@ internal fun observeStoppedTarget(requestId: Long, expected: SelectedTargetIdent
         if (before.first != after.first) return unknown(StoppedObservationUnknown.IDENTITY_CHANGED)
         if (afterFields?.qualifications?.eligible != true) return unknown(StoppedObservationUnknown.INELIGIBLE_TARGET)
         if (!validTargetUidMembers(expected.packageName, owners)) return unknown(StoppedObservationUnknown.UID_OWNERSHIP_UNKNOWN)
-        if (after.first != expected) return unknown(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED)
+        if (!targetSigningContinues(expected, before.first, beforeFields?.signing) ||
+            !targetSigningContinues(expected, after.first, afterFields?.signing)) {
+            return unknown(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED)
+        }
         val timestamp = nowMillis()
         interruption()?.let { return unknown(it) }
-        StoppedTargetObservation.Known(requestId, after.first, after.second, owners?.size == 1, timestamp,
+        StoppedTargetObservation.Known(requestId, expected, after.second, owners?.size == 1, timestamp,
             fingerprint = requireNotNull(observedEnvironment?.fingerprint), qualifiedRecipient = true)
     } catch (_: Throwable) { unknown(interruption() ?: StoppedObservationUnknown.CAPABILITY_UNAVAILABLE) }
 }

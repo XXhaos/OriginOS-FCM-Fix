@@ -15,6 +15,8 @@ class FcmRecoveryRunnerTest {
         var uid = 10208
         var version = FcmRecoveryPolicy.VERSION
         var signer = FcmRecoveryPolicy.SIGNER
+        var signerHistory: List<String>? = null
+        var multipleSigners = false
         var senderReads = 0
         var loseSenderOnSecondRead = false
         var mcsQualified = true
@@ -25,7 +27,7 @@ class FcmRecoveryRunnerTest {
         var socketMatched = false
         override fun environment() = GmsProbeEnvironment(0, 2000, "12345678-1234-1234-1234-123456789abc")
         override fun gmsPackage() = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-            uid, version, 100, 900, signer)
+            uid, version, 100, 900, signer, signerHistory, multipleSigners)
         override fun packagesForUid(uid: Int) = listOf(if (uid == 10333) "io.github.originosfcmguardian" else GMS_OBSERVATION_PACKAGE)
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(socketCompleteness, socketMatched)
         override fun gcmService(interrupted: () -> Boolean) = GcmServiceSource(state,
@@ -190,6 +192,31 @@ class FcmRecoveryRunnerTest {
         port.signer = "a".repeat(64)
         assertEquals(FcmRecoveryStatus.NOT_SENT, request(binding(port)).status)
         assertEquals(1, launches)
+    }
+    @Test fun `both recovery operations admit anchored rotation but never missing or multisigner proof`() {
+        for (operation in FcmRecoveryOperation.entries) {
+            val port = Port().apply {
+                signer = "b".repeat(64)
+                signerHistory = listOf(FcmRecoveryPolicy.SIGNER, signer)
+                if (operation == FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS)
+                    state = GcmConnectionState.REPORTED_DISCONNECTED
+            }
+            var launches = 0
+            fun request(): FcmRecoveryResult {
+                val runner = FcmRecoveryRunner({ port }, { launches++; Child() },
+                    mcsLaunch = { launches++; Child(true) })
+                return try { runner.request(1, 10333, binding(port), { true }, { false }, operation) }
+                finally { runner.close() }
+            }
+            assertEquals(FcmRecoveryStatus.REQUESTED, request().status)
+            assertEquals(2, if (operation == FcmRecoveryOperation.SERVICE_ABSENT_SEND) port.senderReads else port.mcsReads)
+            port.signerHistory = null
+            assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
+            port.signerHistory = listOf(FcmRecoveryPolicy.SIGNER, port.signer)
+            port.multipleSigners = true
+            assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
+            assertEquals(1, launches)
+        }
     }
     @Test fun `package flags allow absent OEM extension but reject true or malformed extension`() {
         val text = "Packages:\n  Package [com.google.android.gms] (abcdef):\n    User 0: installed=true hidden=false suspended=false stopped=false vStopped=false enabled=1\n"

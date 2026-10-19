@@ -4,10 +4,13 @@ import socket
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fcm_toolbox_sender as sender
+import private_host_files as private
+from test_private_host_files import set_windows_test_acl
 
 TOKEN = "owned-device-token:APA91synthetic_abcdefghijklmnopqrstuvwxyz"
 MESSAGE = "projects/fir-cloudmessaging-4e2cd/messages/abc123"
@@ -17,10 +20,15 @@ class ToolboxSenderTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.run_dir = Path(self.temp.name) / "diagnostics-private"
-        self.run_dir.mkdir(mode=0o700)
+        private.ensure_private_directory(self.run_dir)
         self.token_file = self.run_dir / "owned-token.txt"
-        self.token_file.write_text(TOKEN + "\n", encoding="utf-8")
-        self.token_file.chmod(0o600)
+        private.write_exclusive(self.token_file, (TOKEN + "\n").encode())
+
+    def write_token(self, value):
+        if self.token_file.exists():
+            private.replace_existing(self.token_file, value.encode())
+        else:
+            private.write_exclusive(self.token_file, value.encode())
 
     def tearDown(self):
         self.temp.cleanup()
@@ -43,7 +51,8 @@ class ToolboxSenderTest(unittest.TestCase):
         self.assertFalse(self.token_file.exists())
         saved = (self.run_dir / "toolbox-ok_1.json").read_text()
         self.assertNotIn(TOKEN, saved)
-        self.assertEqual(0o600, os.stat(self.run_dir / "toolbox-ok_1.json").st_mode & 0o777)
+        marker = private.open_private_token(self.run_dir / "toolbox-ok_1.json", 16 * 1024)
+        marker.close()
 
     def test_http_200_callable_error_is_not_success_and_body_is_redacted(self):
         result = sender.send_once(
@@ -69,8 +78,7 @@ class ToolboxSenderTest(unittest.TestCase):
     def test_result_with_callable_error_never_counts_as_acceptance(self):
         for status in ("DEADLINE_EXCEEDED", "INVALID_ARGUMENT"):
             with self.subTest(status=status):
-                self.token_file.write_text(TOKEN)
-                self.token_file.chmod(0o600)
+                self.write_token(TOKEN)
                 result = sender.send_once(
                     token_file=self.token_file, run_dir=self.run_dir, test_id="mixed_" + status,
                     transport=lambda _, s=status: (200, json.dumps({"result": MESSAGE,
@@ -81,8 +89,7 @@ class ToolboxSenderTest(unittest.TestCase):
     def test_server_error_and_non_object_response_remain_unknown(self):
         for code, body in [(500, {"error": {"status": "INVALID_ARGUMENT"}}), (200, None)]:
             with self.subTest(code=code):
-                self.token_file.write_text(TOKEN)
-                self.token_file.chmod(0o600)
+                self.write_token(TOKEN)
                 result = sender.send_once(token_file=self.token_file, run_dir=self.run_dir,
                     test_id="ambiguous_" + str(code),
                     transport=lambda _, c=code, b=body: (c, json.dumps(b).encode()))
@@ -91,9 +98,9 @@ class ToolboxSenderTest(unittest.TestCase):
 
     def test_existing_attempt_returns_state_without_read_or_send(self):
         marker = self.run_dir / "toolbox-repeat_1.json"
-        marker.write_text(json.dumps({"status": "ACCEPTED", "http": 200,
+        private.write_exclusive(marker, json.dumps({"status": "ACCEPTED", "http": 200,
                                      "messageId": MESSAGE, "start": 1, "end": 2,
-                                     "testId": "repeat_1"}))
+                                     "testId": "repeat_1"}).encode())
         self.token_file.unlink()
         calls = []
         result = sender.send_once(token_file=self.token_file, run_dir=self.run_dir,
@@ -103,31 +110,37 @@ class ToolboxSenderTest(unittest.TestCase):
         self.assertEqual([], calls)
 
     def test_unsafe_token_files_are_rejected_without_deletion_or_marker(self):
-        self.token_file.chmod(0o644)
-        with self.assertRaisesRegex(sender.SenderError, "TOKEN_FILE_MODE_NOT_0600"):
+        if os.name == "nt":
+            sid = private._windows().user_sid
+            set_windows_test_acl(self.token_file, f"D:P(A;;FA;;;{sid})(A;;FR;;;WD)")
+            expected_error = "TOKEN_FILE_UNSAFE"
+        else:
+            self.token_file.chmod(0o644)
+            expected_error = "TOKEN_FILE_MODE_NOT_0600"
+        with self.assertRaisesRegex(sender.SenderError, expected_error):
             sender.send_once(token_file=self.token_file, run_dir=self.run_dir, test_id="mode_1")
         self.assertTrue(self.token_file.exists())
         self.assertFalse((self.run_dir / "toolbox-mode_1.json").exists())
         self.token_file.unlink()
         target = self.run_dir / "target"
-        target.write_text(TOKEN)
-        target.chmod(0o600)
-        self.token_file.symlink_to(target)
+        private.write_exclusive(target, TOKEN.encode())
+        # Hardlinks exercise the same single-link ownership policy without requiring symlink privilege.
+        os.link(target, self.token_file)
         with self.assertRaisesRegex(sender.SenderError, "TOKEN_FILE_UNSAFE"):
             sender.send_once(token_file=self.token_file, run_dir=self.run_dir, test_id="link_1")
         self.assertTrue(target.exists())
 
     def test_topic_token_is_rejected_before_attempt(self):
-        self.token_file.write_text("/topics/not-an-owned-device-token", encoding="utf-8")
-        self.token_file.chmod(0o600)
+        self.write_token("/topics/not-an-owned-device-token")
         with self.assertRaisesRegex(sender.SenderError, "TOKEN_INVALID"):
             sender.send_once(token_file=self.token_file, run_dir=self.run_dir, test_id="topic_1")
         self.assertTrue(self.token_file.exists())
 
     def test_token_outside_run_dir_and_echoed_message_id_are_never_accepted(self):
-        outside = Path(self.temp.name) / "outside-token"
-        outside.write_text(TOKEN)
-        outside.chmod(0o600)
+        outside_dir = Path(self.temp.name) / "other-private"
+        private.ensure_private_directory(outside_dir)
+        outside = outside_dir / "outside-token"
+        private.write_exclusive(outside, TOKEN.encode())
         with self.assertRaisesRegex(sender.SenderError, "TOKEN_FILE_OUTSIDE_RUN_DIR"):
             sender.send_once(token_file=outside, run_dir=self.run_dir, test_id="outside_1")
         self.assertTrue(outside.exists())
@@ -138,6 +151,33 @@ class ToolboxSenderTest(unittest.TestCase):
             clock=iter((400, 401)).__next__)
         self.assertEqual("UNKNOWN", result["status"])
         self.assertNotIn(TOKEN, (self.run_dir / "toolbox-echo_1.json").read_text())
+
+    def test_failed_durable_intent_never_calls_transport_and_releases_token(self):
+        calls = []
+        with mock.patch.object(sender, "create_private_marker", side_effect=private.PrivateFileError("PRIVATE_FILE_FLUSH_FAILED")):
+            with self.assertRaisesRegex(sender.SenderError, "ATTEMPT_PERSIST_FAILED"):
+                sender.send_once(token_file=self.token_file, run_dir=self.run_dir, test_id="failed_flush",
+                                 transport=lambda _: calls.append(1))
+        self.assertEqual([], calls)
+        self.token_file.rename(self.run_dir / "closed-token")
+
+    def test_corrupt_existing_marker_blocks_without_token_or_transport(self):
+        private.write_exclusive(self.run_dir / "toolbox-corrupt.json", b"not-json")
+        self.token_file.unlink()
+        calls = []
+        with self.assertRaisesRegex(sender.SenderError, "ATTEMPT_MARKER_EXISTS_UNREADABLE"):
+            sender.send_once(token_file=self.token_file, run_dir=self.run_dir, test_id="corrupt",
+                             transport=lambda _: calls.append(1))
+        self.assertEqual([], calls)
+
+    def test_existing_marker_never_echoes_unknown_private_values(self):
+        private.write_exclusive(self.run_dir / "toolbox-private_marker.json", json.dumps({
+            "status": TOKEN, "messageId": TOKEN, "start": TOKEN, "tokenDelete": TOKEN,
+            "testId": TOKEN, "private": TOKEN}).encode())
+        result = sender.send_once(token_file=self.token_file, run_dir=self.run_dir, test_id="private_marker",
+                                  transport=lambda _: self.fail("Existing attempt must not send"))
+        self.assertTrue(result["existingAttempt"])
+        self.assertNotIn(TOKEN, json.dumps(result))
 
 
 if __name__ == "__main__":

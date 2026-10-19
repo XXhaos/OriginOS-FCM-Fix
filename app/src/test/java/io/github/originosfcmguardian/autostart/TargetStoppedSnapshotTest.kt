@@ -84,4 +84,32 @@ class TargetStoppedSnapshotTest {
             readTargetStoppedSnapshot(identity, { throw CancellationException("cancel") })
         }
     }
+
+    @Test fun verifiedRotationUsesSecondFlagAndRequiresFreshHistoryOnBothReads() {
+        val rotated = identity.copy(signerSha256 = listOf("b".repeat(64)))
+        val signing = TargetSigningEvidence(false, identity.signerSha256 + rotated.signerSha256)
+        var reads = 0
+        assertEquals(TargetStoppedStatus.NOT_STOPPED, readTargetStoppedSnapshot(identity, {
+            TargetPackageSnapshot(rotated, reads++ == 0, signing)
+        }).status)
+        for (missingIndex in 0..1) {
+            reads = 0
+            assertEquals(TargetStoppedStatus.IDENTITY_CHANGED, readTargetStoppedSnapshot(identity, {
+                TargetPackageSnapshot(rotated, true, if (reads++ == missingIndex) null else signing)
+            }).status)
+        }
+    }
+
+    @Test fun individuallyValidLineagesCannotHideRawSignerRace() {
+        val middle = identity.copy(signerSha256 = listOf("b".repeat(64)))
+        val latest = identity.copy(signerSha256 = listOf("c".repeat(64)))
+        for ((first, second) in listOf(identity to middle, middle to latest)) {
+            var reads = 0
+            assertEquals(TargetStoppedStatus.IDENTITY_CHANGED, readTargetStoppedSnapshot(identity, {
+                val raw = if (reads++ == 0) first else second
+                TargetPackageSnapshot(raw, false, TargetSigningEvidence(false,
+                    (identity.signerSha256 + raw.signerSha256).distinct()))
+            }).status)
+        }
+    }
 }

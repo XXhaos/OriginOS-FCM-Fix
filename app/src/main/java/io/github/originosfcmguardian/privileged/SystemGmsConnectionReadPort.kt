@@ -42,9 +42,19 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         val info = invokePackageFlagsRead(api, remote, "getPackageInfo", arrayOf(String::class.java),
             arrayOf(GMS_OBSERVATION_PACKAGE), PackageManager.GET_SIGNING_CERTIFICATES.toLong(), 0) as? PackageInfo ?: return null
         val app = info.applicationInfo ?: return null
-        val signers = info.signingInfo?.apkContentsSigners ?: return null
+        val signing = info.signingInfo ?: return null
+        val signers = signing.apkContentsSigners ?: return null
+        if (signers.size !in 1..16) return null
+        val currentSigner = gmsSignerDigest(signers.map { it.toByteArray() })
+        val multiple = signing.hasMultipleSigners() || signers.size != 1
+        // PM supplies authenticated lineage. Never replace the raw signer here: the probe's
+        // before/after comparison must still notice a rotation during the observation.
+        val history = if (!multiple && currentSigner != FcmRecoveryPolicy.SIGNER) {
+            signing.signingCertificateHistory?.takeIf { it.size in 1..32 }
+                ?.let { gmsSigningHistoryDigests(it.map { signature -> signature.toByteArray() }) }
+        } else null
         return GmsPackageIdentity(info.packageName, app.packageName, app.uid, info.longVersionCode,
-            info.firstInstallTime, info.lastUpdateTime, gmsSignerDigest(signers.map { it.toByteArray() }))
+            info.firstInstallTime, info.lastUpdateTime, currentSigner, history, multiple)
     }
     override fun packagesForUid(uid: Int): List<String>? {
         val owners = api.getMethod("getPackagesForUid", Int::class.javaPrimitiveType).invoke(remote, uid) as? Array<*> ?: return null
@@ -113,9 +123,8 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         val identity = gmsPackage() ?: return false
         // Prefer current receiver capability. The reviewed version only supplies a fallback
         // for legacy dumps which omit export metadata; it never overrides contrary evidence.
-        if (Os.getuid() != 2000 ||
-            identity.signerSha256 != FcmRecoveryPolicy.SIGNER || environment().currentUser != 0 ||
-            packagesForUid(identity.uid) != listOf(GMS_OBSERVATION_PACKAGE)) return false
+        if (!qualifiedGmsMcsIdentity(identity, Os.getuid(), environment().currentUser,
+                packagesForUid(identity.uid))) return false
         val protected = api.getMethod("isProtectedBroadcast", String::class.java)
             .invoke(remote, FcmRecoveryPolicy.MCS_ACTION) as? Boolean
         if (protected != false || !FcmPackageStateReader.read()) return false

@@ -91,14 +91,24 @@ class RecoveryCandidatePackageReadTest {
         assertEquals("039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", identity.signerSha256.single())
     }
 
-    @Test fun multisignerIdentityStillSortsAndDeduplicatesCurrentSigners() {
+    @Test fun multisignerIdentitySortsExactSetsButRejectsDuplicateCertificates() {
         val other = byteArrayOf(4, 5, 6)
         val first = targetPackageIdentity("example.app", "example.app", "example.app", 10434, 123,
             listOf(certificate, other, certificate))
         val second = targetPackageIdentity("example.app", "example.app", "example.app", 10434, 123,
             listOf(other, certificate))
-        assertEquals(first, second)
-        assertEquals(2, first?.signerSha256?.size)
-        assertEquals(first?.signerSha256?.sorted(), first?.signerSha256)
+        assertNull(first)
+        assertEquals(2, second?.signerSha256?.size)
+        assertEquals(second?.signerSha256?.sorted(), second?.signerSha256)
+    }
+
+    @Test fun freshVerifiedLineageKeepsQualifiedBaselineWithoutChangingStoredIdentity() {
+        val rotated = identity.copy(signerSha256 = listOf("b".repeat(64)))
+        val signing = TargetSigningEvidence(false, identity.signerSha256 + rotated.signerSha256)
+        var fresh = evidence.copy(identity = rotated, signing = signing)
+        assertTrue(readRecoveryCandidate(identity, { fresh }) { listOf(identity.packageName) })
+        fresh = fresh.copy(signing = null)
+        assertFalse(readRecoveryCandidate(identity, { fresh }) { fail("Missing lineage must block UID read"); null })
+        assertEquals(rotated, fresh.identity)
     }
 }

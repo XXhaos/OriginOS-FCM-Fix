@@ -215,8 +215,7 @@ internal class GmsHeartbeatRunner(
                 val identity = port.gmsPackage()
                 val owners = port.packagesForUid(sample.uid)
                 val environment = port.environment()
-                if (identity == null || identity != GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-                        sample.uid, sample.versionCode, sample.firstInstallTime, sample.lastUpdateTime, sample.signerSha256) ||
+                if (!gmsIdentityMatchesSample(identity, sample) ||
                     owners != listOf(GMS_OBSERVATION_PACKAGE) || environment.currentUser != 0 ||
                     environment.serviceUid != 2000 || environment.bootId != sample.bootId) {
                     return@submit gate.failure(requestId, GmsHeartbeatReason.IDENTITY_CHANGED)

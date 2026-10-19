@@ -11,6 +11,9 @@ internal data class GmsProbeEnvironment(val currentUser: Int, val serviceUid: In
 internal data class GmsPackageIdentity(
     val packageName: String, val applicationPackageName: String, val uid: Int,
     val versionCode: Long, val firstInstallTime: Long, val lastUpdateTime: Long, val signerSha256: String,
+    /** Transient PackageManager evidence only; never serialized, persisted or supplied by IPC. */
+    val signingCertificateHistorySha256: List<String>? = null,
+    val hasMultipleSigners: Boolean = false,
 )
 internal data class GmsReceiverInspection(val complete: Boolean, val receivers: List<ReconnectReceiver>)
 internal interface GmsConnectionReadPort {
@@ -37,23 +40,59 @@ internal fun gmsSignerDigest(certificates: List<ByteArray>): String {
         .joinToString("") { "%02x".format(it.toInt() and 255) }
 }
 
+/** Android's single-signer proof-of-rotation history, bounded before hashing certificates. */
+internal fun gmsSigningHistoryDigests(certificates: List<ByteArray>): List<String>? {
+    if (certificates.size !in 1..32 || certificates.any { it.size !in 1..65536 }) return null
+    val hashes = certificates.map { gmsSignerDigest(listOf(it)) }
+    return hashes.takeIf { it.distinct().size == it.size }
+}
+
+internal fun validGmsPackageIdentity(value: GmsPackageIdentity?): GmsPackageIdentity? = value?.takeIf {
+    it.packageName == GMS_OBSERVATION_PACKAGE && it.applicationPackageName == GMS_OBSERVATION_PACKAGE &&
+        it.uid in 10_000..99_999 && it.versionCode >= 0 && it.firstInstallTime > 0 && it.lastUpdateTime > 0 &&
+        it.signerSha256.matches(Regex("[a-f0-9]{64}"))
+}
+
+/** A canonical authority pin, not an alternative current-signer identity. */
+internal fun gmsGoogleTrustAnchor(identity: GmsPackageIdentity): String? {
+    if (identity.hasMultipleSigners) return null
+    if (identity.signerSha256 == FcmRecoveryPolicy.SIGNER) return FcmRecoveryPolicy.SIGNER
+    val history = identity.signingCertificateHistorySha256 ?: return null
+    if (history.size !in 1..32 || history.any { !it.matches(Regex("[a-f0-9]{64}")) } ||
+        history.distinct().size != history.size || identity.signerSha256 !in history ||
+        FcmRecoveryPolicy.SIGNER !in history) return null
+    return FcmRecoveryPolicy.SIGNER
+}
+
+/** The sample's canonical pin must be backed by a fresh, otherwise exact installation identity. */
+internal fun gmsIdentityMatchesSample(identity: GmsPackageIdentity?, sample: GmsConnectionObservation.Sample): Boolean {
+    val current = validGmsPackageIdentity(identity) ?: return false
+    val signerMatches = if (sample.signerSha256 == FcmRecoveryPolicy.SIGNER)
+        gmsGoogleTrustAnchor(current) == FcmRecoveryPolicy.SIGNER
+    else (gmsGoogleTrustAnchor(current) ?: current.signerSha256) == sample.signerSha256
+    return current.uid == sample.uid && current.versionCode == sample.versionCode &&
+        current.firstInstallTime == sample.firstInstallTime && current.lastUpdateTime == sample.lastUpdateTime &&
+        signerMatches
+}
+
+internal fun qualifiedGmsMcsIdentity(identity: GmsPackageIdentity?, serviceUid: Int, currentUser: Int,
+    owners: List<String>?): Boolean = validGmsPackageIdentity(identity)?.let {
+    serviceUid == 2000 && currentUser == 0 && owners == listOf(GMS_OBSERVATION_PACKAGE) &&
+        gmsGoogleTrustAnchor(it) == FcmRecoveryPolicy.SIGNER
+} == true
+
 internal fun observeGmsConnection(
     requestId: Long, port: GmsConnectionReadPort, interruption: () -> GmsUnknown? = { null },
     nowMillis: () -> Long = System::currentTimeMillis,
 ): GmsConnectionObservation {
     fun unknown(reason: GmsUnknown) = GmsConnectionObservation.Unknown(requestId, reason)
-    fun valid(value: GmsPackageIdentity?) = value?.takeIf {
-        it.packageName == GMS_OBSERVATION_PACKAGE && it.applicationPackageName == GMS_OBSERVATION_PACKAGE &&
-            it.uid in 10_000..99_999 && it.versionCode >= 0 && it.firstInstallTime > 0 && it.lastUpdateTime > 0 &&
-            it.signerSha256.matches(Regex("[a-f0-9]{64}"))
-    }
     if (requestId <= 0) return unknown(GmsUnknown.INVALID_REQUEST)
     return try {
         interruption()?.let { return unknown(it) }
         val environment = port.environment()
         if (environment.serviceUid != 2000) return unknown(GmsUnknown.SHELL_UNAVAILABLE)
         if (environment.currentUser != 0) return unknown(GmsUnknown.WRONG_USER)
-        val before = valid(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
+        val before = validGmsPackageIdentity(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
         interruption()?.let { return unknown(it) }
         if (port.packagesForUid(before.uid) != listOf(GMS_OBSERVATION_PACKAGE)) return unknown(GmsUnknown.SHARED_UID)
         val sampledAt = nowMillis()
@@ -70,14 +109,15 @@ internal fun observeGmsConnection(
         interruption()?.let { return unknown(it) }
         val receiver = runCatching { port.reconnectReceivers() }.getOrElse { GmsReceiverInspection(false, emptyList()) }
         interruption()?.let { return unknown(it) }
-        val after = valid(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
+        val after = validGmsPackageIdentity(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
         if (before != after || port.environment() != environment) return unknown(GmsUnknown.IDENTITY_CHANGED)
         if (port.packagesForUid(after.uid) != listOf(GMS_OBSERVATION_PACKAGE)) return unknown(GmsUnknown.SHARED_UID)
         // Recheck environment after the final ownership Binder call as well.
         if (port.environment() != environment) return unknown(GmsUnknown.IDENTITY_CHANGED)
         interruption()?.let { return unknown(it) }
+        // Compare raw current signer and PM evidence before deriving the wire-compatible authority pin.
         GmsConnectionObservation.Sample(requestId, after.uid, after.versionCode, after.firstInstallTime,
-            after.lastUpdateTime, after.signerSha256, environment.bootId, sampledAt, sampledElapsed,
+            after.lastUpdateTime, gmsGoogleTrustAnchor(after) ?: after.signerSha256, environment.bootId, sampledAt, sampledElapsed,
             tcp, tcp6, receiver.complete, receiver.receivers, gcmService)
     } catch (_: Throwable) { unknown(interruption() ?: GmsUnknown.CAPABILITY_UNAVAILABLE) }
 }

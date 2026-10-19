@@ -51,7 +51,7 @@ internal class ProtectionStartupProbe(private val context: Context, private val 
             lease.consent.identity.copy(signerSha256 = lease.consent.identity.signerSha256.toList()),
             lease.consent !is TargetConsent.Legacy) }
         val packageRead = StartupTargetReader.read(packageInputs) { input ->
-            StartupPackageEvidence(packageProbe.identity(input.identity.packageName),
+            StartupPackageEvidence(packageProbe.identity(input.identity),
                 !input.requiresQualification || packageProbe.isRecoveryCandidate(input.identity))
         }
         val evidence = (packageRead as? StartupTargetReadResult.Complete)?.values

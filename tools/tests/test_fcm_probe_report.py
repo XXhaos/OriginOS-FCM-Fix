@@ -96,16 +96,14 @@ class FcmProbeReportTest(unittest.TestCase):
 
     def write_sender(self, records=None):
         records = records or sender_records()
-        self.sender.write_text(
-            "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records),
-            encoding="utf-8",
+        self.sender.write_bytes(
+            "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records).encode("utf-8"),
         )
 
     def write_receipts(self, lines, *, header=None):
-        self.receipt.write_text(
-            (header or reporter.RECEIPT_HEADER) + "\n"
-            + "".join(line + "\n" for line in lines),
-            encoding="utf-8",
+        self.receipt.write_bytes(
+            ((header or reporter.RECEIPT_HEADER) + "\n"
+            + "".join(line + "\n" for line in lines)).encode("utf-8"),
         )
 
     def write_descriptor(self, *, count, start=9_000, end=20_000, cutoff=None):
@@ -261,6 +259,22 @@ class FcmProbeReportTest(unittest.TestCase):
         )
         self.assertEqual(2, code)
         self.assertEqual("RECEIPT_CORRUPT", error["error_code"])
+
+    def test_lf_fixture_is_exact_and_crlf_receipt_is_rejected(self):
+        self.write_sender()
+        self.write_receipts([receipt_line()])
+        raw = self.receipt.read_bytes()
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertNotIn(b"\r", raw)
+        self.assertNotIn(b"\r", self.sender.read_bytes())
+        self.receipt.write_bytes(raw.replace(b"\n", b"\r\n"))
+        code, result, error, combined = self.run_main(
+            "--sender", str(self.sender), "--receipt", str(self.receipt)
+        )
+        self.assertEqual(2, code)
+        self.assertIsNone(result)
+        self.assertEqual("RECEIPT_CORRUPT", error["error_code"])
+        self.assertNotIn(str(self.receipt), combined)
 
     def test_v2_negative_process_start_is_invalid_without_echo(self):
         self.write_sender()

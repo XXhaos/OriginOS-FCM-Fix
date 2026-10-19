@@ -312,4 +312,70 @@ class RecipientStoppedRecoveryTest {
         assertEquals(1, writes)
         assertThrows(IllegalStateException::class.java) { StoppedRecoveryJournal(Memory()).prepare(telegram, shared, true) }
     }
+
+    private fun rotatedFields(certificate: ByteArray = byteArrayOf(4, 5, 6)): StoppedPackageFields {
+        val rotated = fields.copy(currentSignerCertificates = listOf(certificate))
+        val current = requireNotNull(validatedStoppedPackage(rotated, identity.packageName)).first
+        return rotated.copy(signing = TargetSigningEvidence(false, identity.signerSha256 + current.signerSha256))
+    }
+
+    @Test fun verifiedRotationRetainsExpectedIdentityAcrossCodecJournalAndRecovery() {
+        val rotated = rotatedFields()
+        assertNotEquals(identity, validatedStoppedPackage(rotated, identity.packageName)!!.first)
+        fun sample(stopped: Boolean) = observeStoppedTarget(1, identity,
+            Port(listOf(rotated.copy(stopped = stopped), rotated.copy(stopped = stopped))))
+        val baseline = sample(true) as StoppedTargetObservation.Known
+        assertEquals(identity, baseline.identity)
+        assertEquals(baseline, StoppedObservationCodec.decode(StoppedObservationCodec.encode(baseline), 1, identity))
+        val journal = StoppedRecoveryJournal(Memory())
+        val record = journal.prepareAutomatically(identity, baseline, consent)
+        var reads = 0
+        var writes = 0
+        val result = StoppedRecoveryEngine({ sample(++reads < 3) }, journal::claim, { true },
+            { writes++; 0 }).recover(record.requestId, identity)
+        assertEquals(StoppedRecoveryOutcome.FLAG_CLEARED, result.outcome)
+        assertEquals(1, writes)
+        assertEquals(identity, journal.load().latest!!.identity)
+        assertEquals(consent.id, journal.load().latest!!.consentId)
+    }
+
+    @Test fun rotationNeverOverridesRevocationOrGrantsAuthorityByItself() {
+        val rotated = rotatedFields()
+        val observation = observeStoppedTarget(1, identity, Port(listOf(rotated, rotated)))
+        var writes = 0
+        val result = StoppedRecoveryEngine({ observation }, { fail("OFF must not claim"); false },
+            { false }, { writes++; 0 }).recover(1, identity)
+        assertEquals(StoppedRecoveryOutcome.BLOCKED, result.outcome)
+        assertEquals(0, writes)
+    }
+
+    @Test fun rawSignerRacesRemainVisibleEvenWhenEachReadHasValidHistory() {
+        val middle = rotatedFields()
+        val latest = rotatedFields(byteArrayOf(7, 8, 9))
+        for ((before, after) in listOf(fields to middle, middle to latest)) {
+            val result = observeStoppedTarget(1, identity, Port(listOf(before, after))) as StoppedTargetObservation.Unknown
+            assertEquals(StoppedObservationUnknown.IDENTITY_CHANGED, result.reason)
+        }
+    }
+
+    @Test fun lineageMustBePresentOnEachReadAndCannotBypassUidInstallOrMultisignerChanges() {
+        val rotated = rotatedFields()
+        val malformed = listOf(rotated.copy(signing = null),
+            rotated.copy(signing = rotated.signing!!.copy(hasMultipleSigners = true)),
+            rotated.copy(signing = rotated.signing!!.copy(historySha256 = identity.signerSha256)),
+            rotated.copy(signing = rotated.signing!!.copy(historySha256 = rotated.signing!!.historySha256!! + "invalid")),
+            rotated.copy(signing = rotated.signing!!.copy(historySha256 = rotated.signing!!.historySha256!! + identity.signerSha256)),
+            rotated.copy(signing = rotated.signing!!.copy(historySha256 = (1..33).map { it.toString(16).padStart(64, '0') })),
+            rotated.copy(uid = identity.uid + 1), rotated.copy(firstInstallTime = identity.firstInstallTime + 1),
+            rotated.copy(currentSignerCertificates = fields.currentSignerCertificates!! + rotated.currentSignerCertificates!!))
+        malformed.forEach { sample ->
+            assertEquals(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED,
+                (observeStoppedTarget(1, identity, Port(listOf(sample, sample))) as StoppedTargetObservation.Unknown).reason)
+        }
+        for (missingIndex in 0..1) {
+            val samples = List(2) { if (it == missingIndex) rotated.copy(signing = null) else rotated }
+            assertEquals(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED,
+                (observeStoppedTarget(1, identity, Port(samples)) as StoppedTargetObservation.Unknown).reason)
+        }
+    }
 }

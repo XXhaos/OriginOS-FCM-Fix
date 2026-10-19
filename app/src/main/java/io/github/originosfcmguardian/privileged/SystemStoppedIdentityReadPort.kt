@@ -10,11 +10,14 @@ import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import io.github.originosfcmguardian.autostart.RecoveryTargetQualifications
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
+import io.github.originosfcmguardian.autostart.MAX_TARGET_SIGNING_HISTORY
+import io.github.originosfcmguardian.autostart.TargetSigningEvidence
+import io.github.originosfcmguardian.autostart.targetCertificateDigests
 
 /**
  * Shizuku UserService is a shell process, not an application Context. Resolve only these
  * system read methods; unavailable/OEM-incompatible hidden APIs fail closed in the probe.
- * No ApplicationPackageManager, signature history, shell parsing or caller-supplied target.
+ * No ApplicationPackageManager or shell parsing; signing lineage comes only from fresh system reads.
  */
 internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
     private val packageManager by lazy {
@@ -55,8 +58,13 @@ internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
             arrayOf(String::class.java), arrayOf(packageName), PackageManager.GET_SIGNING_CERTIFICATES.toLong(), 0,
         ) as? PackageInfo ?: return null
         val applicationInfo = info.applicationInfo ?: return null
-        val signers = info.signingInfo?.apkContentsSigners ?: return null
+        val signing = info.signingInfo ?: return null
+        val signers = signing.apkContentsSigners ?: return null
         if (signers.size !in 1..MAX_CURRENT_SIGNERS) return null
+        val multiple = signing.hasMultipleSigners()
+        val history = if (qualify && !multiple) signing.signingCertificateHistory?.takeIf {
+            it.size in 1..MAX_TARGET_SIGNING_HISTORY
+        }?.map { it.toByteArray() } else null
         return StoppedPackageFields(
             info.packageName, applicationInfo.packageName, applicationInfo.uid, info.firstInstallTime,
             signers.map { it.toByteArray() }, applicationInfo.flags and ApplicationInfo.FLAG_STOPPED != 0,
@@ -66,6 +74,8 @@ internal class SystemStoppedIdentityReadPort : StoppedIdentityReadPort {
                 applicationInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
                 applicationInfo.flags and ApplicationInfo.FLAG_PERSISTENT != 0,
             ) else null,
+            if (qualify) TargetSigningEvidence(multiple,
+                targetCertificateDigests(history, MAX_TARGET_SIGNING_HISTORY)) else null,
         )
     }
 
