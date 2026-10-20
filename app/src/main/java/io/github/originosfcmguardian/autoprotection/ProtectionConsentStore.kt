@@ -242,7 +242,9 @@ internal class ProtectionConsentStore(private val storage: ProtectionAuthoritySt
     } catch (_: Exception) { unavailable() }
 
     private fun matches(state: ProtectionAuthoritySnapshot?, lease: TargetConsentLease): Boolean =
-        state != null && state.generation == lease.rootGeneration && state.runnableConsents().contains(lease.consent)
+        state != null && state.generation == lease.rootGeneration && !state.storageBlocked &&
+            state.mode == ProtectionConsentMode.ACTIVE && lease.consent.restartConsented() &&
+            lease.consent.id !in state.invalidatedConsentIds && state.consents().contains(lease.consent)
 
     private fun legacyMatches(state: ProtectionAuthoritySnapshot?, token: DurableConsentToken): Boolean =
         state != null && !state.storageBlocked && state.mode == ProtectionConsentMode.ACTIVE &&

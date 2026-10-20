@@ -36,9 +36,19 @@ internal class DaemonProtectionRootSnapshot(
         require(it.size <= DaemonProtectionRootCodec.MAX_RECEIPTS)
     }.toList())
     init { require(content.keys == DaemonDomainRole.entries.toSet() && dataRevision > 0) }
+    private val cachedAuthorityDigest by lazy { digest(requireNotNull(content[DaemonDomainRole.AUTHORITY])) }
     fun bytes(role: DaemonDomainRole): ByteArray? = content[role]?.copyOf()
     fun domains(): Map<DaemonDomainRole, ByteArray?> = content.mapValues { it.value?.copyOf() }
-    fun authorityDigest(): String = digest(requireNotNull(content[DaemonDomainRole.AUTHORITY]))
+    fun authorityDigest(): String = cachedAuthorityDigest
+    internal fun sameRole(other: DaemonProtectionRootSnapshot, role: DaemonDomainRole): Boolean {
+        if (this === other) return true
+        val a = content[role]; val b = other.content[role]
+        return if (a == null) b == null else b != null && a.contentEquals(b)
+    }
+    /** Complete equality for the unchanged-transaction fast path, including explicit absence. */
+    internal fun sameContent(other: DaemonProtectionRootSnapshot): Boolean =
+        this === other || (control == other.control && halt == other.halt && dataRevision == other.dataRevision &&
+            receipts == other.receipts && DaemonDomainRole.entries.all { sameRole(other, it) })
     companion object {
         fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it.toInt() and 255) }
@@ -46,25 +56,35 @@ internal class DaemonProtectionRootSnapshot(
 }
 
 internal class DaemonRootMutation internal constructor(snapshot: DaemonProtectionRootSnapshot) {
+    private var base = snapshot
     var control = snapshot.control
     var halt = snapshot.halt
     internal var dataRevision = snapshot.dataRevision
-    private val domains = snapshot.domains().toMutableMap()
+    private var domains: MutableMap<DaemonDomainRole, ByteArray?>? = null
     private val receipts = snapshot.receipts.toMutableList()
-    fun bytes(role: DaemonDomainRole): ByteArray? = domains[role]?.copyOf()
+    fun bytes(role: DaemonDomainRole): ByteArray? {
+        val current = domains
+        return if (current != null) current[role]?.copyOf() else base.bytes(role)
+    }
     fun put(role: DaemonDomainRole, bytes: ByteArray?) {
         require(bytes == null || bytes.size <= role.maximumBytes)
-        domains[role] = bytes?.copyOf()
+        val current = domains ?: base.domains().toMutableMap().also { domains = it }
+        current[role] = bytes?.copyOf()
     }
     fun remember(receipt: DaemonControlReceipt) {
         val old = receipts.firstOrNull { it.request.owner == receipt.request.owner && it.request.requestId == receipt.request.requestId }
         check(old == null || old == receipt) { "Daemon request id conflict" }
         if (old == null) { receipts += receipt; while (receipts.size > DaemonProtectionRootCodec.MAX_RECEIPTS) receipts.removeAt(0) }
     }
-    internal fun freeze() = DaemonProtectionRootSnapshot(control, domains, receipts, halt, dataRevision)
+    internal fun freeze(): DaemonProtectionRootSnapshot {
+        if (domains == null && control == base.control && halt == base.halt && dataRevision == base.dataRevision &&
+            receipts == base.receipts) return base
+        return DaemonProtectionRootSnapshot(control, domains ?: base.domains(), receipts, halt, dataRevision)
+    }
     internal fun restore(snapshot: DaemonProtectionRootSnapshot) {
+        base = snapshot; domains = null
         control = snapshot.control; halt = snapshot.halt; dataRevision = snapshot.dataRevision
-        domains.clear(); domains.putAll(snapshot.domains()); receipts.clear(); receipts.addAll(snapshot.receipts)
+        receipts.clear(); receipts.addAll(snapshot.receipts)
     }
 }
 
@@ -92,6 +112,8 @@ internal class DaemonProtectionRoot(private val storage: DaemonProtectionRootSto
     private val staged = ThreadLocal<DaemonRootMutation?>()
     private val controlChange = ThreadLocal<Boolean>()
     private var failed = false
+    private class CommittedRead(val bytes: ByteArray, val snapshot: DaemonProtectionRootSnapshot)
+    private var committedRead: CommittedRead? = null
 
     fun initializeImported(snapshot: DaemonProtectionRootSnapshot) = synchronized(monitor) {
         check(!failed)
@@ -193,7 +215,10 @@ internal class DaemonProtectionRoot(private val storage: DaemonProtectionRootSto
             next.first
         }
     }
-    fun bytes(role: DaemonDomainRole): ByteArray? = snapshot().bytes(role)
+    fun bytes(role: DaemonDomainRole): ByteArray? = synchronized(monitor) {
+        val current = staged.get()
+        if (current != null) current.bytes(role) else snapshot().bytes(role)
+    }
     fun inspectForReconciliation(): DaemonProtectionRootSnapshot = synchronized(monitor) {
         DaemonProtectionRootCodec.decode(requireNotNull(storage.inspect()))
     }
@@ -221,43 +246,39 @@ internal class DaemonProtectionRoot(private val storage: DaemonProtectionRootSto
             staged.set(change); controlChange.set(control)
             try {
                 val result = action(change)
+                val after = change.freeze()
                 if (!control) {
                     check(change.control == before.control && change.halt == before.halt &&
-                        change.freeze().receipts == before.receipts &&
+                        after.receipts == before.receipts &&
                         listOf(DaemonDomainRole.AUTHORITY, DaemonDomainRole.AUTHORITY_INITIALIZED,
                             DaemonDomainRole.AUTHORITY_STOP_PENDING, DaemonDomainRole.HEARTBEAT_DERIVATION).all { role ->
-                            val a = change.bytes(role); val b = before.bytes(role)
-                            if (a == null) b == null else b != null && a.contentEquals(b)
+                            before.sameRole(after, role)
                         }) {
                         "Authority/control changes require explicit control transaction"
                     }
-                    DaemonDomainConsentGuard.requireUnchanged(before, change.freeze())
+                    DaemonDomainConsentGuard.requireUnchanged(before, after)
                 } else if (change.control != before.control) {
                     check(before.control.revision < Long.MAX_VALUE && change.control.owner == before.control.owner &&
                         change.control.revision == before.control.revision + 1)
                 }
-                if (control && DaemonDomainConsentGuard.protectedConfigurationChanged(before, change.freeze())) {
+                if (control && DaemonDomainConsentGuard.protectedConfigurationChanged(before, after)) {
                     check(before.control.revision < Long.MAX_VALUE && change.control.revision == before.control.revision + 1) {
                         "Protected configuration change requires next kernel control revision"
                     }
                 }
                 if (control) {
-                    val a = before.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION)
-                    val b = change.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION)
-                    val changed = if (a == null) b != null else b == null || !a.contentEquals(b)
+                    val changed = !before.sameRole(after, DaemonDomainRole.HEARTBEAT_DERIVATION)
                     if (changed) check(before.control.revision < Long.MAX_VALUE &&
                         change.control.revision == before.control.revision + 1) { "Native derivation permit requires next control revision" }
                 }
                 if (control && change.control == before.control) {
                     // Same-revision control work may only maintain the exact halt fence. Domain
                     // bookkeeping uses transaction(); configuration always takes the next revision.
-                    check(change.freeze().receipts == before.receipts && DaemonDomainRole.entries.all { role ->
-                        val a = change.bytes(role); val b = before.bytes(role)
-                        if (a == null) b == null else b != null && a.contentEquals(b)
-                    }) { "Same-revision control transaction is halt bookkeeping only" }
+                    check(after.receipts == before.receipts && DaemonDomainRole.entries.all { before.sameRole(after, it) }) {
+                        "Same-revision control transaction is halt bookkeeping only"
+                    }
                 }
-                val bytes = DaemonProtectionRootCodec.encode(change.freeze())
-                if (!bytes.contentEquals(DaemonProtectionRootCodec.encode(before))) {
+                if (!after.sameContent(before)) {
                     change.dataRevision = Math.addExact(before.dataRevision, 1)
                     guarded { commit(DaemonProtectionRootCodec.encode(change.freeze())) }
                 }
@@ -270,13 +291,21 @@ internal class DaemonProtectionRoot(private val storage: DaemonProtectionRootSto
         transaction { it.put(role, bytes) }
     }
     fun inControlTransaction() = controlChange.get() == true
-    private fun readCommitted() = DaemonProtectionRootCodec.decode(requireNotNull(storage.read()) { "Daemon root absent" })
+    private fun readCommitted(): DaemonProtectionRootSnapshot {
+        // The authenticated storage read and lease checks are mandatory even for unchanged bytes.
+        val bytes = requireNotNull(storage.read()) { "Daemon root absent" }
+        committedRead?.let { if (it.bytes.contentEquals(bytes)) return it.snapshot }
+        val snapshot = DaemonProtectionRootCodec.decode(bytes)
+        committedRead = CommittedRead(bytes.copyOf(), snapshot)
+        return snapshot
+    }
     private fun commit(bytes: ByteArray) {
+        committedRead = null
         storage.write(bytes)
         check(storage.read()?.contentEquals(bytes) == true) { "Daemon root readback mismatch" }
     }
     private inline fun <T> guarded(action: () -> T): T = try { action() }
-        catch (failure: Exception) { failed = true; throw failure }
+        catch (failure: Exception) { committedRead = null; failed = true; throw failure }
 }
 
 /** Canonical binary + SHA-256, bounded before allocation. Receipts contain metadata, never domain copies. */

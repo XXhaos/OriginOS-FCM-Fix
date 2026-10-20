@@ -213,4 +213,98 @@ class DaemonDomainStoresTest {
         assertEquals(before.control.revision + 1, root.snapshot().control.revision)
         assertFalse(DaemonDomainStores(root).fcmRecovery.read().configured)
     }
+
+    private fun activeAuthority(): ProtectionAuthoritySnapshot {
+        val identity = SelectedTargetIdentity("example.recipient", 10123, 1234, listOf("a".repeat(64)))
+        val consent = TargetConsent.Recipient(RecipientConsentToken("96fbde55-15e2-45b6-8bea-0de37312dd94",
+            1, 1000, identity, VERIFIED_AUTOSTART_FINGERPRINT))
+        return ProtectionAuthoritySnapshot(1, ProtectionConsentMode.ACTIVE, null, null,
+            BudgetSnapshot(BudgetClock(1, 100, 1000), listOf(50L), null), listOf(consent), 3, 1000)
+    }
+
+    @Test fun authorityMemoReusesOnlyExactBytesAndExternalOffWithSameGenerationIsFresh() {
+        val active = activeAuthority()
+        val (root, storage) = RootFixtures.root(RootFixtures.snapshot(ProtectionAuthorityCodec.encode(active)))
+        val stores = DaemonDomainStores(root)
+        val warm = stores.authority.read()!!
+        assertSame(warm, stores.authority.read())
+        val off = active.copy(mode = ProtectionConsentMode.USER_PAUSED)
+        storage.saved = DaemonProtectionRootCodec.encode(RootFixtures.snapshot(ProtectionAuthorityCodec.encode(off)))
+        val fresh = stores.authority.read()!!
+        assertNotSame(warm, fresh)
+        assertEquals(warm.generation, fresh.generation)
+        assertEquals(ProtectionConsentMode.USER_PAUSED, fresh.mode)
+        val lease = TargetConsentLease(active.generation, active.targetConsents.single())
+        assertFalse(ProtectionConsentStore(stores.authority).verifyAuthorized(lease))
+        assertEquals(1, storage.writes)
+    }
+
+    @Test fun warmedAuthorityStillRechecksStopPendingInitializedAndInterruptedMarkers() {
+        val active = activeAuthority()
+        for (role in listOf(DaemonDomainRole.AUTHORITY_STOP_PENDING, DaemonDomainRole.AUTHORITY_INITIALIZED,
+            DaemonDomainRole.INTERRUPTED_ARTIFACTS)) {
+            val (root, _) = RootFixtures.root(RootFixtures.snapshot(ProtectionAuthorityCodec.encode(active)))
+            val stores = DaemonDomainStores(root)
+            val before = stores.authority.read()!!
+            actor(root) { it.put(role, if (role == DaemonDomainRole.AUTHORITY_INITIALIZED) null else byteArrayOf(1)) }
+            if (role == DaemonDomainRole.AUTHORITY_STOP_PENDING) {
+                val blocked = stores.authority.read()!!
+                assertNotSame(before, blocked)
+                assertTrue(blocked.storageBlocked)
+                assertTrue(blocked.runnableConsents().isEmpty())
+            } else RootFixtures.fails { stores.authority.read() }
+        }
+    }
+
+    @Test fun successfulDecodeMemoNeverMasksMalformedChangedAuthorityOrMissingRoot() {
+        for (missing in listOf(false, true)) {
+            val (root, storage) = RootFixtures.root(RootFixtures.snapshot(ProtectionAuthorityCodec.encode(activeAuthority())))
+            val stores = DaemonDomainStores(root)
+            assertNotNull(stores.authority.read())
+            storage.saved = if (missing) null else DaemonProtectionRootCodec.encode(RootFixtures.snapshot(byteArrayOf(1, 2, 3)))
+            RootFixtures.fails { stores.authority.read() }
+            assertEquals(1, storage.writes)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test fun memoizedRecipientAndLegacyAuthorityHaveNoMutableListAliases() {
+        val recipient = activeAuthority()
+        val token = DurableConsentToken("96fbde55-15e2-45b6-8bea-0de37312dd94", 1, 1000,
+            SelectedTargetIdentity("org.telegram.messenger", 10124, 1234, listOf("b".repeat(64))), VERIFIED_AUTOSTART_FINGERPRINT)
+        val legacy = ProtectionAuthoritySnapshot(1, ProtectionConsentMode.ACTIVE, token, null, recipient.budget)
+        for (authority in listOf(recipient, legacy, legacy.configuredSchema3())) {
+            val (root, _) = RootFixtures.root(RootFixtures.snapshot(ProtectionAuthorityCodec.encode(authority)))
+            val stores = DaemonDomainStores(root)
+            val value = stores.authority.read()!!
+            assertThrows(UnsupportedOperationException::class.java) { (value.budget.attempts as MutableList<Long>).clear() }
+            assertThrows(UnsupportedOperationException::class.java) {
+                (value.invalidatedConsentIds as MutableList<String>).add("invalid")
+            }
+            val identity = value.token?.identity ?: value.targetConsents.single().identity
+            assertThrows(UnsupportedOperationException::class.java) { (identity.signerSha256 as MutableList<String>).clear() }
+            assertThrows(UnsupportedOperationException::class.java) { (value.targetConsents as MutableList<TargetConsent>).clear() }
+            assertEquals(authority, stores.authority.read())
+            assertSame(value, stores.authority.read())
+        }
+    }
+
+    @Test fun rolledBackStagedAuthorityCannotSurviveAsReadAuthority() {
+        val active = activeAuthority()
+        val (root, storage) = RootFixtures.root(RootFixtures.snapshot(ProtectionAuthorityCodec.encode(active)))
+        val stores = DaemonDomainStores(root)
+        assertEquals(active, stores.authority.read())
+        val before = root.snapshot()
+        RootFixtures.fails { root.controlTransaction(before.dataRevision) { mutation ->
+            val paused = active.copy(mode = ProtectionConsentMode.USER_PAUSED)
+            val bytes = ProtectionAuthorityCodec.encode(paused)
+            mutation.put(DaemonDomainRole.AUTHORITY, bytes)
+            mutation.control = before.control.copy(revision = before.control.revision + 1,
+                authorityDigest = DaemonProtectionRootSnapshot.digest(bytes))
+            assertEquals(paused, stores.authority.read())
+            error("rollback staged authority")
+        } }
+        assertEquals(active, stores.authority.read())
+        assertEquals(1, storage.writes)
+    }
 }

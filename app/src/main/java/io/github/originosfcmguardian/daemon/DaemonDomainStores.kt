@@ -8,6 +8,7 @@ import io.github.originosfcmguardian.gmsheartbeat.*
 import io.github.originosfcmguardian.recovery.*
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.util.Collections
 
 /**
  * The read/copy/write methods of existing stores may straddle a control-actor OFF. Compare the
@@ -16,10 +17,7 @@ import java.nio.charset.CodingErrorAction
  */
 internal object DaemonDomainConsentGuard {
     fun protectedConfigurationChanged(before: DaemonProtectionRootSnapshot, after: DaemonProtectionRootSnapshot): Boolean {
-        fun changed(role: DaemonDomainRole): Boolean {
-            val a = before.bytes(role); val b = after.bytes(role)
-            return if (a == null) b != null else b == null || !a.contentEquals(b)
-        }
+        fun changed(role: DaemonDomainRole): Boolean = !before.sameRole(after, role)
         if (listOf(DaemonDomainRole.AUTHORITY, DaemonDomainRole.AUTHORITY_INITIALIZED,
                 DaemonDomainRole.AUTHORITY_STOP_PENDING, DaemonDomainRole.SELECTION).any(::changed)) return true
         if (changed(DaemonDomainRole.FCM_PROTECTION)) {
@@ -51,6 +49,27 @@ internal object DaemonDomainConsentGuard {
 
 /** Existing domain codecs over ONE root. No Android Context, app callback or alternate authority. */
 internal class DaemonDomainStores(private val root: DaemonProtectionRoot) {
+    private class DecodedAuthority(val bytes: ByteArray, val value: ProtectionAuthoritySnapshot)
+    private var decodedAuthority: DecodedAuthority? = null
+
+    /** Called only inside the existing root transaction, after fresh storage/marker checks. */
+    private fun authorityValue(bytes: ByteArray): ProtectionAuthoritySnapshot {
+        decodedAuthority?.let { if (it.bytes.contentEquals(bytes)) return it.value }
+        fun <T> frozen(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
+        fun identity(value: io.github.originosfcmguardian.autostart.SelectedTargetIdentity) =
+            value.copy(signerSha256 = frozen(value.signerSha256))
+        fun consent(value: TargetConsent): TargetConsent = when (value) {
+            is TargetConsent.Legacy -> TargetConsent.Legacy(value.value.copy(identity = identity(value.identity)))
+            is TargetConsent.Recipient -> TargetConsent.Recipient(value.value.copy(identity = identity(value.identity)))
+        }
+        val raw = ProtectionAuthorityCodec.decode(bytes)
+        val value = raw.copy(token = raw.token?.let { it.copy(identity = identity(it.identity)) },
+            budget = raw.budget.copy(attempts = frozen(raw.budget.attempts)),
+            targetConsents = frozen(raw.targetConsents.map(::consent)), invalidatedConsentIds = frozen(raw.invalidatedConsentIds))
+        decodedAuthority = DecodedAuthority(bytes.copyOf(), value)
+        return value
+    }
+
     /** Both native heartbeat state and its ownership proof commit in the same root transaction. */
     fun <T> heartbeatTransaction(action: () -> T): T = atomic(action)
     fun heartbeatBytes(): ByteArray? = bytes(DaemonDomainRole.HEARTBEAT)
@@ -78,7 +97,7 @@ internal class DaemonDomainStores(private val root: DaemonProtectionRoot) {
                 null
             } else {
                 initialized(DaemonDomainRole.AUTHORITY_INITIALIZED)
-                val value = ProtectionAuthorityCodec.decode(original)
+                val value = authorityValue(original)
                 if (present(DaemonDomainRole.AUTHORITY_STOP_PENDING)) authorityWithRetirementMarker(value) else value
             }
         }
