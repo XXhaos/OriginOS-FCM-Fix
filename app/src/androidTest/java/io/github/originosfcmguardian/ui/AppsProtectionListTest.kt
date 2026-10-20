@@ -48,6 +48,49 @@ class AppsProtectionListTest {
         recoveryFirmwareSupported = true, stoppedRecovery = StoppedRecoveryUiState(loaded = true),
         shizuku = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "ready"))
 
+    @Test fun systemDisplaySwitchOnlyChangesVisibilityAndKeepsSavedSystemChoice() {
+        val core = VisibleProtectionApp("android", "Android")
+        val state = mutableStateOf(ready.copy(visibleApps = ready.visibleApps + core,
+            hiddenPreinstalledPackages = setOf(first.packageName, core.packageName),
+            automaticProtection = AutomaticProtectionState(targets = listOf(
+                AutomaticProtectionTargetState(first, savedAuthorization = true)))))
+        var displayChanges = 0
+        var grants = 0
+        var revocations = 0
+        compose.setContent { MaterialTheme { AppsProtectionList(state.value, "", {}, {},
+            { grants++ }, { revocations++ }, {}, {}, Modifier.fillMaxSize(),
+            onShowSystemAppsChanged = { displayChanges++; state.value = state.value.copy(showSystemApps = it) }) } }
+        compose.onNodeWithContentDescription("显示系统应用").assertIsOff().performClick()
+        compose.onNodeWithContentDescription("显示系统应用").assertIsOn()
+        compose.onNodeWithContentDescription("已保护（1）").assertExists()
+        compose.onNodeWithContentDescription("所有应用（2）").assertExists()
+        compose.onNodeWithContentDescription("Android 自动保护选择").assertIsOff().assertIsNotEnabled()
+        compose.onNodeWithContentDescription("Second 自动保护选择").assertExists()
+        compose.onNodeWithContentDescription("显示系统应用").performClick()
+        compose.onNodeWithContentDescription("显示系统应用").assertIsOff()
+        compose.onNodeWithContentDescription("Android 自动保护选择").assertDoesNotExist()
+        compose.onNodeWithContentDescription("First 自动保护选择").assertIsOn().assertIsEnabled()
+        compose.runOnIdle {
+            assertEquals(2, displayChanges)
+            assertEquals(0, grants)
+            assertEquals(0, revocations)
+            assertEquals(listOf(first), state.value.automaticProtection.configuredIdentities)
+        }
+    }
+
+    @Test fun changingSystemDisplayDoesNotTreatOpenedAppAsUninstalled() {
+        val state = mutableStateOf(ready.copy(showSystemApps = true,
+            hiddenPreinstalledPackages = setOf(first.packageName)))
+        compose.setContent { MaterialTheme { AppsProtectionList(state.value, "", {}, {}, {}, {}, {},
+            { Text("${it.currentInstallation} installation fixture") }, Modifier.fillMaxSize()) } }
+        compose.onNodeWithTag("app-details:${first.packageName}:true").performClick()
+        compose.onNodeWithText("true installation fixture").assertExists()
+        compose.runOnIdle { state.value = state.value.copy(showSystemApps = false) }
+        compose.onNodeWithText("true installation fixture").assertExists()
+        compose.onNodeWithText("应用已卸载或更新，请刷新").assertDoesNotExist()
+        compose.onNodeWithContentDescription("First 详情内 自动保护选择").assertIsOff().assertIsEnabled()
+    }
+
     @Test fun listShowsSavedAuthorizationFirstAndSearchesAllUnselectedApps() {
         val query = mutableStateOf("")
         var stopped: SelectedTargetIdentity? = null

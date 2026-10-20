@@ -84,6 +84,7 @@ data class HomeUiState(
     val automaticConfirmationIdentity: SelectedTargetIdentity? = null,
     val visibleApps: List<VisibleProtectionApp> = emptyList(),
     val hiddenPreinstalledPackages: Set<String> = emptySet(),
+    val showSystemApps: Boolean = false,
     val visibleAppsLoadState: HomeSourceLoadState = HomeSourceLoadState.LOADING,
     val appsMessage: String? = null,
     val automaticPreparationPackage: String? = null,
@@ -116,6 +117,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private var appProtectionRequestToken: Long? = null
     private var visibleAppsGeneration = 0L
     private var visibleAppsRefreshJob: Job? = null
+    private val appsListPreferencesLock = Mutex()
     private val stoppedRecoveryController by lazy { StoppedRecoveryController(application) }
     private fun remoteOwned() = DaemonAppRuntime.isRemoteOwned(getApplication())
     private var daemonRefreshJob: Job? = null
@@ -351,6 +353,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     init {
+        viewModelScope.launch {
+            appsListPreferencesLock.withLock {
+                val show = withContext(Dispatchers.IO) { AppsListPreferences.showSystemApps(application) }
+                _uiState.update { it.copy(showSystemApps = show) }
+            }
+        }
         if (!remoteOwned()) io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.initialize(application)
         viewModelScope.launch {
             io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.state.collectLatest { snapshot ->
@@ -1053,6 +1061,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshVisibleApps() = refreshVisibleApps(preserveRechecks = false)
 
+    /** Presentation preference only: never refresh, cancel checks, change consent or control the daemon. */
+    fun setShowSystemApps(show: Boolean) {
+        viewModelScope.launch {
+            appsListPreferencesLock.withLock {
+                if (_uiState.value.showSystemApps == show) return@withLock
+                val saved = withContext(Dispatchers.IO) { AppsListPreferences.setShowSystemApps(getApplication(), show) }
+                _uiState.update { if (saved) it.copy(showSystemApps = show)
+                    else it.copy(appsMessage = "显示设置保存失败，请重试") }
+            }
+        }
+    }
+
     private fun refreshVisibleApps(preserveRechecks: Boolean) {
         if (preserveRechecks && visibleAppsRefreshJob?.isActive == true) return
         dismissAutomaticProtection()
@@ -1065,7 +1085,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val baselines = io.github.originosfcmguardian.autostart.uniqueTargetBaselines(
                 baselineState.selectedTargets.map { it.identity } + baselineState.automaticProtection.configuredIdentities)
             val result = runCatching { withContext(Dispatchers.IO) {
-                val inventory = targetProbe.userInstalledApps(emptySet())
+                val inventory = targetProbe.installedApps(emptySet())
                 inventory.candidates.map { candidate ->
                     val identity = baselines[candidate.packageName]?.let(targetProbe::identity)
                         ?: targetProbe.identity(candidate.packageName)

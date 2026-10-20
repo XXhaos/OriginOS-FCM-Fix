@@ -132,24 +132,65 @@ class AppsProtectionPresentationTest {
         assertFalse(canPrepareAppProtection(state, row.app))
     }
 
-    @Test fun hiddenPreinstalledAppDoesNotReturnAsAnUnavailableSavedSelection() {
+    @Test fun configuredSystemAppRemainsRevocableWhenUnavailableAndSystemDisplayIsOff() {
         val state = ready.copy(visibleApps = listOf(secondApp),
             hiddenPreinstalledPackages = setOf(first.packageName),
             selectedTargets = listOf(SelectedTargetUiState(first, "Zulu")),
             automaticProtection = authority(first))
         val groups = protectionAppGroups(state, "")
-        assertTrue(groups.protected.isEmpty())
+        assertEquals(first, groups.protected.single().app.identity)
+        assertFalse(groups.protected.single().currentInstallation)
         assertEquals(listOf(second), groups.all.map { it.app.identity })
         assertEquals(listOf(first), state.automaticProtection.configuredIdentities)
         assertEquals(listOf(first), state.selectedTargets.map { it.identity })
     }
 
-    @Test fun refreshedPreinstalledEvidenceHidesAStaleCurrentRowToo() {
+    @Test fun configuredSystemAppStaysInProtectedGroupWhenSystemDisplayIsOff() {
         val state = ready.copy(hiddenPreinstalledPackages = setOf(first.packageName),
             automaticProtection = authority(first))
         val groups = protectionAppGroups(state, "")
-        assertTrue(groups.protected.isEmpty())
+        assertEquals(first, groups.protected.single().app.identity)
+        assertTrue(groups.protected.single().currentInstallation)
         assertEquals(listOf(second), groups.all.map { it.app.identity })
+    }
+
+    @Test fun systemDisplayDefaultsOffAndOnIncludesUserAppsAndUnsupportedSystemApps() {
+        val core = VisibleProtectionApp("android", "Android")
+        val state = ready.copy(visibleApps = listOf(firstApp, core, secondApp),
+            hiddenPreinstalledPackages = setOf(first.packageName, core.packageName))
+        assertFalse(state.showSystemApps)
+        assertEquals(listOf(secondApp), protectionAppGroups(state, "").all.map { it.app })
+        val shown = protectionAppGroups(state.copy(showSystemApps = true), "").all
+        assertEquals(listOf(secondApp, core, firstApp), shown.map { it.app })
+        assertFalse(canPrepareAppProtection(state.copy(showSystemApps = true), core))
+        assertEquals(listOf(firstApp), protectionAppGroups(state.copy(showSystemApps = true), "EXAMPLE.FIR").all.map { it.app })
+        assertTrue(protectionAppGroups(state, "EXAMPLE.FIR").all.isEmpty())
+    }
+
+    @Test fun systemDisplayDoesNotGrantReplacementIdentityOrEraseExistingChoices() {
+        val replacement = first.copy(firstInstallTime = 10)
+        val state = ready.copy(visibleApps = listOf(firstApp.copy(identity = replacement), secondApp),
+            hiddenPreinstalledPackages = setOf(first.packageName),
+            selectedTargets = listOf(SelectedTargetUiState(first, "Zulu")), automaticProtection = authority(first))
+        val off = protectionAppGroups(state, "")
+        assertEquals(listOf(first), off.protected.map { it.app.identity })
+        assertFalse(off.protected.single().currentInstallation)
+        assertEquals(listOf(second), off.all.map { it.app.identity })
+        val on = protectionAppGroups(state.copy(showSystemApps = true), "")
+        assertEquals(listOf(first), on.protected.map { it.app.identity })
+        assertEquals(listOf(second, replacement), on.all.map { it.app.identity })
+        assertEquals(listOf(first), state.automaticProtection.configuredIdentities)
+        assertEquals(listOf(first), state.selectedTargets.map { it.identity })
+    }
+
+    @Test fun historicalAttentionOnlySystemAppRequiresSystemDisplayOn() {
+        val state = ready.copy(visibleApps = emptyList(), hiddenPreinstalledPackages = setOf(first.packageName),
+            selectedTargets = listOf(SelectedTargetUiState(first, "Zulu")))
+        assertTrue(protectionAppGroups(state, "").all.isEmpty())
+        val row = protectionAppGroups(state.copy(showSystemApps = true), "").all.single()
+        assertEquals(first, row.app.identity)
+        assertFalse(row.currentInstallation)
+        assertTrue(protectionAppGroups(state.copy(showSystemApps = true), "").protected.isEmpty())
     }
 
     @Test fun missingIdentityDoesNotInventPreinstalledEvidenceForSavedChoice() {

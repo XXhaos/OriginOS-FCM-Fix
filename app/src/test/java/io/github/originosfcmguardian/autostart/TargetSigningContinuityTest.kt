@@ -44,7 +44,7 @@ class TargetSigningContinuityTest {
     }
 
     @Test fun recipientLineageDoesNotBroadenCorePackageTrust() {
-        val core = old.copy(packageName = "com.google.android.gms")
+        val core = old.copy(packageName = "moe.shizuku.privileged.api")
         assertFalse(targetSigningContinues(core, current.copy(packageName = core.packageName), lineage))
         assertTrue(targetSigningContinues(core, core, null))
     }

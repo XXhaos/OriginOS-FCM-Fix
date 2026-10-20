@@ -170,6 +170,20 @@ class TargetSelectionTest {
         }
     }
 
+    @Test
+    fun fullInventoryIncludesInstalledSystemRowsWithoutPromotingThemToProtectionTargets() {
+        val installed = ApplicationInfo.FLAG_INSTALLED
+        for (otherFlags in listOf(0, ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.FLAG_UPDATED_SYSTEM_APP,
+            ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_PERSISTENT)) {
+            assertTrue(isApplicationListCandidate("com.google.android.gms", "io.github.originosfcmguardian", installed or otherFlags))
+            assertTrue(isApplicationListCandidate("com.android.systemui", "io.github.originosfcmguardian", installed or otherFlags))
+            assertTrue(isApplicationListCandidate("android", "io.github.originosfcmguardian", installed or otherFlags))
+            assertFalse(isApplicationListCandidate("io.github.originosfcmguardian", "io.github.originosfcmguardian", installed or otherFlags))
+        }
+        assertFalse(isApplicationListCandidate("com.example.app", "io.github.originosfcmguardian", ApplicationInfo.FLAG_SYSTEM))
+        assertFalse(isApplicationListCandidate("invalid name", "io.github.originosfcmguardian", installed))
+    }
+
     private class FakeTargetSelectionPreferences(initial: String) : TargetSelectionPreferences {
         var raw: String = initial
         var writeCount: Int = 0

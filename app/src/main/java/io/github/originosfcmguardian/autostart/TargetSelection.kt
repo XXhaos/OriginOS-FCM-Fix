@@ -47,7 +47,7 @@ data class LauncherAppCandidate(
 
 data class UserInstalledAppInventory(
     val candidates: List<LauncherAppCandidate>,
-    /** Current PackageManager evidence, used only to hide preinstalled rows from the app list. */
+    /** Current PackageManager evidence for display filtering, never selection or execution authority. */
     val hiddenPreinstalledPackages: Set<String>,
 )
 
@@ -56,6 +56,11 @@ internal fun isPreinstalledApplication(flags: Int): Boolean =
 
 internal fun isUserInstalledApplication(flags: Int): Boolean =
     flags and ApplicationInfo.FLAG_INSTALLED != 0 && !isPreinstalledApplication(flags)
+
+/** Display inventory includes system components; read/write qualification is a separate decision. */
+internal fun isApplicationListCandidate(packageName: String, ownPackageName: String, flags: Int): Boolean =
+    flags and ApplicationInfo.FLAG_INSTALLED != 0 && packageName != ownPackageName &&
+        (packageName == "android" || isSafeAndroidPackageName(packageName))
 
 /** Bounded current UID membership evidence; shared ownership never implies target qualification. */
 internal fun validTargetUidMembers(packageName: String, owners: List<String>?): Boolean =
@@ -236,7 +241,7 @@ internal fun readRecoveryCandidate(
     evidence.qualifications.eligible && evidence.identity?.let {
         targetSigningContinues(expected, it, evidence.signing)
     } == true &&
-        validTargetUidMembers(expected.packageName, readUidMembers(expected.uid))
+        qualifiedRecoveryTargetUid(expected.packageName, evidence.qualifications, readUidMembers(expected.uid))
 }.getOrDefault(false)
 
 /** Same package/UID/install/signer validation for qualification and stopped-flag observations. */
@@ -272,6 +277,13 @@ class TargetPackageProbe(private val context: Context) {
 
     @Suppress("DEPRECATION")
     fun userInstalledApps(selectedPackages: Set<String>): UserInstalledAppInventory {
+        val all = installedApps(selectedPackages)
+        return all.copy(candidates = all.candidates.filterNot { it.packageName in all.hiddenPreinstalledPackages })
+    }
+
+    /** All installed rows are loaded once per UI refresh; toggling visibility is memory-only. */
+    @Suppress("DEPRECATION")
+    fun installedApps(selectedPackages: Set<String>): UserInstalledAppInventory {
         val applications = context.packageManager.getInstalledApplications(PackageManager.MATCH_DISABLED_COMPONENTS)
         val hiddenPreinstalledPackages = applications.filter { isPreinstalledApplication(it.flags) }
             .mapTo(mutableSetOf()) { it.packageName }
@@ -279,13 +291,7 @@ class TargetPackageProbe(private val context: Context) {
             .asSequence()
             .mapNotNull { app ->
                 val packageName = app.packageName
-                val uid = app.uid
-                if (
-                    !isUserInstalledApplication(app.flags) ||
-                    packageName == context.packageName ||
-                    !isSafeAndroidPackageName(packageName) ||
-                    !isUserZeroTargetAppUid(uid)
-                ) {
+                if (!isApplicationListCandidate(packageName, context.packageName, app.flags)) {
                     return@mapNotNull null
                 }
                 val label = context.packageManager.getApplicationLabel(app).toString().trim()

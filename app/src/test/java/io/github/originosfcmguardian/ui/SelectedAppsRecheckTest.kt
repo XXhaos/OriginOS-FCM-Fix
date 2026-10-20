@@ -30,6 +30,12 @@ class SelectedAppsRecheckTest {
         assertFalse(canRecheckSelectedApps(ready.copy(targetReadInFlight = setOf(third))))
     }
 
+    @Test fun hidingSystemAppsDoesNotRemoveSavedChoicesFromBulkRecheck() {
+        val hidden = ready.copy(showSystemApps = false, hiddenPreinstalledPackages = setOf(first.packageName))
+        assertEquals(listOf(first, second), selectedAppsRecheckTargets(hidden))
+        assertEquals(selectedAppsRecheckTargets(hidden), selectedAppsRecheckTargets(hidden.copy(showSystemApps = true)))
+    }
+
     @Test fun missingReinstalledOrUnavailableChoicesAreNeverReadUsingOldIdentity() {
         val replacement = ready.copy(visibleApps = ready.visibleApps.map {
             if (it.identity == first) it.copy(identity = first.copy(firstInstallTime = 2)) else it })

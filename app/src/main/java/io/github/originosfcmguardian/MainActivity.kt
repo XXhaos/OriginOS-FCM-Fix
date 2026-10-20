@@ -72,6 +72,7 @@ class MainActivity : ComponentActivity() {
                     onRequestTargetAutomaticProtection = viewModel::requestTargetAutomaticProtection,
                     onRequestAppAutomaticProtection = viewModel::requestAppAutomaticProtection,
                     onRefreshApps = viewModel::refreshVisibleApps,
+                    onShowSystemAppsChanged = viewModel::setShowSystemApps,
                     onStopTargetAutomaticProtection = viewModel::stopTargetAutomaticProtection,
                     onOpenProtectionNotificationSettings = {
                         io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime.openNotificationSettings(this)

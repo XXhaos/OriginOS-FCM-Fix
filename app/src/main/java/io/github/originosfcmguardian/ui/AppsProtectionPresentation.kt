@@ -37,10 +37,13 @@ internal fun protectionAppRecoveryCounts(state: HomeUiState, row: ProtectionAppR
 
 /** A prior installation or historical receipt never promotes the current installation. */
 internal fun protectionAppGroups(state: HomeUiState, query: String): ProtectionAppGroups {
-    val current = state.visibleApps.filterNot { it.packageName in state.hiddenPreinstalledPackages }
+    val configured = state.automaticProtection.configuredIdentities
+    fun shown(packageName: String, identity: SelectedTargetIdentity?): Boolean =
+        state.showSystemApps || packageName !in state.hiddenPreinstalledPackages || identity in configured
+    val current = state.visibleApps.filter { shown(it.packageName, it.identity) }
         .map { ProtectionAppRow(it, true) }
-    val oldIdentities = (state.selectedTargets.map { it.identity } + state.automaticProtection.configuredIdentities).distinct()
-        .filter { identity -> identity.packageName !in state.hiddenPreinstalledPackages &&
+    val oldIdentities = (state.selectedTargets.map { it.identity } + configured).distinct()
+        .filter { identity -> shown(identity.packageName, identity) &&
             current.none { it.app.identity == identity } }
     val unavailable = oldIdentities.map { identity ->
         val selected = state.selectedTargets.firstOrNull { it.identity == identity }
@@ -51,8 +54,8 @@ internal fun protectionAppGroups(state: HomeUiState, query: String): ProtectionA
         it.app.label.contains(search, true) || it.app.packageName.contains(search, true)
     }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.app.label })
     return ProtectionAppGroups(
-        rows.filter { it.app.identity in state.automaticProtection.configuredIdentities },
-        rows.filterNot { it.app.identity in state.automaticProtection.configuredIdentities },
+        rows.filter { it.app.identity in configured },
+        rows.filterNot { it.app.identity in configured },
     )
 }
 

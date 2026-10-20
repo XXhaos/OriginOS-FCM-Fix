@@ -109,6 +109,7 @@ fun HomeScreen(
     },
     onCheckVisibleApp: (SelectedTargetIdentity) -> Unit = { onCheckTarget(it.packageName) },
     onRecheckSelectedApps: () -> Unit = {},
+    onShowSystemAppsChanged: (Boolean) -> Unit = {},
 ) {
     var primaryTab by rememberSaveable { mutableStateOf("home") }
     var secondaryDestination by rememberSaveable { mutableStateOf<String?>(null) }
@@ -241,6 +242,7 @@ fun HomeScreen(
             AppsProtectionList(state, appSearch, { appSearch = it }, onRefreshApps,
                 onRequestAppAutomaticProtection, onStopTargetAutomaticProtection, onClearCorruptTargetSelection,
                 onRecheckSelected = onRecheckSelectedApps,
+                onShowSystemAppsChanged = onShowSystemAppsChanged,
                 modifier = Modifier.weight(1f), details = { row ->
                     val target = protectionAppRecheckTarget(state, row)
                     AppRecheckDetails(target,

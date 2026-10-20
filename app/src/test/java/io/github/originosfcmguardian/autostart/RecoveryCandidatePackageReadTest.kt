@@ -31,8 +31,8 @@ class RecoveryCandidatePackageReadTest {
 
     @Test fun qualificationFailuresNeverReadUidMembership() {
         val failures = listOf(qualified.copy(installed = false), qualified.copy(installed = null),
-            qualified.copy(enabled = false), qualified.copy(enabled = null), qualified.copy(system = true),
-            qualified.copy(system = null), qualified.copy(updatedSystem = true), qualified.copy(updatedSystem = null),
+            qualified.copy(enabled = false), qualified.copy(enabled = null), qualified.copy(system = null),
+            qualified.copy(updatedSystem = null),
             qualified.copy(persistent = true), qualified.copy(persistent = null))
         failures.forEach { flags ->
             assertFalse(readRecoveryCandidate(identity, { evidence.copy(qualifications = flags) }) {
@@ -67,10 +67,23 @@ class RecoveryCandidatePackageReadTest {
     }
 
     @Test fun excludedCorePackageDoesNotStartPackageOrUidRead() {
-        val core = identity.copy(packageName = "com.google.android.gms")
+        val core = identity.copy(packageName = "moe.shizuku.privileged.api")
         assertFalse(readRecoveryCandidate(core, { fail("Core target must not be read"); evidence }) {
             fail("Core target must not reach UID read"); null
         })
+    }
+
+    @Test fun systemAndUpdatedTargetsIncludingGmsRequireFreshSoleUidOwnership() {
+        for (packageName in listOf(identity.packageName, "com.google.android.gms")) {
+            val target = identity.copy(packageName = packageName)
+            for (system in listOf(false, true)) for (updatedSystem in listOf(false, true)) {
+                val current = evidence.copy(identity = target,
+                    qualifications = qualified.copy(system = system, updatedSystem = updatedSystem))
+                assertTrue(readRecoveryCandidate(target, { current }) { listOf(packageName) })
+                assertEquals(!system && !updatedSystem,
+                    readRecoveryCandidate(target, { current }) { listOf(packageName, "example.shared") })
+            }
+        }
     }
 
     @Test fun signedPackageIdentityPreservesPackageUidInstallAndSignerValidation() {
@@ -110,5 +123,23 @@ class RecoveryCandidatePackageReadTest {
         fresh = fresh.copy(signing = null)
         assertFalse(readRecoveryCandidate(identity, { fresh }) { fail("Missing lineage must block UID read"); null })
         assertEquals(rotated, fresh.identity)
+    }
+
+    @Test fun gmsSystemReadRetainsOnlyFrozenBaselineWithFreshValidLineageAndSoleUid() {
+        val target = identity.copy(packageName = "com.google.android.gms")
+        val rotated = target.copy(signerSha256 = listOf("b".repeat(64)))
+        val lineage = TargetSigningEvidence(false, target.signerSha256 + rotated.signerSha256)
+        val current = evidence.copy(identity = rotated, qualifications = qualified.copy(system = true), signing = lineage)
+        assertTrue(readRecoveryCandidate(target, { current }) { listOf(target.packageName) })
+        assertFalse(readRecoveryCandidate(target, { current }) { listOf(target.packageName, "example.shared") })
+        for (signing in listOf(null, lineage.copy(historySha256 = listOf("invalid")),
+            lineage.copy(historySha256 = rotated.signerSha256))) {
+            assertFalse(readRecoveryCandidate(target, { current.copy(signing = signing) }) {
+                fail("Invalid fresh lineage must block UID read"); null
+            })
+        }
+        assertEquals(rotated, current.identity)
+        assertEquals(target, (TargetSelectionCodec.decode(TargetSelectionCodec.encode(listOf(target)))
+            as TargetSelectionDecodeResult.Valid).values.single())
     }
 }

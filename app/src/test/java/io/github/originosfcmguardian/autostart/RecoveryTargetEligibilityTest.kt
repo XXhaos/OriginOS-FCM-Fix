@@ -42,8 +42,8 @@ class RecoveryTargetEligibilityTest {
         val launcher = qualifiedRecoveryLauncher("com.example.app", 10434, "com.example.app", 10434, false, true, true) { 1 }
         val qualified = RecoveryTargetQualifications(true, true, false, false, false, launcher)
         assertTrue(qualified.eligible)
-        listOf(qualified.copy(installed = false), qualified.copy(enabled = false), qualified.copy(system = true),
-            qualified.copy(updatedSystem = true), qualified.copy(persistent = true)).forEach { assertFalse(it.eligible) }
+        listOf(qualified.copy(installed = false), qualified.copy(enabled = false),
+            qualified.copy(persistent = true)).forEach { assertFalse(it.eligible) }
     }
 
     @Test fun ordinaryUserApplicationDoesNotRequireLauncherEvidence() {
@@ -57,8 +57,7 @@ class RecoveryTargetEligibilityTest {
         val qualified = RecoveryTargetQualifications(true, true, false, false, false)
         listOf(qualified.copy(installed = null), qualified.copy(installed = false),
             qualified.copy(enabled = null), qualified.copy(enabled = false),
-            qualified.copy(system = null), qualified.copy(system = true),
-            qualified.copy(updatedSystem = null), qualified.copy(updatedSystem = true),
+            qualified.copy(system = null), qualified.copy(updatedSystem = null),
             qualified.copy(persistent = null), qualified.copy(persistent = true)).forEach {
             assertFalse(it.eligible)
         }
@@ -67,8 +66,37 @@ class RecoveryTargetEligibilityTest {
     @Test fun googlePackagePrefixDoesNotReplaceActualPackageQualification() {
         assertTrue(isRecoveryTargetPackage("com.google.android.apps.maps"))
         assertTrue(isRecoveryTargetPackage("com.google.android.keep"))
-        assertFalse(isRecoveryTargetPackage("com.google.android.gms"))
+        assertTrue(isRecoveryTargetPackage("com.google.android.gms"))
         assertFalse(isRecoveryTargetPackage("com.android.vending"))
         assertFalse(isRecoveryTargetPackage("moe.shizuku.privileged.api"))
+    }
+
+    @Test fun knownSystemFlagCombinationsQualifyOnlyWithSoleUidOwnership() {
+        for (packageName in listOf("com.example.system", "com.google.android.gms")) {
+            for (system in listOf(false, true)) for (updatedSystem in listOf(false, true)) {
+                val flags = RecoveryTargetQualifications(true, true, system, updatedSystem, false)
+                assertTrue(flags.eligible)
+                assertTrue(qualifiedRecoveryTargetUid(packageName, flags, listOf(packageName)))
+                assertEquals(!system && !updatedSystem,
+                    qualifiedRecoveryTargetUid(packageName, flags, listOf(packageName, "com.example.shared")))
+                for (invalid in listOf(flags.copy(installed = false), flags.copy(installed = null),
+                    flags.copy(enabled = false), flags.copy(enabled = null), flags.copy(system = null),
+                    flags.copy(updatedSystem = null), flags.copy(persistent = true), flags.copy(persistent = null))) {
+                    assertFalse(qualifiedRecoveryTargetUid(packageName, invalid, listOf(packageName)))
+                }
+            }
+        }
+    }
+
+    @Test fun qualificationNeverReplacesBoundedValidUidMembership() {
+        val packageName = "com.example.system"
+        for (flags in listOf(RecoveryTargetQualifications(true, true, false, false, false),
+            RecoveryTargetQualifications(true, true, true, true, false))) {
+            for (owners in listOf(null, emptyList(), listOf("com.example.other"),
+                listOf(packageName, packageName), listOf(packageName, "invalid;package"),
+                listOf(packageName) + (1..64).map { "com.example.member$it" })) {
+                assertFalse(qualifiedRecoveryTargetUid(packageName, flags, owners))
+            }
+        }
     }
 }

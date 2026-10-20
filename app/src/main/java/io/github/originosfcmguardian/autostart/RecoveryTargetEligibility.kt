@@ -6,7 +6,7 @@ import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 internal fun isRecoveryTargetPackage(packageName: String): Boolean =
     isSafeAndroidPackageName(packageName) && packageName !in setOf(
         "android", "io.github.originosfcmguardian", "io.github.originosfcmguardian.test",
-        "io.github.originosfcmguardian.fcmtest", "com.google.android.gms", "com.android.vending",
+        "io.github.originosfcmguardian.fcmtest", "com.android.vending",
         "moe.shizuku.privileged.api", "com.android.shell", "com.android.systemui",
     )
 
@@ -29,6 +29,11 @@ internal data class RecoveryTargetQualifications(
     /** Legacy observation only. Clearing a stopped flag does not launch an activity. */
     val enabledExportedLauncher: Boolean? = null,
 ) {
-    val eligible: Boolean get() = installed == true && enabled == true && system == false &&
-        updatedSystem == false && persistent == false
+    val eligible: Boolean get() = installed == true && enabled == true && system != null &&
+        updatedSystem != null && persistent == false
 }
+
+/** System applications require a sole UID owner on every fresh qualification read. */
+internal fun qualifiedRecoveryTargetUid(packageName: String, qualifications: RecoveryTargetQualifications,
+    owners: List<String>?): Boolean = qualifications.eligible && validTargetUidMembers(packageName, owners) &&
+    (!(qualifications.system == true || qualifications.updatedSystem == true) || owners == listOf(packageName))

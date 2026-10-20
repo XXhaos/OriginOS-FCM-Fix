@@ -77,11 +77,67 @@ class RecipientStoppedRecoveryTest {
 
     @Test fun incompleteAndUnsafeQualificationsNeverReturnKnown() {
         val unsafe = listOf(null, qualifications.copy(installed = null), qualifications.copy(installed = false),
-            qualifications.copy(enabled = false), qualifications.copy(system = true), qualifications.copy(updatedSystem = true),
-            qualifications.copy(persistent = true))
+            qualifications.copy(enabled = false), qualifications.copy(enabled = null), qualifications.copy(system = null),
+            qualifications.copy(updatedSystem = null), qualifications.copy(persistent = true), qualifications.copy(persistent = null))
         unsafe.forEach { value ->
             assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields.copy(qualifications = value)))) is StoppedTargetObservation.Unknown)
             assertTrue(observeStoppedTarget(1, identity, Port(listOf(fields, fields.copy(qualifications = value)))) is StoppedTargetObservation.Unknown)
+        }
+    }
+
+    @Test fun installedEnabledNonpersistentSystemTargetsIncludingGmsReturnQualifiedEvidence() {
+        for (packageName in listOf(identity.packageName, "com.google.android.gms")) {
+            val target = identity.copy(packageName = packageName)
+            for (system in listOf(false, true)) for (updatedSystem in listOf(false, true)) {
+                val sample = fields.copy(packageName = packageName, applicationPackageName = packageName,
+                    qualifications = qualifications.copy(system = system, updatedSystem = updatedSystem))
+                val observation = observeStoppedTarget(1, target,
+                    Port(listOf(sample, sample.copy(stopped = false)), listOf(packageName))) as StoppedTargetObservation.Known
+                assertEquals(target, observation.identity)
+                assertTrue(observation.qualifiedRecipient)
+                assertTrue(observation.exclusiveUidOwner)
+                assertTrue(observation.hasVerifiedPackageUid)
+                assertFalse(observation.stopped)
+                assertEquals(observation, StoppedObservationCodec.decode(StoppedObservationCodec.encode(observation), 1, target))
+            }
+        }
+    }
+
+    @Test fun sharedSystemOwnershipFailsBeforeOrAfterSystemFlagChangesWithoutClaimOrWrite() {
+        val owners = listOf(identity.packageName, "com.example.shared")
+        for (systemFlags in listOf(qualifications.copy(system = true), qualifications.copy(updatedSystem = true),
+            qualifications.copy(system = true, updatedSystem = true))) {
+            val system = fields.copy(qualifications = systemFlags)
+            for ((before, after) in listOf(system to system, fields to system, system to fields)) {
+                val observation = observeStoppedTarget(1, identity, Port(listOf(before, after), owners))
+                assertEquals(StoppedObservationUnknown.INELIGIBLE_TARGET,
+                    (observation as StoppedTargetObservation.Unknown).reason)
+                val blocked = StoppedRecoveryEngine({ observation }, { error("Shared system target must not claim") },
+                    { true }, { error("Shared system target must not dispatch") }).recover(1, identity)
+                assertEquals(StoppedRecoveryOutcome.BLOCKED, blocked.outcome)
+            }
+        }
+    }
+
+    @Test fun gmsSystemQualificationCannotBypassCoreUidOrIncompleteApplicationEvidence() {
+        val target = identity.copy(packageName = "com.google.android.gms")
+        val systemFlags = qualifications.copy(system = true)
+        val sample = fields.copy(packageName = target.packageName, applicationPackageName = target.packageName,
+            qualifications = systemFlags)
+        for (invalidUid in listOf(0, 1000, 2000, 9999, 110234)) {
+            assertEquals(StoppedObservationUnknown.IDENTITY_UNKNOWN,
+                (observeStoppedTarget(1, target, Port(listOf(sample.copy(uid = invalidUid)), listOf(target.packageName)))
+                    as StoppedTargetObservation.Unknown).reason)
+        }
+        for (invalid in listOf(systemFlags.copy(installed = false), systemFlags.copy(installed = null),
+            systemFlags.copy(enabled = false), systemFlags.copy(enabled = null), systemFlags.copy(system = null),
+            systemFlags.copy(updatedSystem = null), systemFlags.copy(persistent = true), systemFlags.copy(persistent = null))) {
+            val invalidSample = sample.copy(qualifications = invalid)
+            for (samples in listOf(listOf(invalidSample, sample), listOf(sample, invalidSample))) {
+                assertEquals(StoppedObservationUnknown.INELIGIBLE_TARGET,
+                    (observeStoppedTarget(1, target, Port(samples, listOf(target.packageName)))
+                        as StoppedTargetObservation.Unknown).reason)
+            }
         }
     }
 
@@ -149,7 +205,7 @@ class RecipientStoppedRecoveryTest {
     }
 
     @Test fun excludedPackagesCannotEnterRecipientServiceRoute() {
-        listOf("android", "io.github.originosfcmguardian", "io.github.originosfcmguardian.test", "com.google.android.gms",
+        listOf("android", "io.github.originosfcmguardian", "io.github.originosfcmguardian.test", "io.github.originosfcmguardian.fcmtest",
             "moe.shizuku.privileged.api", "com.android.vending", "com.android.shell", "com.android.systemui").forEach {
             assertFalse(isRecoveryTargetPackage(it))
             assertThrows(IllegalArgumentException::class.java) { stoppedRecoveryArgv(identity.copy(packageName = it)) }
@@ -286,7 +342,7 @@ class RecipientStoppedRecoveryTest {
         val owners = listOf(identity.packageName, "com.example.shared")
         val drift = fields.copy(firstInstallTime = 101)
         val unsafe = fields.copy(qualifications = qualifications.copy(system = true))
-        listOf(Port(listOf(fields, drift), owners), Port(listOf(unsafe), owners),
+        listOf(Port(listOf(fields, drift), owners), Port(listOf(unsafe, unsafe), owners),
             Port(listOf(fields, unsafe), owners)).forEach { port ->
             val observation = observeStoppedTarget(1, identity, port)
             var writes = 0
@@ -317,6 +373,29 @@ class RecipientStoppedRecoveryTest {
         val rotated = fields.copy(currentSignerCertificates = listOf(certificate))
         val current = requireNotNull(validatedStoppedPackage(rotated, identity.packageName)).first
         return rotated.copy(signing = TargetSigningEvidence(false, identity.signerSha256 + current.signerSha256))
+    }
+
+    @Test fun gmsSystemUsesFrozenRecipientIdentityAndFreshLineageWithoutBypassingOffOrCorruptStorage() {
+        val target = identity.copy(packageName = "com.google.android.gms")
+        val rotated = rotatedFields().copy(packageName = target.packageName, applicationPackageName = target.packageName,
+            qualifications = qualifications.copy(system = true, updatedSystem = true))
+        val owners = listOf(target.packageName)
+        val baseline = observeStoppedTarget(1, target, Port(listOf(rotated, rotated), owners)) as StoppedTargetObservation.Known
+        assertEquals(target, baseline.identity)
+        assertNotEquals(target, validatedStoppedPackage(rotated, target.packageName)!!.first)
+        for (samples in listOf(listOf(rotated.copy(signing = null), rotated),
+            listOf(rotated, rotated.copy(signing = null)),
+            listOf(rotated.copy(signing = rotated.signing!!.copy(historySha256 = listOf("invalid"))), rotated))) {
+            assertEquals(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED,
+                (observeStoppedTarget(1, target, Port(samples, owners)) as StoppedTargetObservation.Unknown).reason)
+        }
+        assertEquals(StoppedRecoveryOutcome.BLOCKED,
+            StoppedRecoveryEngine({ baseline }, { error("OFF must not claim") }, { false },
+                { error("OFF must not dispatch") }).recover(1, target).outcome)
+        val memory = Memory().apply { bytes = byteArrayOf(1, 2, 3) }
+        val corrupt = StoppedRecoveryJournal(memory)
+        assertThrows(Exception::class.java) { corrupt.prepareAutomatically(target, baseline, consent) }
+        assertArrayEquals(byteArrayOf(1, 2, 3), memory.bytes)
     }
 
     @Test fun verifiedRotationRetainsExpectedIdentityAcrossCodecJournalAndRecovery() {

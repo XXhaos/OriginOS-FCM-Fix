@@ -44,7 +44,8 @@ class StoppedRecoveryPresentationTest {
             assertFalse(eligible(target.copy(stoppedSnapshot = TargetStoppedSnapshot(it))))
         }
         assertTrue(eligible(target.copy(identity = target.identity.copy(packageName = "example.other"))))
-        listOf("com.google.android.gms", "moe.shizuku.privileged.api", "io.github.originosfcmguardian").forEach {
+        assertTrue(eligible(target.copy(identity = target.identity.copy(packageName = "com.google.android.gms"))))
+        listOf("com.android.vending", "moe.shizuku.privileged.api", "io.github.originosfcmguardian").forEach {
             assertFalse(eligible(target.copy(identity = target.identity.copy(packageName = it))))
         }
         assertFalse(eligible(target.copy(status = TargetAutostartStatus.IDENTITY_CHANGED)))

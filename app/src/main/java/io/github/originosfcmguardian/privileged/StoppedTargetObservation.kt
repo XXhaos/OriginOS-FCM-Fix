@@ -6,6 +6,7 @@ import io.github.originosfcmguardian.autostart.validRuntimeFingerprint
 import io.github.originosfcmguardian.autostart.RecoveryTargetQualifications
 import io.github.originosfcmguardian.autostart.isRecoveryTargetPackage
 import io.github.originosfcmguardian.autostart.validTargetUidMembers
+import io.github.originosfcmguardian.autostart.qualifiedRecoveryTargetUid
 import io.github.originosfcmguardian.autostart.TargetSigningEvidence
 import io.github.originosfcmguardian.autostart.targetSigningContinues
 import io.github.originosfcmguardian.autostart.hasVerifiedPackageUid as verifiedRecoveryPackageUid
@@ -174,6 +175,10 @@ internal fun observeStoppedTarget(requestId: Long, expected: SelectedTargetIdent
         if (before.first != after.first) return unknown(StoppedObservationUnknown.IDENTITY_CHANGED)
         if (afterFields?.qualifications?.eligible != true) return unknown(StoppedObservationUnknown.INELIGIBLE_TARGET)
         if (!validTargetUidMembers(expected.packageName, owners)) return unknown(StoppedObservationUnknown.UID_OWNERSHIP_UNKNOWN)
+        if (!qualifiedRecoveryTargetUid(expected.packageName, requireNotNull(beforeFields?.qualifications), owners) ||
+            !qualifiedRecoveryTargetUid(expected.packageName, requireNotNull(afterFields?.qualifications), owners)) {
+            return unknown(StoppedObservationUnknown.INELIGIBLE_TARGET)
+        }
         if (!targetSigningContinues(expected, before.first, beforeFields?.signing) ||
             !targetSigningContinues(expected, after.first, afterFields?.signing)) {
             return unknown(StoppedObservationUnknown.EXPECTED_IDENTITY_CHANGED)

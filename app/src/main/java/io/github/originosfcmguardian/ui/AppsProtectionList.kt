@@ -55,10 +55,16 @@ internal fun AppsProtectionList(
     details: @Composable (ProtectionAppRow) -> Unit,
     modifier: Modifier = Modifier,
     onRecheckSelected: () -> Unit = {},
+    onShowSystemAppsChanged: (Boolean) -> Unit = {},
 ) {
     val groups = protectionAppGroups(state, query)
     var selectedApp by remember { mutableStateOf<ProtectionAppRow?>(null) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("显示系统应用", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Switch(checked = state.showSystemApps, onCheckedChange = onShowSystemAppsChanged,
+                modifier = Modifier.semantics { contentDescription = "显示系统应用" })
+        }
         TextField(query, onQuery, singleLine = true,
             shape = MaterialTheme.shapes.medium, placeholder = { Text("搜索应用") },
             colors = TextFieldDefaults.colors(
@@ -103,7 +109,7 @@ internal fun AppsProtectionList(
     selectedApp?.let { openedRow ->
         // Keep the opened identity fixed while presenting live state. A replaced installation cannot
         // inherit this sheet's selection or recheck action.
-        val allRows = protectionAppGroups(state, "").let { it.protected + it.all }
+        val allRows = protectionAppGroups(state.copy(showSystemApps = true), "").let { it.protected + it.all }
         val row = allRows.firstOrNull {
             it.app.identity == openedRow.app.identity && it.app.packageName == openedRow.app.packageName &&
                 it.currentInstallation == openedRow.currentInstallation
