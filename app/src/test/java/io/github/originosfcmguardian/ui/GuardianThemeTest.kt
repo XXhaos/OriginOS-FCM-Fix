@@ -3,6 +3,7 @@ package io.github.originosfcmguardian.ui
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +17,7 @@ class GuardianThemeTest {
                 colors.surfaceContainerHighest,
                 // Home's highlighted cards retain the same text/status roles.
                 lerp(colors.surfaceContainer, colors.primaryContainer, 0.24f),
+                guardianPrimaryCardColor(colors),
             )
             val foregrounds = listOf(
                 colors.onSurface, colors.onSurfaceVariant, colors.primary, colors.error,
@@ -36,6 +38,12 @@ class GuardianThemeTest {
                 colors.onError to colors.error,
                 colors.onErrorContainer to colors.errorContainer,
                 colors.inverseOnSurface to colors.inverseSurface,
+                colors.onPrimaryFixed to colors.primaryFixed,
+                colors.onPrimaryFixedVariant to colors.primaryFixedDim,
+                colors.onSecondaryFixed to colors.secondaryFixed,
+                colors.onSecondaryFixedVariant to colors.secondaryFixedDim,
+                colors.onTertiaryFixed to colors.tertiaryFixed,
+                colors.onTertiaryFixedVariant to colors.tertiaryFixedDim,
             ).forEach { (text, surface) -> assertContrast(text, surface, 4.5f) }
         }
     }
@@ -49,8 +57,43 @@ class GuardianThemeTest {
     }
 
     @Test fun palettesRepresentOppositeSystemModes() {
-        assertTrue(GuardianDarkColors.background.luminance() < 0.1f)
-        assertTrue(GuardianLightColors.background.luminance() > 0.8f)
+        assertEquals(Color.Black, GuardianDarkColors.background)
+        assertEquals(Color.Black, GuardianDarkColors.surface)
+        assertEquals(Color.White, GuardianLightColors.background)
+        assertEquals(Color.White, GuardianLightColors.surface)
+    }
+
+    @Test fun nonSemanticThemeRolesAndCardEmphasisAreNeutral() {
+        listOf(GuardianDarkColors, GuardianLightColors).forEach { colors ->
+            listOf(
+                colors.primary, colors.onPrimary, colors.primaryContainer, colors.onPrimaryContainer,
+                colors.secondary, colors.onSecondary, colors.secondaryContainer, colors.onSecondaryContainer,
+                colors.tertiary, colors.onTertiary, colors.tertiaryContainer, colors.onTertiaryContainer,
+                colors.background, colors.onBackground, colors.surface, colors.onSurface,
+                colors.surfaceVariant, colors.onSurfaceVariant, colors.surfaceContainerLowest,
+                colors.surfaceContainerLow, colors.surfaceContainer, colors.surfaceContainerHigh,
+                colors.surfaceContainerHighest, colors.surfaceDim, colors.surfaceBright, colors.surfaceTint,
+                colors.outline, colors.outlineVariant, colors.inverseSurface, colors.inverseOnSurface,
+                colors.inversePrimary, colors.scrim, guardianPrimaryCardColor(colors),
+                colors.primaryFixed, colors.primaryFixedDim, colors.onPrimaryFixed, colors.onPrimaryFixedVariant,
+                colors.secondaryFixed, colors.secondaryFixedDim, colors.onSecondaryFixed, colors.onSecondaryFixedVariant,
+                colors.tertiaryFixed, colors.tertiaryFixedDim, colors.onTertiaryFixed, colors.onTertiaryFixedVariant,
+            ).forEach { color ->
+                assertEquals("Non-semantic theme color must have equal red and green", color.red, color.green, 0f)
+                assertEquals("Non-semantic theme color must have equal green and blue", color.green, color.blue, 0f)
+            }
+        }
+    }
+
+    @Test fun neutralSurfaceLayersRemainDistinctInBothModes() {
+        listOf(GuardianDarkColors, GuardianLightColors).forEach { colors ->
+            val layers = listOf(colors.surfaceContainerLowest, colors.surfaceContainerLow,
+                colors.surfaceContainer, colors.surfaceContainerHigh, colors.surfaceContainerHighest)
+            layers.zipWithNext().forEach { (lower, higher) ->
+                if (colors == GuardianDarkColors) assertTrue(lower.luminance() < higher.luminance())
+                else assertTrue(lower.luminance() > higher.luminance())
+            }
+        }
     }
 
     private fun assertContrast(foreground: Color, background: Color, minimum: Float) {

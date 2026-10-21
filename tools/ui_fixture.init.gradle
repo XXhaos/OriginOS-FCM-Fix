@@ -1,0 +1,16 @@
+// Opt-in isolated build for synthetic Compose UI tests, never a daily-install artifact.
+// Usage: gradlew -I tools/ui_fixture.init.gradle :app:assembleDebug :app:assembleDebugAndroidTest
+// No daily data/authority/privilege is copied or granted. Rebuild WITHOUT this init script
+// before creating the canonical daily APK. Inspect the merged manifests before installing.
+gradle.beforeProject { project ->
+    if (project.path == ':app') {
+        project.pluginManager.withPlugin('com.android.application') {
+            project.extensions.getByName('androidComponents').finalizeDsl { android ->
+                android.defaultConfig.applicationId = 'io.github.originosfcmguardian.phase5fixture'
+                android.defaultConfig.testApplicationId = 'io.github.originosfcmguardian.phase5fixture.test'
+                // Synthetic UI fixtures must not initialize GuardianApplication's production hooks.
+                android.defaultConfig.testInstrumentationRunner = 'io.github.originosfcmguardian.testing.Phase5FixtureTestRunner'
+            }
+        }
+    }
+}

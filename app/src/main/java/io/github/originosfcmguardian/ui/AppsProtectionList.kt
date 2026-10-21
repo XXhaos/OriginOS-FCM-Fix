@@ -1,6 +1,8 @@
 package io.github.originosfcmguardian.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -13,10 +15,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -37,8 +39,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 
@@ -58,13 +63,9 @@ internal fun AppsProtectionList(
     onShowSystemAppsChanged: (Boolean) -> Unit = {},
 ) {
     val groups = protectionAppGroups(state, query)
+    val placeRows = query.isBlank() && state.visibleAppsLoadState == HomeSourceLoadState.LOADED
     var selectedApp by remember { mutableStateOf<ProtectionAppRow?>(null) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("显示系统应用", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            Switch(checked = state.showSystemApps, onCheckedChange = onShowSystemAppsChanged,
-                modifier = Modifier.semantics { contentDescription = "显示系统应用" })
-        }
         TextField(query, onQuery, singleLine = true,
             shape = MaterialTheme.shapes.medium, placeholder = { Text("搜索应用") },
             colors = TextFieldDefaults.colors(
@@ -73,12 +74,21 @@ internal fun AppsProtectionList(
                 focusedIndicatorColor = Color.Transparent,
                 unfocusedIndicatorColor = Color.Transparent),
             modifier = Modifier.fillMaxWidth().semantics { contentDescription = "搜索名称或包名" })
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("显示系统应用", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Switch(checked = state.showSystemApps, onCheckedChange = onShowSystemAppsChanged,
+                modifier = Modifier.semantics { contentDescription = "显示系统应用" })
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onRecheckSelected, enabled = canRecheckSelectedApps(state)) {
-                Text(if (state.selectedAppsRecheckRunning) "正在复检…" else "复检已选应用")
+            OutlinedButton(onClick = onRecheckSelected, enabled = canRecheckSelectedApps(state),
+                modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp), shape = MaterialTheme.shapes.small) {
+                Text(if (state.selectedAppsRecheckRunning) "正在复检…" else "复检已选应用", textAlign = TextAlign.Center)
             }
-            TextButton(onClick = onRefresh, enabled = state.visibleAppsLoadState != HomeSourceLoadState.LOADING) { Text("刷新") }
+            OutlinedButton(onClick = onRefresh, enabled = state.visibleAppsLoadState != HomeSourceLoadState.LOADING,
+                shape = MaterialTheme.shapes.small) {
+                Text("刷新", textAlign = TextAlign.Center)
+            }
         }
         if (state.visibleAppsLoadState == HomeSourceLoadState.LOADING) Text("正在读取应用…", style = MaterialTheme.typography.bodySmall)
         state.appsMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
@@ -95,14 +105,18 @@ internal fun AppsProtectionList(
             if (groups.protected.isEmpty()) item { Text(protectedAppsEmptyLabel(state.automaticProtection.configurationAvailable, query),
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp)) }
             items(groups.protected, key = { if (it.currentInstallation) "current:${it.app.packageName}" else "old:${it.app.identity}" }) { row ->
-                ProtectionApplicationRow(state, row, onEnable, onDisable) { selectedApp = row }
+                ProtectionApplicationRow(state, row, onEnable, onDisable,
+                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                        placementSpec = if (placeRows) tween(180, easing = FastOutSlowInEasing) else null)) { selectedApp = row }
             }
             item { ApplicationSectionTitle("所有应用", groups.all.size, Modifier.padding(top = 16.dp)) }
             if (groups.all.isEmpty() && state.visibleAppsLoadState != HomeSourceLoadState.LOADING) item {
                 Text(if (query.isBlank()) "没有其他可见应用" else "没有匹配的应用", modifier = Modifier.padding(vertical = 8.dp))
             }
             items(groups.all, key = { if (it.currentInstallation) "current:${it.app.packageName}" else "old:${it.app.identity}" }) { row ->
-                ProtectionApplicationRow(state, row, onEnable, onDisable) { selectedApp = row }
+                ProtectionApplicationRow(state, row, onEnable, onDisable,
+                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                        placementSpec = if (placeRows) tween(180, easing = FastOutSlowInEasing) else null)) { selectedApp = row }
             }
         }
     }
@@ -125,10 +139,10 @@ internal fun AppsProtectionList(
 @Composable
 private fun ApplicationSectionTitle(title: String, count: Int, modifier: Modifier = Modifier) {
     Row(modifier.fillMaxWidth().padding(vertical = 10.dp)
-        .semantics(mergeDescendants = true) { contentDescription = "$title（$count）" },
+        .clearAndSetSemantics { heading(); contentDescription = "$title（$count）" },
         verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-        Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
             Text(count.toString(), style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp))
@@ -139,11 +153,12 @@ private fun ApplicationSectionTitle(title: String, count: Int, modifier: Modifie
 @Composable
 private fun ProtectionApplicationRow(state: HomeUiState, row: ProtectionAppRow,
     onEnable: (String) -> Unit, onDisable: (SelectedTargetIdentity) -> Unit,
+    modifier: Modifier = Modifier,
     onOpen: () -> Unit) {
     val app = row.app
     val configured = app.identity in state.automaticProtection.configuredIdentities
-    val rowShape = RoundedCornerShape(18.dp)
-    Row(Modifier.fillMaxWidth()
+    val rowShape = MaterialTheme.shapes.medium
+    Row(modifier.fillMaxWidth()
         .padding(vertical = 2.dp)
         .clip(rowShape)
         .background(if (configured) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLow)
@@ -176,7 +191,7 @@ private fun ProtectionApplicationSheet(state: HomeUiState, row: ProtectionAppRow
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             TargetAppIcon(app.packageName, app.label, app.identity, size = 52.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(app.label, style = MaterialTheme.typography.titleLarge)
+                Text(app.label, modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
                 Text(app.packageName, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }

@@ -3,56 +3,74 @@ package io.github.originosfcmguardian.ui
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 internal fun guardianSuccessColor(dark: Boolean) = if (dark) Color(0xFF9CE3B5) else Color(0xFF256640)
 internal fun guardianWarningColor(dark: Boolean) = if (dark) Color(0xFFFFCF80) else Color(0xFF815000)
 
+/** Fixed visual hierarchy for the primary control; never a connection/authority indicator. */
+internal fun guardianPrimaryCardColor(colors: ColorScheme): Color =
+    lerp(colors.surfaceContainer, colors.primaryContainer, 0.18f)
+
 internal val GuardianDarkColors = darkColorScheme(
-    primary = Color(0xFF77D9C6), onPrimary = Color(0xFF00382F),
-    primaryContainer = Color(0xFF234B45), onPrimaryContainer = Color(0xFFE0FFF6),
-    secondary = Color(0xFFB0CCC3), onSecondary = Color(0xFF203A32),
-    secondaryContainer = Color(0xFF304A42), onSecondaryContainer = Color(0xFFD2EAE1),
-    tertiary = Color(0xFFBCCAE7), onTertiary = Color(0xFF25334C),
-    tertiaryContainer = Color(0xFF3B4963), onTertiaryContainer = Color(0xFFDCE5FF),
-    background = Color(0xFF0D1719), onBackground = Color(0xFFE0ECE8),
-    surface = Color(0xFF0D1719), onSurface = Color(0xFFE0ECE8),
-    surfaceVariant = Color(0xFF2B3C3F), onSurfaceVariant = Color(0xFFC4D7D2),
-    surfaceContainer = Color(0xFF162427), surfaceContainerLow = Color(0xFF132023),
-    surfaceContainerHigh = Color(0xFF1C2D30), surfaceContainerHighest = Color(0xFF2B3C3F),
-    surfaceContainerLowest = Color(0xFF081113), surfaceDim = Color(0xFF0D1719),
-    surfaceBright = Color(0xFF324346), surfaceTint = Color(0xFF77D9C6),
-    outline = Color(0xFF819790), outlineVariant = Color(0xFF3A504C),
-    inverseSurface = Color(0xFFE0ECE8), inverseOnSurface = Color(0xFF22312E),
-    inversePrimary = Color(0xFF006B5D),
+    primary = Color(0xFFEDEDED), onPrimary = Color(0xFF121212),
+    primaryContainer = Color(0xFF2A2A2A), onPrimaryContainer = Color(0xFFF5F5F5),
+    secondary = Color(0xFFC7C7C7), onSecondary = Color(0xFF202020),
+    secondaryContainer = Color(0xFF242424), onSecondaryContainer = Color(0xFFEDEDED),
+    tertiary = Color(0xFFD6D6D6), onTertiary = Color(0xFF202020),
+    tertiaryContainer = Color(0xFF303030), onTertiaryContainer = Color(0xFFF5F5F5),
+    background = Color.Black, onBackground = Color(0xFFEDEDED),
+    surface = Color.Black, onSurface = Color(0xFFEDEDED),
+    surfaceVariant = Color(0xFF242424), onSurfaceVariant = Color(0xFFC7C7C7),
+    surfaceContainer = Color(0xFF141414), surfaceContainerLow = Color(0xFF0D0D0D),
+    surfaceContainerHigh = Color(0xFF1B1B1B), surfaceContainerHighest = Color(0xFF242424),
+    surfaceContainerLowest = Color.Black, surfaceDim = Color.Black,
+    surfaceBright = Color(0xFF303030), surfaceTint = Color(0xFFEDEDED),
+    outline = Color(0xFF929292), outlineVariant = Color(0xFF454545),
+    inverseSurface = Color(0xFFEDEDED), inverseOnSurface = Color(0xFF202020),
+    inversePrimary = Color(0xFF333333),
+    primaryFixed = Color(0xFFE6E6E6), primaryFixedDim = Color(0xFFC7C7C7),
+    onPrimaryFixed = Color(0xFF202020), onPrimaryFixedVariant = Color(0xFF444444),
+    secondaryFixed = Color(0xFFE6E6E6), secondaryFixedDim = Color(0xFFC7C7C7),
+    onSecondaryFixed = Color(0xFF202020), onSecondaryFixedVariant = Color(0xFF444444),
+    tertiaryFixed = Color(0xFFE6E6E6), tertiaryFixedDim = Color(0xFFC7C7C7),
+    onTertiaryFixed = Color(0xFF202020), onTertiaryFixedVariant = Color(0xFF444444),
     error = Color(0xFFFFB4AB), onError = Color(0xFF690005),
     errorContainer = Color(0xFF8C1D18), onErrorContainer = Color(0xFFFFDAD6),
 )
 
 internal val GuardianLightColors = lightColorScheme(
-    primary = Color(0xFF006B5D), onPrimary = Color.White,
-    primaryContainer = Color(0xFFD2F1E8), onPrimaryContainer = Color(0xFF00382F),
-    secondary = Color(0xFF49665B), onSecondary = Color.White,
-    secondaryContainer = Color(0xFFCEE8DB), onSecondaryContainer = Color(0xFF143C2D),
-    tertiary = Color(0xFF52617D), onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFDCE5FF), onTertiaryContainer = Color(0xFF26334C),
-    background = Color(0xFFF3F8F7), onBackground = Color(0xFF172A28),
-    surface = Color(0xFFF3F8F7), onSurface = Color(0xFF172A28),
-    surfaceVariant = Color(0xFFDCEBE6), onSurfaceVariant = Color(0xFF455B55),
-    surfaceContainer = Color.White, surfaceContainerLow = Color(0xFFEAF3F1),
-    surfaceContainerHigh = Color(0xFFE4EFEC), surfaceContainerHighest = Color(0xFFDCEBE6),
-    surfaceContainerLowest = Color.White, surfaceDim = Color(0xFFD4E1DD),
-    surfaceBright = Color(0xFFF3F8F7), surfaceTint = Color(0xFF006B5D),
-    outline = Color(0xFF6E847C), outlineVariant = Color(0xFFBECEC8),
-    inverseSurface = Color(0xFF22312E), inverseOnSurface = Color(0xFFE5F2ED),
-    inversePrimary = Color(0xFF77D9C6),
+    primary = Color(0xFF202020), onPrimary = Color.White,
+    primaryContainer = Color(0xFFE6E6E6), onPrimaryContainer = Color(0xFF202020),
+    secondary = Color(0xFF505050), onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE6E6E6), onSecondaryContainer = Color(0xFF202020),
+    tertiary = Color(0xFF595959), onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFEDEDED), onTertiaryContainer = Color(0xFF262626),
+    background = Color.White, onBackground = Color(0xFF202020),
+    surface = Color.White, onSurface = Color(0xFF202020),
+    surfaceVariant = Color(0xFFEAEAEA), onSurfaceVariant = Color(0xFF555555),
+    surfaceContainer = Color(0xFFF5F5F5), surfaceContainerLow = Color(0xFFFAFAFA),
+    surfaceContainerHigh = Color(0xFFF0F0F0), surfaceContainerHighest = Color(0xFFEAEAEA),
+    surfaceContainerLowest = Color.White, surfaceDim = Color(0xFFDEDEDE),
+    surfaceBright = Color.White, surfaceTint = Color(0xFF202020),
+    outline = Color(0xFF747474), outlineVariant = Color(0xFFC7C7C7),
+    inverseSurface = Color(0xFF262626), inverseOnSurface = Color(0xFFF5F5F5),
+    inversePrimary = Color(0xFFEDEDED),
+    primaryFixed = Color(0xFFE6E6E6), primaryFixedDim = Color(0xFFC7C7C7),
+    onPrimaryFixed = Color(0xFF202020), onPrimaryFixedVariant = Color(0xFF444444),
+    secondaryFixed = Color(0xFFE6E6E6), secondaryFixedDim = Color(0xFFC7C7C7),
+    onSecondaryFixed = Color(0xFF202020), onSecondaryFixedVariant = Color(0xFF444444),
+    tertiaryFixed = Color(0xFFE6E6E6), tertiaryFixedDim = Color(0xFFC7C7C7),
+    onTertiaryFixed = Color(0xFF202020), onTertiaryFixedVariant = Color(0xFF444444),
     error = Color(0xFFB3261E), onError = Color.White,
     errorContainer = Color(0xFFF9DEDC), onErrorContainer = Color(0xFF410E0B),
 )

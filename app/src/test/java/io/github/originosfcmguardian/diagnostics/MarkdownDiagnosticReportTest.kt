@@ -3,6 +3,10 @@ package io.github.originosfcmguardian.diagnostics
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.autostart.SelectedTargetUiState
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
+import io.github.originosfcmguardian.core.gms.*
+import io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState
+import io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState
+import io.github.originosfcmguardian.fcmrecovery.*
 import io.github.originosfcmguardian.recovery.StoppedRecoveryOutcome
 import io.github.originosfcmguardian.recovery.StoppedRecoverySource
 import io.github.originosfcmguardian.recovery.StoppedRecoveryStage
@@ -30,7 +34,7 @@ class MarkdownDiagnosticReportTest {
         listOf("环境", "Shizuku", "目标应用", "FCM 恢复事件",
             "后台资源与中断分析", "保护停止与进程记录", "来源可用性", "仍未知的关系", "已移除的排查工具", "局限")
             .forEach { assertTrue(it, markdown.contains("## $it")) }
-        listOf("当前显示名称：目标名称",
+        listOf("| 1 | 目标名称 | org\\.example\\.recipient |",
             "部分记录（PARTIAL）", "未知（UNKNOWN）", "未采集不代表没有事件")
             .forEach { assertTrue(it, markdown.contains(it)) }
         assertTrue(markdown.contains("Shell 权限就绪（READY\\_SHELL）"))
@@ -66,8 +70,10 @@ class MarkdownDiagnosticReportTest {
     fun everyTargetIsIncludedWithoutSilentTruncation() {
         val targets = (0 until 32).map { DiagnosticTarget("org.example.p$it", "应用$it") }
         val markdown = render(base().copy(targets = targets))
-        assertEquals(32, Regex("(?m)^### 目标应用 ").findAll(markdown).count())
-        targets.forEachIndexed { index, _ -> assertTrue(markdown.contains("当前显示名称：应用$index\n")) }
+        assertEquals(32, Regex("(?m)^\\| [0-9]+ \\| 应用").findAll(markdown).count())
+        targets.forEachIndexed { index, _ ->
+            assertTrue(markdown.contains("| ${index + 1} | 应用$index | org\\.example\\.p$index |\n"))
+        }
         assertTrue(markdown.contains("目标应用数量：32"))
     }
 
@@ -135,7 +141,7 @@ class MarkdownDiagnosticReportTest {
         val markdown = render(report)
         listOf("privateTokenSentinel", "privateTestSentinel", "privateFreeTextSentinel", signer,
             "12345", "99123456789").forEach { assertFalse(it, markdown.contains(it)) }
-        assertTrue(markdown.contains("包名：org\\.example\\.recipient"))
+        assertTrue(markdown.contains("| 1 | Recipient | org\\.example\\.recipient |"))
     }
 
     @Test
@@ -223,6 +229,158 @@ class MarkdownDiagnosticReportTest {
         val result = prepared.consume(documentSelected = true) as CombinedDiagnosticExportResult.Ready
         assertArrayEquals(expected, result.bytes)
         assertTrue(prepared.consume(documentSelected = true) is CombinedDiagnosticExportResult.Missing)
+    }
+
+    @Test
+    fun quickSummaryKeepsIndependentContradictoryFlagsAndExplicitUnknowns() {
+        val report = base().copy(
+            targets = null,
+            automaticProtection = DiagnosticAutomaticProtection(enabled = true, savedAuthorization = false,
+                waitingForPrivilege = true, waitingForReconciliation = true),
+            stoppedRecovery = DiagnosticStoppedRecovery(needsReconcile = true),
+            fcmProtection = FcmProtectionUiState(configured = true, storageBlocked = true,
+                requiresConfirmation = true, maintenance = FcmMaintenanceState.ACTIVE, recoveryReady = false),
+        )
+        val markdown = render(report)
+        val summary = markdown.substringAfter("## 快速摘要\n").substringBefore("## 阅读导航")
+        listOf("| 目标应用数量 | 未知或不可用（null），请结合来源状态 |",
+            "| 界面启用标志 | 是（true） |", "| 界面保存授权标志 | 否（false） |",
+            "| 等待特权就绪 | 是（true） |", "| 等待未决结果核对 | 是（true） |",
+            "| 维护分支 | ACTIVE |", "| 恢复分支当前资格 | 否（false） |",
+            "| 统一 FCM 保护存储阻断 | 是（true） |", "| 统一授权需重新确认 | 是（true） |",
+            "| 存在待核对结果 | 是（true） |").forEach { assertTrue(it, summary.contains(it)) }
+        assertTrue(summary.contains("不合成为“全部健康”结论"))
+        assertTrue(markdown.contains("统一 FCM 保护存储阻断：是（true）"))
+        val emptySummary = render(report.copy(targets = emptyList())).substringBefore("## 阅读导航")
+        assertTrue(emptySummary.contains("| 目标应用数量 | 0 |"))
+        assertFalse(emptySummary.contains("目标应用数量 | 未知"))
+    }
+
+    @Test
+    fun staticNavigationPointsToRetainedSectionsAndNeverUsesUserTextAsLinks() {
+        val report = base().copy(targets = listOf(DiagnosticTarget("org.example.app", "普通名称")))
+        val safe = render(report)
+        val hostile = render(report.copy(
+            environment = report.environment.copy(manufacturer = "| --- |\n## injected\n<a id=x>"),
+            shizukuStatus = "[replace](https://evil.invalid)",
+            targets = listOf(DiagnosticTarget("[pkg](https://evil.invalid)", "|x|\n# injected\n[go](#局限)")),
+        ))
+        fun headings(value: String) = Regex("(?m)^#{1,3} .+$").findAll(value).map { it.value }.toList()
+        assertEquals(headings(safe), headings(hostile))
+        fun navigation(value: String) = value.substringAfter("## 阅读导航\n").substringBefore("## 环境")
+        assertEquals(navigation(safe), navigation(hostile))
+        listOf("#环境", "#shizuku", "#目标应用", "#fcm-恢复事件", "#fcm-断连与恢复片段",
+            "#后台资源与中断分析", "#独立保护核心运行记录", "#保护停止与进程记录",
+            "#停止标志恢复摘要", "#自动保护应用内快照", "#来源可用性", "#仍未知的关系", "#局限")
+            .forEach { assertTrue(it, navigation(safe).contains("]($it)")) }
+        assertFalse(hostile.contains("\n## injected"))
+        assertFalse(hostile.contains("[replace](https://evil.invalid)"))
+        assertFalse(hostile.contains("<a id=x>"))
+        val targetRow = hostile.lineSequence().single { it.startsWith("| 1 |") }
+        assertEquals(4, Regex("(?<!\\\\)\\|").findAll(targetRow).count())
+        assertTrue(targetRow.contains("\\|x\\|"))
+    }
+
+    @Test
+    fun revisedPresentationRetainsEveryFcmEventAndPowerEvidenceWithoutChangingJson() {
+        val process = "00000000-0000-0000-0000-000000000001"
+        val event = FcmRecoveryEvent(41001, 411, FcmRecoveryEventAction.REQUEST_RESULT,
+            GcmConnectionState.REPORTED_DISCONNECTED, SourceCompleteness.COMPLETE, SocketObservation.NO_MATCH,
+            eligible = true, status = FcmRecoveryStatus.NOT_SENT, reason = FcmRecoveryReason.TARGET_UNQUALIFIED,
+            observationUnknownReason = GmsUnknown.TIMED_OUT,
+            operation = FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS,
+            power = FcmPowerReference(63, FcmChargingStatus.DISCHARGING, FcmPluggedSource.UNPLUGGED,
+                false, true, 171, 172, process))
+        val report = base().copy(fcmRecoveryTrial = FcmRecoveryUiState(configured = true,
+            storageBlocked = true, events = listOf(event)))
+        val originalJson = encodeCombinedDiagnosticReport(report)
+        val markdown = render(report)
+        listOf("41001 / REQUEST_RESULT / REPORTED_DISCONNECTED / COMPLETE / NO_MATCH / ELIGIBLE",
+            "NOT_SENT / TARGET_UNQUALIFIED", "请求操作=PRESENT_DISCONNECTED_MCS", "读取未知原因=TIMED_OUT",
+            "整机电量=63%", "充电=DISCHARGING", "电源=UNPLUGGED", "交互=false", "空闲=true",
+            "主进程CPUms=171", "进程年龄ms=172", "进程标识=$process",
+            "恢复配置：是（true）", "记录存储阻断：是（true）", "REQUESTED仅表示请求被接受",
+            "连接观察不证明通知送达", "不能归因于 Guardian").forEach { assertTrue(it, markdown.contains(it)) }
+        assertArrayEquals(originalJson, encodeCombinedDiagnosticReport(report))
+    }
+
+    @Test
+    fun tableTextCannotInjectAutolinksImagesFootnotesOrExtraRows() {
+        val payloads = listOf("<https://evil.invalid>", "![img](https://evil.invalid/x)",
+            "[x][ref]\n[ref]: https://evil.invalid", "[^note]\n[^note]: secret", "x\\|y|z\r\n| --- |",
+            "&lt;script&gt;", "\u202Ehidden\u2066\u2069", "\uD800\uDC00\uD800")
+        payloads.forEach { payload ->
+            val markdown = render(base().copy(environment = environment().copy(model = payload),
+                targets = listOf(DiagnosticTarget(payload, payload))))
+            val targetRows = markdown.lineSequence().filter { it.startsWith("| 1 |") }.toList()
+            assertEquals(payload, 1, targetRows.size)
+            assertEquals(payload, 4, Regex("(?<!\\\\)\\|").findAll(targetRows.single()).count())
+            assertFalse(markdown.contains("<https://evil.invalid>"))
+            assertFalse(markdown.contains("![img]"))
+            assertFalse(markdown.contains("\n[ref]:"))
+            assertFalse(markdown.contains("\n[^note]:"))
+            assertFalse(markdown.any { Character.getType(it) in setOf(Character.FORMAT.toInt(),
+                Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt()) })
+        }
+    }
+
+    @Test
+    fun emptyTargetTableIsExplicitAndDoesNotCreatePlaceholderIdentities() {
+        val empty = render(base().copy(targets = emptyList()))
+        val targetSection = empty.substringAfter("## 目标应用\n").substringBefore("## FCM 恢复事件")
+        assertTrue(targetSection.contains("目标应用数量：0"))
+        assertTrue(targetSection.contains("| 序号 | 当前显示名称 | 包名 |"))
+        assertFalse(Regex("(?m)^\\| [0-9]+ \\|").containsMatchIn(targetSection))
+        val unknown = render(base().copy(targets = null)).substringAfter("## 目标应用\n")
+            .substringBefore("## FCM 恢复事件")
+        assertTrue(unknown.contains("目标应用：未知或不可用（null）"))
+        assertFalse(unknown.contains("| 序号 |"))
+        assertFalse(unknown.contains("目标应用数量：0"))
+    }
+
+    @Test
+    fun exactUtf8BudgetIncludesNewHeaderAndWorstCaseEscapingWithoutTruncatingEvidence() {
+        val template = base().copy(targets = listOf(DiagnosticTarget("org.example.app", "")))
+        val empty = encodeCombinedDiagnosticMarkdown(template)
+        val remaining = MAX_REPORT_BYTES - empty.size
+        // Each ampersand becomes five UTF-8 bytes; include the new summary/navigation in the budget.
+        val label = "&".repeat(remaining / 5) + "a".repeat(remaining % 5)
+        val full = template.copy(targets = listOf(DiagnosticTarget("org.example.app", label)))
+        val encoded = encodeCombinedDiagnosticMarkdown(full)
+        assertEquals(MAX_REPORT_BYTES, encoded.size)
+        val markdown = encoded.decodeToString()
+        assertTrue(markdown.contains("## 快速摘要"))
+        assertTrue(markdown.contains("## 阅读导航"))
+        assertTrue(markdown.contains("| 1 | ${"&amp;".repeat(remaining / 5)}${"a".repeat(remaining % 5)} |"))
+        assertEquals(empty.decodeToString().substringAfter("## 局限"), markdown.substringAfter("## 局限"))
+        val tooLarge = full.copy(targets = listOf(DiagnosticTarget("org.example.app", label + "a")))
+        assertThrows(IllegalArgumentException::class.java) { encodeCombinedDiagnosticMarkdown(tooLarge) }
+    }
+
+    @Test
+    fun episodeLayoutRetainsEveryIndependentTimeCounterOutcomeAndPrivacyBoundary() {
+        val correlation = "00000000-0000-0000-0000-000000000007"
+        val episode = FcmRecoveryEpisode(7, 321, 10, 1001, 20,
+            FcmRecoveryEpisodeKind.PRESENT_DISCONNECTED, 1101, 30,
+            requestAtMillis = 1051, requestElapsedMillis = 25,
+            requestStatus = FcmRecoveryStatus.UNKNOWN, reason = FcmRecoveryReason.TIMED_OUT,
+            endedAtMillis = 1151, endedElapsedMillis = 35, outcome = FcmRecoveryEpisodeOutcome.REQUEST_UNKNOWN,
+            timeoutObserved = true, lastBlock = FcmRecoveryEpisodeBlock.INELIGIBLE,
+            requestCorrelationId = correlation, resultAtMillis = 1091, resultElapsedMillis = 29,
+            requestOperation = FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS)
+        val markdown = render(base().copy(fcmRecoveryEpisodes = FcmRecoveryEpisodeSnapshot(
+            FcmEpisodeAvailability.AVAILABLE, listOf(episode), evictedEpisodes = 3, writeFailures = 4, droppedUpdates = 5)))
+        listOf("历史淘汰片段数：3", "片段写入失败数：4", "片段更新丢弃数：5", "已保留片段数：1",
+            "未在报告预览显示的片段数：0", "### FCM 片段 7", "Guardian 进程：321", "进程启动时开机毫秒：10",
+            "最后观察到的故障类型：PRESENT\\_DISCONNECTED", "开始时间（Unix 毫秒）：1001", "开始时开机毫秒：20",
+            "最后保留观察时间（Unix 毫秒）：1101", "最后保留观察时开机毫秒：30",
+            "请求时间（Unix 毫秒）：1051", "请求时开机毫秒：25", "请求结果仍未决：否（false）", "请求状态：UNKNOWN",
+            "请求操作：PRESENT\\_DISCONNECTED\\_MCS", "请求返回时间（Unix 毫秒）：1091", "请求返回时开机毫秒：29",
+            "请求原因：TIMED\\_OUT", "结束时间（Unix 毫秒）：1151", "结束时开机毫秒：35",
+            "片段结论：REQUEST\\_UNKNOWN", "后续观察时已超时：是（true）", "最后阻断原因：INELIGIBLE",
+            "请求接受不等于恢复成功", "不证明唯一原因或通知送达").forEach { assertTrue(it, markdown.contains(it)) }
+        assertFalse(markdown.contains(correlation))
+        assertFalse(markdown.contains("requestCorrelationId"))
     }
 
     private fun base(): CombinedDiagnosticReport = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9000)

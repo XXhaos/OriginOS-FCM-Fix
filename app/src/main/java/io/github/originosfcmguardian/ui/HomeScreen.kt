@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -61,6 +60,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.R
@@ -148,7 +148,7 @@ fun HomeScreen(
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (destination == "home") Surface(
-                        shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.primaryContainer,
                         modifier = Modifier.size(36.dp)) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(painterResource(R.drawable.ic_guardian_tile), contentDescription = null,
@@ -160,7 +160,8 @@ fun HomeScreen(
                             "apps" -> "应用"
                             "settings" -> "设置"
                             else -> "Guardian"
-                        }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                        }, modifier = Modifier.semantics { heading() },
+                            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (destination == "home") Text("OriginOS 后台管理",
                             style = MaterialTheme.typography.labelMedium,
@@ -203,6 +204,7 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(contentPadding)
+                .guardianDestinationEnter(destination)
                 .then(if (destination == "apps") Modifier else Modifier.verticalScroll(when (destination) {
                     "settings" -> settingsScroll
                     else -> homeScroll
@@ -317,7 +319,7 @@ internal fun NoTouchProtectionDialog(onDismiss: () -> Unit,
             }
         },
         confirmButton = {
-            TextButton(enabled = !additionPending, onClick = {
+            Button(enabled = !additionPending, shape = MaterialTheme.shapes.small, onClick = {
                 additionPending = true
                 onRequestAddTile { additionPending = false; message = it }
             }) { Text(if (additionPending) "等待系统确认…" else "添加磁贴") }
@@ -412,19 +414,20 @@ private fun ShizukuHomeCard(state: io.github.originosfcmguardian.privileged.Shiz
     val presentation = shizukuWorkModePresentation(state)
     val colors = MaterialTheme.colorScheme
     val ready = state.status == ShizukuStatus.READY_SHELL
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
+    Card(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
         border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.5f)),
         colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer)) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Shizuku", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Shizuku", modifier = Modifier.semantics { heading() },
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(presentation.statusLabel, style = MaterialTheme.typography.bodySmall,
                         color = if (state.status == ShizukuStatus.ERROR || state.status == ShizukuStatus.READY_ROOT)
                             colors.error else colors.onSurfaceVariant)
                 }
-                OutlinedButton(onClick = onSettings, shape = RoundedCornerShape(12.dp),
+                OutlinedButton(onClick = onSettings, shape = MaterialTheme.shapes.small,
                     modifier = Modifier.semantics { contentDescription = "连接与后台设置" },
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
                     Text("设置", style = MaterialTheme.typography.labelMedium)
@@ -489,7 +492,7 @@ private fun StatusCard(title: String, attention: Boolean = false, emphasis: Bool
     content: @Composable () -> Unit) {
     val colors = MaterialTheme.colorScheme
     // Accent marks the primary controls, not connection health or runnable authority.
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
+    Card(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
         border = BorderStroke(1.dp, if (attention) colors.error.copy(alpha = 0.3f)
             else if (emphasis) colors.primary.copy(alpha = 0.24f) else colors.outlineVariant.copy(alpha = 0.5f)),
         colors = CardDefaults.cardColors(containerColor = if (attention) MaterialTheme.colorScheme.errorContainer
@@ -500,7 +503,8 @@ private fun StatusCard(title: String, attention: Boolean = false, emphasis: Bool
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+            Text(title, modifier = Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                 color = if (attention) colors.onErrorContainer else if (emphasis) colors.primary else colors.onSurface)
             content()
         }

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,12 +29,12 @@ internal fun DiagnosticReportExportButton(busy: Boolean, onExport: (DiagnosticRe
             onDismissRequest = { choosingFormat = false },
             title = { Text("选择报告格式") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.small, enabled = !busy, onClick = {
                         choosingFormat = false
                         onExport(DiagnosticReportFormat.JSON)
                     }) { Text("JSON（结构化）") }
-                    TextButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                    OutlinedButton(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.small, enabled = !busy, onClick = {
                         choosingFormat = false
                         onExport(DiagnosticReportFormat.MARKDOWN)
                     }) { Text("Markdown（便于阅读）") }

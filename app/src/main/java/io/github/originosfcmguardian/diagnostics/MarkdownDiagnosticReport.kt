@@ -8,13 +8,37 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
         row("导出快照时间（Unix 毫秒）", report.capturedAtEpochMillis)
         append("\n以下为点击导出时应用内已知状态的摘要。未知、未加载和损坏不代表健康或空记录。\n")
 
+        section("快速摘要")
+        append("各项保留各自的快照语义，不合成为“全部健康”结论；完整记录与证据边界见下方。\n\n")
+        tableHeader("项目", "快照值")
+        tableRow("Shizuku 状态", "${statusLabel(report.shizukuStatus)}（${report.shizukuStatus}）")
+        tableRow("目标应用数量", report.targets?.size)
+        tableRow("界面启用标志", report.automaticProtection.enabled)
+        tableRow("界面保存授权标志", report.automaticProtection.savedAuthorization)
+        tableRow("等待特权就绪", report.automaticProtection.waitingForPrivilege)
+        tableRow("等待未决结果核对", report.automaticProtection.waitingForReconciliation)
+        tableRow("统一 FCM 保护授权", report.fcmProtection.configured)
+        tableRow("维护分支", report.fcmProtection.maintenance.name)
+        tableRow("恢复分支当前资格", report.fcmProtection.recoveryReady)
+        tableRow("统一 FCM 保护存储阻断", report.fcmProtection.storageBlocked)
+        tableRow("统一授权需重新确认", report.fcmProtection.requiresConfirmation)
+        tableRow("存在待核对结果", report.stoppedRecovery.needsReconcile)
+
+        section("阅读导航")
+        append("[环境](#环境) · [Shizuku](#shizuku) · [目标应用](#目标应用) · ")
+        append("[FCM 事件](#fcm-恢复事件) · [FCM 片段](#fcm-断连与恢复片段) · ")
+        append("[App 资源](#后台资源与中断分析) · [独立核心](#独立保护核心运行记录) · [进程记录](#保护停止与进程记录)\n\n")
+        append("[恢复摘要](#停止标志恢复摘要) · [自动保护快照](#自动保护应用内快照) · ")
+        append("[来源可用性](#来源可用性) · [未知关系](#仍未知的关系) · [局限](#局限)\n")
+
         section("环境")
-        row("Android SDK", report.environment.sdkInt)
-        row("Android 版本", report.environment.androidRelease)
-        row("厂商", report.environment.manufacturer)
-        row("设备型号", report.environment.model)
-        row("Guardian 版本名称", report.environment.guardianVersionName)
-        row("Guardian 版本代码", report.environment.guardianVersionCode)
+        tableHeader("项目", "值")
+        tableRow("Android SDK", report.environment.sdkInt)
+        tableRow("Android 版本", report.environment.androidRelease)
+        tableRow("厂商", report.environment.manufacturer)
+        tableRow("设备型号", report.environment.model)
+        tableRow("Guardian 版本名称", report.environment.guardianVersionName)
+        tableRow("Guardian 版本代码", report.environment.guardianVersionCode)
 
         section("Shizuku")
         statusRow("Shizuku 状态", report.shizukuStatus)
@@ -24,22 +48,25 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             null -> row("目标应用", null)
             else -> {
                 row("目标应用数量", targets.size)
+                append('\n')
+                tableHeader("序号", "当前显示名称", "包名")
                 targets.forEachIndexed { index, target ->
-                    append("\n### 目标应用 ").append(index + 1).append("\n\n")
-                    row("包名", target.packageName)
-                    row("当前显示名称", target.currentLabel)
+                    tableRow(index + 1, target.currentLabel, target.packageName)
                 }
             }
         }
 
         section("FCM 恢复事件")
+        append("### 授权与分支快照\n\n")
         row("统一 FCM 保护授权", report.fcmProtection.configured)
+        row("统一 FCM 保护存储阻断", report.fcmProtection.storageBlocked)
         row("维护分支", report.fcmProtection.maintenance.name)
         row("恢复分支当前资格", report.fcmProtection.recoveryReady)
         row("统一授权需重新确认", report.fcmProtection.requiresConfirmation)
         row("本次统一确认未通过原因", report.fcmProtection.confirmationFailure?.name)
         row("恢复配置", report.fcmRecoveryTrial.configured)
         row("记录存储阻断", report.fcmRecoveryTrial.storageBlocked)
+        append("\n### 留存状态变化与请求结果\n")
         append("\n仅保留最近64条状态变化与请求结果；REQUESTED仅表示请求被接受，连接观察不证明通知送达。\n\n")
         append("电量为整机参考，不能归因于 Guardian，也不是 mAh/能量测量。CPU 毫秒仅为 Guardian 主进程累计工作，排除 Shizuku/独立 shell/GMS/无线电；仅同一进程标识且进程年龄与 CPU 连续递增时才可比较。字段缺失为未知。小时样本只搭载现有轮询，不额外唤醒。\n\n")
         report.fcmRecoveryTrial.events.takeLast(64).forEach { e ->
@@ -174,14 +201,26 @@ private fun StringBuilder.section(title: String) {
 }
 
 private fun StringBuilder.row(label: String, value: Any?) {
-    val text = when (value) {
-        null -> "未知或不可用（null），请结合来源状态"
-        true -> "是（true）"
-        false -> "否（false）"
-        else -> value.toString()
-    }
     append("- ").append(escapeDiagnosticMarkdown(label)).append("：")
-        .append(escapeDiagnosticMarkdown(text)).append('\n')
+        .append(escapeDiagnosticMarkdown(markdownValue(value))).append('\n')
+}
+
+private fun markdownValue(value: Any?): String = when (value) {
+    null -> "未知或不可用（null），请结合来源状态"
+    true -> "是（true）"
+    false -> "否（false）"
+    else -> value.toString()
+}
+
+private fun StringBuilder.tableHeader(vararg labels: String) {
+    tableRow(*labels)
+    append('|'); labels.forEach { append(" --- |") }; append('\n')
+}
+
+private fun StringBuilder.tableRow(vararg values: Any?) {
+    append('|')
+    values.forEach { append(' ').append(escapeDiagnosticMarkdown(markdownValue(it))).append(" |") }
+    append('\n')
 }
 
 private fun StringBuilder.statusRow(label: String, value: String?) {

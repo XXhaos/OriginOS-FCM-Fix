@@ -17,17 +17,54 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.semantics.SemanticsProperties
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionTargetState
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.privileged.ShizukuStatusSnapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
 /** Synthetic UI callbacks only; these fixtures never authorize or operate an installed application. */
 class AppsProtectionListTest {
+    @Test fun searchComesFirstAndSettingsActionsShareTheHeaderEdges() {
+        compose.setContent { GuardianTheme { AppsProtectionList(ready, "", {}, {}, {}, {}, {}, {},
+            Modifier.fillMaxSize()) } }
+        val search = compose.onNodeWithContentDescription("搜索名称或包名").fetchSemanticsNode().boundsInRoot
+        val systemLabel = compose.onNodeWithText("显示系统应用").fetchSemanticsNode().boundsInRoot
+        val systemSwitch = compose.onNodeWithContentDescription("显示系统应用").fetchSemanticsNode().boundsInRoot
+        val recheck = compose.onNodeWithText("复检已选应用").fetchSemanticsNode().boundsInRoot
+        val refresh = compose.onNodeWithText("刷新").fetchSemanticsNode().boundsInRoot
+        assertTrue(search.bottom <= systemLabel.top)
+        assertTrue(systemSwitch.bottom <= recheck.top)
+        assertEquals(search.left, systemLabel.left, 1f)
+        assertEquals(systemLabel.left, recheck.left, 1f)
+        assertEquals(search.right, systemSwitch.right, 1f)
+        assertEquals(systemSwitch.right, refresh.right, 1f)
+    }
+
+    @Test fun movingSavedSelectionKeepsOneImmediateSwitchAndSemanticSectionHeadings() {
+        val state = mutableStateOf(ready)
+        var selections = 0
+        var removals = 0
+        compose.setContent { GuardianTheme { AppsProtectionList(state.value, "", {}, {}, { selections++ },
+            { removals++ }, {}, {}, Modifier.fillMaxSize()) } }
+        compose.onNodeWithContentDescription("已保护（0）")
+            .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
+        compose.runOnIdle { state.value = state.value.copy(automaticProtection = AutomaticProtectionState(
+            targets = listOf(AutomaticProtectionTargetState(first, savedAuthorization = true)))) }
+        compose.onAllNodesWithContentDescription("First 自动保护选择").assertCountEquals(1)
+        compose.onNodeWithContentDescription("First 自动保护选择").assertIsOn().performClick()
+        compose.runOnIdle { assertEquals(0, selections); assertEquals(1, removals) }
+    }
+
     @Test fun bulkRecheckButtonUsesSavedChoicesEvenWhenSearchHidesThem() {
         var checks = 0
         val state = ready.copy(automaticProtection = AutomaticProtectionState(targets = listOf(

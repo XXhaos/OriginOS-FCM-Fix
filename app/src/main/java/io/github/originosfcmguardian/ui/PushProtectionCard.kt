@@ -4,10 +4,10 @@ import android.os.SystemClock
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -24,10 +24,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -149,23 +153,26 @@ internal fun PushProtectionCard(state: HomeUiState, onEnable: () -> Unit, onDisa
         selectPushConnection(state.gmsConnection, state.fcmProtection.latestObservation), displayNow)
     val uptime = automaticProtectionUptimeText(state.automaticProtection, displayNow) ?: "已开启时长 --:--:--"
     val colors = MaterialTheme.colorScheme
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.5f)),
-        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer)) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.24f)),
+        colors = CardDefaults.cardColors(containerColor = guardianPrimaryCardColor(colors))) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("FCM推送保护", modifier = Modifier.weight(1f),
+                Text("FCM推送保护", modifier = Modifier.weight(1f).semantics { heading() }, color = colors.primary,
                     style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Switch(checked = state.automaticProtection.masterEnabled,
                     enabled = pushProtectionToggleEnabled(state),
                     onCheckedChange = { dispatchPushProtectionToggle(state, it, onEnable, onDisable) },
-                    modifier = Modifier.semantics { contentDescription = "FCM推送保护开关" })
+                    modifier = Modifier.semantics {
+                        contentDescription = "FCM推送保护开关"
+                        stateDescription = "总开关${if (state.automaticProtection.masterEnabled) "已开启" else "已关闭"}，${pushProtectionStatus(state)}"
+                    })
             }
             Text(pushProtectionStatus(state), style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant)
-            PushProtectionClockLine(uptime)
-            PushProtectionClockLine("FCM连接时长 ${connection.duration ?: "--:--:--"}")
+            PushProtectionClockLine("已开启时长", uptime.removePrefix("已开启时长 "))
+            PushProtectionClockLine("FCM连接时长", connection.duration ?: "--:--:--")
             Text(if (state.automaticProtection.configurationAvailable)
                 "已选 ${state.automaticProtection.configuredIdentities.size} 个应用" else "应用列表暂不可用",
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
@@ -195,8 +202,12 @@ internal fun PushProtectionCard(state: HomeUiState, onEnable: () -> Unit, onDisa
 }
 
 @Composable
-private fun PushProtectionClockLine(text: String) {
-    Text(text, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium,
-        fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1, overflow = TextOverflow.Ellipsis)
+internal fun PushProtectionClockLine(label: String, value: String) {
+    // Normal widths form two columns. Large fonts wrap as a pair without truncating the clock.
+    FlowRow(Modifier.fillMaxWidth().clearAndSetSemantics { text = AnnotatedString("$label $value") },
+        horizontalArrangement = Arrangement.SpaceBetween, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
+            fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface)
+    }
 }

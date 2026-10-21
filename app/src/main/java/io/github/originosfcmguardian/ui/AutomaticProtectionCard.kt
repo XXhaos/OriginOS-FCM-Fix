@@ -2,6 +2,8 @@ package io.github.originosfcmguardian.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -11,6 +13,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -21,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.semantics.contentDescription
@@ -78,6 +82,7 @@ internal fun ProtectionNotificationVisibility.label(): String = when (this) {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun AutomaticProtectionCard(
     state: AutomaticProtectionState,
     canEnable: Boolean,
@@ -111,7 +116,11 @@ internal fun AutomaticProtectionCard(
             if (state.revocationSaveFailed) {
                 Text("关闭状态保存失败，请重试。", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
-                TextButton(onClick = onDisable) { Text("重试保存关闭状态") }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onDisable, shape = MaterialTheme.shapes.small) {
+                        Text("重试保存关闭状态", textAlign = TextAlign.Center)
+                    }
+                }
             } else if (!state.enabled && !state.busy && !state.waitingForPrivilege &&
                 !state.waitingForReconciliation && state.detail != "自动保护未开启") {
                 Text(state.detail, style = MaterialTheme.typography.bodySmall)
@@ -119,12 +128,21 @@ internal fun AutomaticProtectionCard(
             }
             if (showPreferences) {
                 Text(notificationVisibility.label(), style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { notificationSettingsFailed = !onOpenNotificationSettings() }) { Text("通知显示设置") }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { notificationSettingsFailed = !onOpenNotificationSettings() },
+                        shape = MaterialTheme.shapes.small) {
+                        Text("通知显示设置", textAlign = TextAlign.Center)
+                    }
+                }
                 if (notificationSettingsFailed) Text("打开失败，请在系统通知管理中设置。",
                     style = MaterialTheme.typography.bodySmall)
                 onOpenAutostartSettings?.let { openSettings ->
                     Text("请允许 Guardian 和需要接收通知的应用自启动。", style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = openSettings) { Text("打开自启动设置") }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = openSettings, shape = MaterialTheme.shapes.small) {
+                            Text("打开自启动设置", textAlign = TextAlign.Center)
+                        }
+                    }
                     autostartSettingsMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
