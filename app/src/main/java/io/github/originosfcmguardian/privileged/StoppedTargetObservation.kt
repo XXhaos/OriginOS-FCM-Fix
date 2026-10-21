@@ -9,6 +9,7 @@ import io.github.originosfcmguardian.autostart.validTargetUidMembers
 import io.github.originosfcmguardian.autostart.qualifiedRecoveryTargetUid
 import io.github.originosfcmguardian.autostart.TargetSigningEvidence
 import io.github.originosfcmguardian.autostart.targetSigningContinues
+import io.github.originosfcmguardian.autostart.lowerHexDigest
 import io.github.originosfcmguardian.autostart.hasVerifiedPackageUid as verifiedRecoveryPackageUid
 import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import java.security.MessageDigest
@@ -87,8 +88,7 @@ internal fun validatedStoppedPackage(fields: StoppedPackageFields?, packageName:
         require(certificates.size in 1..MAX_CURRENT_SIGNERS)
         require(certificates.all { it.isNotEmpty() && it.size <= 64 * 1024 })
         val signers = certificates.map { bytes ->
-            MessageDigest.getInstance("SHA-256").digest(bytes)
-                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+            lowerHexDigest(MessageDigest.getInstance("SHA-256").digest(bytes))
         }.sorted()
         require(signers.distinct().size == signers.size)
         SelectedTargetIdentity(

@@ -54,4 +54,13 @@ class GmsSigningTrustTest {
         assertFalse(qualifiedGmsMcsIdentity(identity().copy(applicationPackageName = "other.pkg"), 2000, 0, owners))
         assertFalse(qualifiedGmsMcsIdentity(identity().copy(uid = 1010234), 2000, 0, owners))
     }
+
+    @Test fun disconnectedMcsIdentityUsesFreshRuntimeEvidenceAcrossUnlistedVersions() {
+        val owners = listOf(GMS_OBSERVATION_PACKAGE)
+        for (version in listOf(0L, FcmRecoveryPolicy.MCS_VERSION, 264032035L, 264032036L, Long.MAX_VALUE)) {
+            assertTrue("version=$version", qualifiedGmsMcsIdentity(identity().copy(versionCode = version), 2000, 0, owners))
+            assertFalse("version=$version", qualifiedGmsMcsIdentity(identity().copy(versionCode = version,
+                signingCertificateHistorySha256 = null), 2000, 0, owners))
+        }
+    }
 }

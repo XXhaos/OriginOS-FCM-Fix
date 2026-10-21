@@ -11,4 +11,13 @@ class PackageUnstopCapabilityTest {
             help + "  unstop [--user USER_ID] PACKAGE\n", "arbitrary\n  unstop [--user USER_ID] PACKAGE\n"))
             assertFalse(PackageUnstopCapability.advertised(text.toByteArray()))
     }
+    @Test fun guardianClasspathRequiresOneCompleteUnambiguousPmApkLine() {
+        val path = "package:/data/app/guardian/base.apk\n"
+        assertEquals("/data/app/guardian/base.apk", PackageUnstopCapability.guardianApkOutput(path.toByteArray()))
+        for (text in listOf("", path.trimEnd(), path + path, path + "package:/data/app/guardian/split.apk\n",
+            "other:/data/app/base.apk\n", "package:relative.apk\n", "package:/data/app/base.dex\n",
+            "package:/data/app/guardian/other.apk\n",
+            "package:/data/app/a b.apk\n", "package:/data/app/a:b.apk\n", path + "error\n", "x".repeat(4097)))
+            assertNull(PackageUnstopCapability.guardianApkOutput(text.toByteArray()))
+    }
 }

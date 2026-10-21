@@ -14,7 +14,6 @@ import io.github.originosfcmguardian.privileged.StoppedIdentityProbeRunner
 import io.github.originosfcmguardian.privileged.StoppedObservationCodec
 import io.github.originosfcmguardian.privileged.StoppedTargetObservation
 import io.github.originosfcmguardian.privileged.SystemStoppedIdentityReadPort
-import java.io.File
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -68,15 +67,18 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
 
     private fun recoverOperation(requestId: Long, expectedIdentity: String?, journal: IStoppedRecoveryJournal?, targetAware: Boolean): String = execute(requestId, journal) { read, readTarget, active, localActive ->
         val identity = decodeRecoveryTarget(expectedIdentity, targetAware)
+        var prepared: PreparedPackageUnstop? = null
         val engine = StoppedRecoveryEngine({ id -> if (targetAware) readTarget(id, identity) else read(id) },
             { id -> callback(localActive) { requireNotNull(journal).claim(id) } }, active, unstop = {
             // Linearizes process creation with service cancellation/death. No arbitrary argv exposed.
+            check(active())
+            val launch = checkNotNull(prepared)
             val process = synchronized(gate) {
-                check(active())
-                ProcessBuilder(stoppedRecoveryArgv(identity)).redirectOutput(File("/dev/null")).redirectError(File("/dev/null")).start()
-                    .also { retainedChildren.add(it); running.set(it); it.outputStream.close() }
+                check(localActive())
+                launch.start().also { retainedChildren.add(it); running.set(it) }
             }
             try {
+                process.outputStream.close()
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
                 while (!process.waitFor(50, TimeUnit.MILLISECONDS)) {
                     check(localActive() && System.nanoTime() < deadline)
@@ -87,7 +89,12 @@ class StoppedRecoveryUserService : IStoppedRecovery.Stub {
                 synchronized(gate) { if (process.isAlive) process.destroyForcibly(); running.compareAndSet(process, null) }
             }
         })
-        RecoveryResultCodec.encode(engine.recover(requestId, identity) { readRecoveryCapability(localActive, active) })
+        RecoveryResultCodec.encode(engine.recover(requestId, identity) {
+            readRecoveryCapability(localActive, active) { current ->
+                prepared = preparePackageUnstop(identity, targetAware, current)
+                prepared != null
+            }
+        })
     }
 
     private fun execute(id: Long, journal: IStoppedRecoveryJournal?, body: ((Long) -> StoppedTargetObservation,

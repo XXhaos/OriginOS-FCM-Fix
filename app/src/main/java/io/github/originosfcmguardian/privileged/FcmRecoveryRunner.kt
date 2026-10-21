@@ -41,7 +41,7 @@ internal class FcmRecoveryRunner(
             FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS -> FcmRecoveryPolicy.disconnected(sample, port.elapsedRealtime()) && port.usableInternet()
         }
         fun target(port: GmsConnectionReadPort) = if (operation == FcmRecoveryOperation.SERVICE_ABSENT_SEND)
-            port.recoverySenderQualified() else port.disconnectedMcsQualified()
+            port.recoverySenderQualified() else port.disconnectedMcsAttemptAllowed()
         if (requestId <= 0 || callerUid !in 10_000..99_999 || !expected.matches(Regex("[a-f0-9]{64}"))) {
             settlement.abandonQueued()
             return result(FcmRecoveryReason.INVALID_REQUEST)

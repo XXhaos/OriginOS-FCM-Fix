@@ -6,7 +6,6 @@ import io.github.originosfcmguardian.privileged.*
 import io.github.originosfcmguardian.recovery.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -23,42 +22,44 @@ internal interface DaemonStoppedShellPort : AutoCloseable {
     fun isQuiescent(): Boolean = true
     fun observe(id: Long, identity: SelectedTargetIdentity, recipient: Boolean,
         interrupted: () -> Boolean): StoppedTargetObservation
-    fun capable(active: () -> Boolean): Boolean
-    /** Must perform ProcessBuilder.start here and return promptly, with no wait/readback. */
-    fun startUnstop(identity: SelectedTargetIdentity): DaemonStartedUnstop
+    /** Preparation is preclaim and outside owner locks; start must never choose another transport. */
+    fun prepareUnstop(identity: SelectedTargetIdentity, recipient: Boolean, active: () -> Boolean): DaemonUnstopLaunch?
 }
+
+internal fun interface DaemonUnstopLaunch { fun start(): DaemonStartedUnstop }
 
 /** Fixed four bounded system-read lanes survive poll timeouts; no App Context or Binder callbacks. */
 internal class SystemDaemonStoppedShellPort : DaemonStoppedShellPort {
     private val readers = Array(4) { StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort, 4_000) }
     private val cursor = AtomicInteger()
-    override fun isQuiescent(): Boolean = readers.all { it.isQuiescent() }
+    override fun isQuiescent(): Boolean = readers.all { it.isQuiescent() } && PackageUnstopCapability.isQuiescent()
     override fun observe(id: Long, identity: SelectedTargetIdentity, recipient: Boolean,
         interrupted: () -> Boolean): StoppedTargetObservation {
         val lane = readers[Math.floorMod(cursor.getAndIncrement(), readers.size)]
         return if (recipient) lane.readTarget(id, identity, interrupted) else lane.read(id, interrupted)
     }
-    override fun capable(active: () -> Boolean) = PackageUnstopCapability.read(active)
-    override fun startUnstop(identity: SelectedTargetIdentity): DaemonStartedUnstop {
-        val process = ProcessBuilder(stoppedRecoveryArgv(identity))
-            .redirectOutput(File("/dev/null")).redirectError(File("/dev/null")).start()
-        return object : DaemonStartedUnstop {
-            override fun awaitExit(active: () -> Boolean): Int {
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
-                while (!process.waitFor(50, TimeUnit.MILLISECONDS)) {
-                    check(active() && System.nanoTime() < deadline)
+    override fun prepareUnstop(identity: SelectedTargetIdentity, recipient: Boolean, active: () -> Boolean): DaemonUnstopLaunch? {
+        val prepared = preparePackageUnstop(identity, recipient, active) ?: return null
+        return DaemonUnstopLaunch {
+            val process = prepared.start()
+            object : DaemonStartedUnstop {
+                override fun awaitExit(active: () -> Boolean): Int {
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+                    while (!process.waitFor(50, TimeUnit.MILLISECONDS)) {
+                        check(active() && System.nanoTime() < deadline)
+                    }
+                    check(active())
+                    return process.exitValue()
                 }
-                check(active())
-                return process.exitValue()
+                override fun close() {
+                    if (process.isAlive) process.destroyForcibly()
+                    runCatching { process.waitFor(1_000, TimeUnit.MILLISECONDS) }
+                    runCatching { process.outputStream.close() }
+                    runCatching { process.inputStream.close() }
+                    runCatching { process.errorStream.close() }
+                }
+                override fun terminated() = !process.isAlive
             }
-            override fun close() {
-                if (process.isAlive) process.destroyForcibly()
-                runCatching { process.waitFor(1_000, TimeUnit.MILLISECONDS) }
-                runCatching { process.outputStream.close() }
-                runCatching { process.inputStream.close() }
-                runCatching { process.errorStream.close() }
-            }
-            override fun terminated() = !process.isAlive
         }
     }
     override fun close() { readers.forEach { it.close() } }
@@ -195,6 +196,7 @@ internal class DaemonStoppedProtection(
             ?: return StoppedRecoveryResult(StoppedRecoveryOutcome.BLOCKED, "owner unavailable or busy")
         var gate: AutoCloseable? = null
         var command: DaemonStartedUnstop? = null
+        var preparedLaunch: DaemonUnstopLaunch? = null
         var startEntered = false
         try {
             val authorization = AutomaticRecoveryAuthorization {
@@ -236,13 +238,17 @@ internal class DaemonStoppedProtection(
                     check(active())
                     check(owner.startWrite(ticket) {
                         startEntered = true
-                        process = shell.startUnstop(lease.consent.identity)
+                        process = checkNotNull(preparedLaunch).start()
                         command = process
                     })
                     requireNotNull(process).awaitExit(::localActive).also { check(active()) }
                 } finally { process?.close() }
             })
-            val initial = engine.recover(id, lease.consent.identity) { active() && shell.capable(::localActive) && active() }
+            val initial = engine.recover(id, lease.consent.identity) {
+                check(active())
+                preparedLaunch = shell.prepareUnstop(lease.consent.identity, lease.consent.policyVersion == 4, ::localActive)
+                active() && preparedLaunch != null
+            }
             val result = awaitStoppedRecoveryReadback(lease.consent.identity, initial,
                 read = { read(id) }, active = ::active, pause = readbackPause)
             check(active())

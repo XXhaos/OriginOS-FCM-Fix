@@ -53,10 +53,10 @@ ACTIVITY MANAGER BROADCAST STATE (dumpsys activity broadcasts)
             dump.replace("    Filter #1", "      Action: \"com.google.android.intent.action.MCS_HEARTBEAT\"\n    Filter #1"))
             .forEach { assertFalse(it.take(120), FcmMcsReceiverReader.parse(it.toByteArray(), 10208)) }
     }
-    @Test fun reviewedFallbackIsLimitedToMissingMetadataAndExactLegacyFilter() {
+    @Test fun metadataMissingAttemptIsLimitedToExactFilterWithoutContraryEvidence() {
         val legacy = dump.replace("      exported=true\n", "")
         assertFalse(FcmMcsReceiverReader.parse(legacy.toByteArray(), 10208))
-        assertTrue(FcmMcsReceiverReader.parse(legacy.toByteArray(), 10208, allowReviewedMissingExported = true))
+        assertTrue(FcmMcsReceiverReader.parse(legacy.toByteArray(), 10208, allowMetadataMissingAttempt = true))
         listOf(dump.replace("exported=true", "exported=false"),
             dump.replace("exported=true", "exported=true\n      exported=false"),
             dump.replace("exported=true", "exported=true\n      exported=true"),
@@ -64,7 +64,23 @@ ACTIVITY MANAGER BROADCAST STATE (dumpsys activity broadcasts)
             dump.replace("exported=true", "requiredPermission=some.permission"),
             legacy.replace("      Action: \"com.google.android.gms.gcm.ACTION_HEARTBEAT_NOW\"\n", ""),
             legacy.replace("com.google.android.gms.gcm.ACTION_HEARTBEAT_NOW", "other.ACTION"))
-            .forEach { assertFalse(FcmMcsReceiverReader.parse(it.toByteArray(), 10208, allowReviewedMissingExported = true)) }
+            .forEach { assertFalse(FcmMcsReceiverReader.parse(it.toByteArray(), 10208, allowMetadataMissingAttempt = true)) }
+    }
+    @Test fun metadataMissingAttemptStillRejectsAmbiguityPermissionAndIncompleteSources() {
+        val missing = dump.replace("      exported=true\n", "")
+        assertTrue(FcmMcsReceiverReader.parse(missing.replace("    Filter #1",
+            "      requiredPermission=null\n    Filter #1").toByteArray(), 10208, allowMetadataMissingAttempt = true))
+        val invalid = listOf(missing.trimEnd(), missing.substringBefore("  Receiver Resolver Table:"),
+            missing + "*** DUMP TIMEOUT ***\n", missing + missing,
+            missing.replace("/10208/u0", "/10208/u10"), missing.replace("pid=19441", "pid=19442"),
+            missing.replace("    Filter #1", "      Action: \"other.EXTRA_ACTION\"\n    Filter #1"),
+            missing.replace("    Filter #1", "      Action: \"com.google.android.intent.action.MCS_HEARTBEAT\"\n    Filter #1"),
+            missing.replace("    Filter #1", "      requiredPermission=other.PERMISSION\n    Filter #1"),
+            missing.replace("    Filter #1", "      requiredPermission=null\n      requiredPermission=null\n    Filter #1"),
+            missing.replace("    Filter #1", "      exported=false\n    Filter #1"),
+            missing.replace("    Filter #1", "      exported=unknown\n    Filter #1"),
+            missing.replace("    Filter #1", "      exported=true\n      exported=true\n    Filter #1"))
+        invalid.forEach { assertFalse(FcmMcsReceiverReader.parse(it.toByteArray(), 10208, allowMetadataMissingAttempt = true)) }
     }
     @Test fun explicitRuntimeCapabilityAllowsChangedActionShapeWithoutVersionAssumptions() {
         val single = dump.replace("      Action: \"com.google.android.gms.gcm.ACTION_HEARTBEAT_NOW\"\n", "")

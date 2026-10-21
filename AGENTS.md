@@ -1,5 +1,17 @@
 # AGENTS.md — OriginOS FCM Guardian
 
+## Latest compatibility rule — runtime capabilities, not device/version pins (2026-10-21)
+
+Guardian is intended for supported Android devices, not one development handset. Do not add model,
+firmware-fingerprint or GMS-version allowlists as routine execution gates. Probe actual interfaces,
+current privilege and trusted target identity; prefer a compatible same-semantics path and verify its
+result. Existing user ON intent, configured apps and counters survive ordinary software/system updates.
+Security checks, explicit OFF/revocation, installation identity and unknown-result fences still apply.
+An unsupported interface may block that operation, but does not mean the user turned protection OFF.
+Version-specific investigations are evidence, not permission to pin the product to that version.
+Document minimum SDK and actual capability limits; never claim testing one handset proves all future
+OS/GMS revisions. External Shizuku startup remains user-managed.
+
 ## Latest backup exception — cross-device resumption (2026-10-15)
 
 The user explicitly requested this backup to be resumable on another computer. For this backup,

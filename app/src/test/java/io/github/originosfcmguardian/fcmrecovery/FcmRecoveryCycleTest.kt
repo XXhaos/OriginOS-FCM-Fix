@@ -234,8 +234,27 @@ class FcmRecoveryCycleTest {
         FcmRecoveryCycle(access).run()
         assertEquals(listOf(FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS), access.operations)
         assertTrue(access.store.read().mcsConsumed); assertFalse(access.authority.marker)
+        assertEquals(false, access.finishedConnected)
+        assertEquals(FcmRecoveryStatus.REQUESTED, access.journal.snapshot().episodes.single().requestStatus)
+        assertEquals(FcmRecoveryEpisodeOutcome.OBSERVING, access.journal.snapshot().episodes.single().outcome)
         FcmRecoveryCycle(access).run(); assertEquals(1, access.sends)
         assertEquals(FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS, access.journal.snapshot().episodes.single().requestOperation)
+    }
+
+    @Test fun mcsCommandFailureAndUnknownReadbackCannotClaimConnectionOrReplayAttempt() = runBlocking {
+        val access = Access().also {
+            it.firstState = GcmConnectionState.REPORTED_DISCONNECTED; it.unknownAfter = true
+            it.result = FcmRecoveryResult(1, FcmRecoveryStatus.UNKNOWN, FcmRecoveryReason.COMMAND_FAILED)
+        }
+        FcmRecoveryCycle(access).run()
+        val request = access.journal.snapshot().episodes.first { it.requestOperation == FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS }
+        assertEquals(FcmRecoveryStatus.UNKNOWN, request.requestStatus)
+        assertEquals(FcmRecoveryReason.COMMAND_FAILED, request.reason)
+        assertEquals(FcmRecoveryEpisodeOutcome.REQUEST_UNKNOWN, request.outcome)
+        assertEquals(false, access.finishedConnected); assertTrue(access.store.read().mcsConsumed)
+        assertTrue(access.journal.snapshot().episodes.none { it.outcome == FcmRecoveryEpisodeOutcome.CONNECTION_AFTER_REQUEST })
+        access.unknownAfter = false; access.afterState = GcmConnectionState.REPORTED_DISCONNECTED
+        FcmRecoveryCycle(access).run(); assertEquals(1, access.sends)
     }
 
     @Test fun mcsFailureThenServiceAbsentStillUsesLegacySendAndFreezesOriginalKind() = runBlocking {

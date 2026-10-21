@@ -25,6 +25,41 @@ import io.github.originosfcmguardian.core.gms.GmsUnknown
 import rikka.shizuku.Shizuku
 import android.content.pm.PackageManager
 
+/** Completion belongs to the exact merged restore batch, not to an individual trigger's lifetime. */
+internal class DaemonRestoreCompletion {
+    internal data class Request(val startWorker: Boolean, val completion: CompletableDeferred<Unit>)
+    private var requests = DaemonReconnectRequests()
+    private var current: CompletableDeferred<Unit>? = null
+
+    @Synchronized fun offer(): Request {
+        val start = requests.offer()
+        val completion = if (start) CompletableDeferred<Unit>().also { current = it } else checkNotNull(current)
+        return Request(start, completion)
+    }
+
+    fun takePending(request: Request): Boolean {
+        val completed = synchronized(this) {
+            if (current !== request.completion) return false
+            if (requests.takePending()) return true
+            current = null
+            request.completion
+        }
+        completed.complete(Unit)
+        return false
+    }
+
+    /** Also settles an exceptional worker exit; a late old worker cannot finish a newer batch. */
+    fun finish(request: Request) {
+        val completed = synchronized(this) {
+            if (current !== request.completion) return
+            current = null
+            requests = DaemonReconnectRequests()
+            request.completion
+        }
+        completed.complete(Unit)
+    }
+}
+
 /** UI/configuration bridge only. No recovery loop or App-lifetime authority lives here. */
 internal object DaemonAppRuntime {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -35,7 +70,7 @@ internal object DaemonAppRuntime {
     @Volatile private var exportStore: DaemonMigrationExportStore? = null
     @Volatile private var client: DaemonClient? = null
     @Volatile private var remoteOwned: Boolean? = null
-    private val reconnectRequests = DaemonReconnectRequests()
+    private val reconnectRequests = DaemonRestoreCompletion()
     @Volatile private var adopting: DaemonMigrationIntent? = null
     private val adoptionRetry = DaemonAdoptionRetry()
     private val mutable = MutableStateFlow<DaemonProtectionRootSnapshot?>(null)
@@ -120,11 +155,13 @@ internal object DaemonAppRuntime {
         scope.launch { runCatching { if (isRemoteOwned(context)) restore(context) }.onFailure { unavailable() } }
     }
 
-    fun restore(context: Context) {
+    /** The returned completion is observational: callers must never cancel the shared restore. */
+    fun restore(context: Context): Job? {
         initialize(context)
-        if (!isRemoteOwned(context) || !reconnectRequests.offer()) return
-        scope.launch {
-            while (reconnectRequests.takePending()) {
+        if (!isRemoteOwned(context)) return null
+        val request = reconnectRequests.offer()
+        if (request.startWorker) scope.launch {
+            while (reconnectRequests.takePending(request)) {
                 val restored = runCatching { withTimeout(150_000) {
                     reconnectDaemonWhileReady(
                         ready = { runCatching { Shizuku.pingBinder() && Shizuku.getUid() == 2000 &&
@@ -134,7 +171,8 @@ internal object DaemonAppRuntime {
                 } }.getOrDefault(false)
                 if (!restored) unavailable()
             }
-        }
+        }.invokeOnCompletion { reconnectRequests.finish(request) }
+        return request.completion
     }
 
     /** At most two preflights per actual ready epoch, driven by existing events without a timer. */

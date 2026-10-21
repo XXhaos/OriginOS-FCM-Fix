@@ -9,7 +9,7 @@ object FcmRecoveryPolicy {
     const val SIGNER = "5f2391277b1dbd489000467e4c2fa6af802430080457dce2f618992e9dfb5402"
     const val COMPONENT = "com.google.android.gms.gcm.GcmSenderProxy"
     const val ACTION = "com.google.android.gcm.intent.SEND"
-    /** Reviewed fallback for old dumps lacking receiver export metadata; not a version allowlist. */
+    /** Historical device evidence/fixtures only; never an admission allowlist. */
     const val MCS_VERSION = 263737035L
     const val MCS_ACTION = "com.google.android.intent.action.MCS_HEARTBEAT"
     fun qualified(sample: GmsConnectionObservation.Sample, now: Long): Boolean {

@@ -77,8 +77,17 @@ object GmsSocketParser {
     const val MAX_BYTES = 256 * 1024
     const val MAX_LINES = 2048
     const val MAX_LINE_BYTES = 1024
+    private val whitespace = Regex("\\s+")
+    private val ipv4Endpoint = Regex("[A-Fa-f0-9]{8}:[A-Fa-f0-9]{4}")
+    private val ipv6Endpoint = Regex("[A-Fa-f0-9]{32}:[A-Fa-f0-9]{4}")
+    private val slot = Regex("[0-9]+:")
+    private val state = Regex("[A-Fa-f0-9]{2}")
+    private val queues = Regex("[A-Fa-f0-9]{8}:[A-Fa-f0-9]{8}")
+    private val timer = Regex("[A-Fa-f0-9]{2}:[A-Fa-f0-9]{8}")
+    private val retransmits = Regex("[A-Fa-f0-9]{8}")
     fun parse(input: InputStream, ipv6: Boolean, uid: Int, interrupted: () -> Boolean = { false }): SocketSource {
         require(uid in 10_000..99_999)
+        val endpoint = if (ipv6) ipv6Endpoint else ipv4Endpoint
         var bytes = 0; var lines = 0; var header = false; var malformed = false; var matched = false
         val line = StringBuilder()
         fun result(completeness: SourceCompleteness): SocketSource = SocketSource(
@@ -87,7 +96,7 @@ object GmsSocketParser {
         fun consume(): Boolean {
             lines++
             if (lines > MAX_LINES) return false
-            val fields = line.toString().trim().split(Regex("\\s+")); line.setLength(0)
+            val fields = line.toString().trim().split(whitespace); line.setLength(0)
             if (!header) {
                 header = fields.size == 12 && fields.take(2) == listOf("sl", "local_address") &&
                     fields[2] == (if (ipv6) "remote_address" else "rem_address") && fields[3] == "st" &&
@@ -95,11 +104,9 @@ object GmsSocketParser {
                 if (!header) malformed = true
                 return true
             }
-            val width = if (ipv6) 32 else 8
-            val endpoint = Regex("[A-Fa-f0-9]{$width}:[A-Fa-f0-9]{4}")
-            val valid = fields.size >= 10 && fields[0].matches(Regex("[0-9]+:")) && endpoint.matches(fields[1]) && endpoint.matches(fields[2]) &&
-                fields[3].matches(Regex("[A-Fa-f0-9]{2}")) && fields[4].matches(Regex("[A-Fa-f0-9]{8}:[A-Fa-f0-9]{8}")) &&
-                fields[5].matches(Regex("[A-Fa-f0-9]{2}:[A-Fa-f0-9]{8}")) && fields[6].matches(Regex("[A-Fa-f0-9]{8}")) &&
+            val valid = fields.size >= 10 && slot.matches(fields[0]) && endpoint.matches(fields[1]) && endpoint.matches(fields[2]) &&
+                state.matches(fields[3]) && queues.matches(fields[4]) &&
+                timer.matches(fields[5]) && retransmits.matches(fields[6]) &&
                 fields[7].toIntOrNull()?.let { it >= 0 } == true && fields[8].toLongOrNull()?.let { it >= 0 } == true &&
                 fields[9].toLongOrNull()?.let { it >= 0 } == true
             if (!valid) malformed = true

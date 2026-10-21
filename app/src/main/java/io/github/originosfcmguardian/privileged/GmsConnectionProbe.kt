@@ -1,6 +1,7 @@
 package io.github.originosfcmguardian.privileged
 
 import io.github.originosfcmguardian.core.gms.*
+import io.github.originosfcmguardian.autostart.lowerHexDigest
 import java.security.MessageDigest
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
@@ -25,19 +26,18 @@ internal interface GmsConnectionReadPort {
     fun reconnectReceivers(): GmsReceiverInspection
     fun elapsedRealtime(): Long
     fun recoverySenderQualified(): Boolean = false
-    fun disconnectedMcsQualified(): Boolean = false
+    /** Allows a bounded request; absent export metadata is not proof of export or recovery. */
+    fun disconnectedMcsAttemptAllowed(): Boolean = false
     fun usableInternet(): Boolean = false
 }
 
 internal fun gmsSignerDigest(certificates: List<ByteArray>): String {
     require(certificates.size in 1..16 && certificates.all { it.size in 1..65536 })
-    val hashes = certificates.map { MessageDigest.getInstance("SHA-256").digest(it)
-        .joinToString("") { byte -> "%02x".format(byte.toInt() and 255) } }.sorted()
+    val hashes = certificates.map { lowerHexDigest(MessageDigest.getInstance("SHA-256").digest(it)) }.sorted()
     require(hashes.distinct().size == hashes.size)
     // One certificate retains its normal SHA; multisigner identity hashes the canonical set.
-    return if (hashes.size == 1) hashes.single() else MessageDigest.getInstance("SHA-256")
-        .digest(hashes.joinToString(",").toByteArray(Charsets.US_ASCII))
-        .joinToString("") { "%02x".format(it.toInt() and 255) }
+    return if (hashes.size == 1) hashes.single() else lowerHexDigest(MessageDigest.getInstance("SHA-256")
+        .digest(hashes.joinToString(",").toByteArray(Charsets.US_ASCII)))
 }
 
 /** Android's single-signer proof-of-rotation history, bounded before hashing certificates. */

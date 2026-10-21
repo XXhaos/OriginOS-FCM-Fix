@@ -91,8 +91,7 @@ class DaemonProtectionHostTest {
         val stopped = object : DaemonStoppedShellPort {
             override fun observe(id: Long, identity: SelectedTargetIdentity, recipient: Boolean,
                 interrupted: () -> Boolean): StoppedTargetObservation = error("No stopped targets configured")
-            override fun capable(active: () -> Boolean) = false
-            override fun startUnstop(identity: SelectedTargetIdentity): DaemonStartedUnstop = error("No stopped write")
+            override fun prepareUnstop(identity: SelectedTargetIdentity, recipient: Boolean, active: () -> Boolean): DaemonUnstopLaunch? = null
             override fun close() { stoppedCloses++; if (stoppedCloseFailures-- > 0) error("Stopped close failed") }
         }
         val fcm = object : DaemonFcmShellPort {

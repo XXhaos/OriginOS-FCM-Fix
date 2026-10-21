@@ -31,6 +31,9 @@ foreach ($variant in @('debug', 'release')) {
         if ($component -match '\.(monitoring|notification)\.|GuardianFirebaseMessagingService|com\.google\.firebase\.') {
             throw "$variant contains archived advanced diagnostic component $component."
         }
+        if ($component -match 'PackageStoppedStateMain|ReadOnlyMcsQualificationMain|ReadOnlyStoppedFixtureMain') {
+            throw "$variant fixed shell helpers must not be manifest components."
+        }
     }
     if ($manifest.manifest.application.GetAttribute('allowBackup', $androidNamespace) -ne 'false') {
         throw "$variant must keep backup disabled."
@@ -97,7 +100,7 @@ foreach ($variant in @('debug', 'release')) {
     if ($defined -match 'priv\.kit|io\.github\.originosfcmguardian\.(activation|privilegebridge)|AppOwnedRecovery|PrivKitRecovery') {
         throw "$variant contains cancelled internal DEX classes."
     }
-    if ($variant -eq 'release' -and $defined -match 'DebugHeartbeatContinuityReceiver|DebugProtectionLifecycleReceiver') {
+    if ($variant -eq 'release' -and $defined -match 'DebugHeartbeatContinuityReceiver|DebugProtectionLifecycleReceiver|ReadOnlyMcsQualificationMain|ReadOnlyStoppedFixtureMain') {
         throw 'Release DEX must not contain the heartbeat acceptance driver.'
     }
     if ($defined -match 'io\.github\.originosfcmguardian\.(doze|gmsconfig|data\.journal)|io\.github\.originosfcmguardian\.core\.(doze|journal)|ReadOnlyDetector|RepairPlanner') {
@@ -143,5 +146,11 @@ foreach ($entryPoint in $entryPoints) {
     if ($seeds -notmatch ([regex]::Escape("$entryPoint`: ${shortName}(android.content.Context)"))) {
         throw "Release must keep external UserService Context constructor $entryPoint."
     }
+}
+$unstopHelper = 'io.github.originosfcmguardian.recovery.PackageStoppedStateMain'
+$escapedUnstopHelper = [regex]::Escape($unstopHelper)
+if ($mapping -notmatch "(?m)^$escapedUnstopHelper -> ${escapedUnstopHelper}:`r?$" -or
+    $seeds -notmatch ([regex]::Escape("${unstopHelper}: void main(java.lang.String[])"))) {
+    throw 'Release must retain the fixed PackageStoppedStateMain class and static main entry point.'
 }
 [pscustomobject]@{ artifacts = $results; externalUserServices = $entryPoints; result = 'PASS (host only)' } | ConvertTo-Json -Depth 5

@@ -25,7 +25,7 @@ ACTIVITY MANAGER BROADCAST STATE (dumpsys activity broadcasts)
     com.google.android.intent.action.MCS_HEARTBEAT:
       BroadcastFilter{ce49973}
 """.trimIndent() + "\n"
-        assertTrue(FcmMcsReceiverReader.parse(fixture.toByteArray(), 10208, allowReviewedMissingExported = true))
+        assertTrue(FcmMcsReceiverReader.parse(fixture.toByteArray(), 10208, allowMetadataMissingAttempt = true))
         assertFalse(FcmMcsReceiverReader.parse(fixture.replace("/10208/u0", "/10208/u10").toByteArray(), 10208))
         assertFalse(FcmMcsReceiverReader.parse(fixture.replace("    Filter #1", "      requiredPermission=other.permission\n    Filter #1").toByteArray(), 10208))
         assertFalse(FcmMcsReceiverReader.parse(fixture.substringBefore("  Receiver Resolver Table:").toByteArray(), 10208))

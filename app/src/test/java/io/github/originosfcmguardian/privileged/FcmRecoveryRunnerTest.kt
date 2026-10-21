@@ -19,7 +19,7 @@ class FcmRecoveryRunnerTest {
         var multipleSigners = false
         var senderReads = 0
         var loseSenderOnSecondRead = false
-        var mcsQualified = true
+        var mcsAttemptAllowed = true
         var network = true
         var mcsReads = 0
         var mcsDuringTarget: (() -> Unit)? = null
@@ -38,12 +38,12 @@ class FcmRecoveryRunnerTest {
             senderReads++
             return qualified && !(loseSenderOnSecondRead && senderReads >= 2)
         }
-        override fun disconnectedMcsQualified(): Boolean {
-            mcsReads++; mcsDuringTarget?.invoke(); return mcsQualified
+        override fun disconnectedMcsAttemptAllowed(): Boolean {
+            mcsReads++; mcsDuringTarget?.invoke(); return mcsAttemptAllowed
         }
         override fun usableInternet() = network
     }
-    private class Child(mcs: Boolean = false) : Process() {
+    private class Child(mcs: Boolean = false, private val exitCode: Int = 0) : Process() {
         private val out = ByteArrayInputStream((if (mcs)
             "Broadcasting: Intent { act=com.google.android.intent.action.MCS_HEARTBEAT flg=0x400000 pkg=com.google.android.gms }\nBroadcast completed: result=0\n"
             else "Broadcasting: Intent { act=com.google.android.gcm.intent.SEND flg=0x400000 cmp=com.google.android.gms/.gcm.GcmSenderProxy }\nBroadcast completed: result=0\n").toByteArray())
@@ -51,9 +51,9 @@ class FcmRecoveryRunnerTest {
         override fun getInputStream() = out
         override fun getErrorStream() = err
         override fun getOutputStream() = ByteArrayOutputStream()
-        override fun exitValue() = 0
+        override fun exitValue() = exitCode
         override fun isAlive() = false
-        override fun waitFor() = 0
+        override fun waitFor() = exitCode
         override fun destroy() {}
     }
     private fun binding(port: Port) = FcmRecoveryPolicy.binding(observeGmsConnection(1, port) as GmsConnectionObservation.Sample)
@@ -248,15 +248,15 @@ class FcmRecoveryRunnerTest {
         assertEquals(FcmRecoveryStatus.NOT_SENT, request().status); port.socketCompleteness = SourceCompleteness.COMPLETE
         port.socketMatched = true; assertEquals(FcmRecoveryStatus.NOT_SENT, request().status); port.socketMatched = false
         port.version++; assertEquals(FcmRecoveryStatus.REQUESTED, request().status); port.version--
-        port.mcsQualified = false; assertEquals(FcmRecoveryReason.TARGET_UNQUALIFIED, request().reason); port.mcsQualified = true
+        port.mcsAttemptAllowed = false; assertEquals(FcmRecoveryReason.TARGET_UNQUALIFIED, request().reason); port.mcsAttemptAllowed = true
         port.mcsDuringTarget = { port.state = GcmConnectionState.REPORTED_CONNECTED }
         assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
         port.state = GcmConnectionState.REPORTED_DISCONNECTED; port.mcsDuringTarget = { port.network = false }
         assertEquals(FcmRecoveryStatus.NOT_SENT, request().status)
-        port.network = true; port.mcsDuringTarget = { if (port.mcsReads % 2 == 0) port.mcsQualified = false }
+        port.network = true; port.mcsDuringTarget = { if (port.mcsReads % 2 == 0) port.mcsAttemptAllowed = false }
         // Ensure the second qualification independently rejects receiver disappearance.
         port.mcsReads = 0; assertEquals(FcmRecoveryReason.TARGET_UNQUALIFIED, request().reason)
-        port.mcsQualified = true
+        port.mcsAttemptAllowed = true
         for (state in listOf(GcmConnectionState.REPORTED_CONNECTED, GcmConnectionState.SERVICE_ABSENT)) {
             port.state = GcmConnectionState.REPORTED_DISCONNECTED; port.mcsReads = 0
             port.mcsDuringTarget = { if (port.mcsReads == 2) port.state = state }
@@ -266,5 +266,19 @@ class FcmRecoveryRunnerTest {
         port.mcsDuringTarget = { if (port.mcsReads == 2) port.uid++ }
         assertEquals(FcmRecoveryReason.IDENTITY_CHANGED, request().reason)
         assertEquals(2, mcs); assertEquals(0, send)
+    }
+
+    @Test fun `allowed MCS attempt still reports command denial without request acceptance`() {
+        val port = Port().apply { version = 264032036L; state = GcmConnectionState.REPORTED_DISCONNECTED }
+        var launches = 0
+        val runner = FcmRecoveryRunner({ port }, { error("MCS must not use SEND") },
+            mcsLaunch = { launches++; Child(mcs = true, exitCode = 1) })
+        try {
+            val result = runner.request(1, 10333, binding(port), { true }, { false }, FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS)
+            assertEquals(FcmRecoveryStatus.UNKNOWN, result.status)
+            assertEquals(FcmRecoveryReason.COMMAND_FAILED, result.reason)
+            assertEquals(FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS, result.operation)
+            assertEquals(1, launches); assertEquals(2, port.mcsReads)
+        } finally { runner.close() }
     }
 }

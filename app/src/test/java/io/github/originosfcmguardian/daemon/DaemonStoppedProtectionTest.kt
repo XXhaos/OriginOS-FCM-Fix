@@ -113,24 +113,26 @@ class DaemonStoppedProtectionTest {
                 return StoppedTargetObservation.Known(id, identity, synchronized(stopped) { stopped[identity]!! },
                     false, System.currentTimeMillis(), qualifiedRecipient = true)
             }
-            override fun capable(active: () -> Boolean) = active()
-            override fun startUnstop(identity: SelectedTargetIdentity): DaemonStartedUnstop {
-                assertEquals(StoppedRecoveryStage.CLAIMED, journal.load().latest?.stage)
-                assertEquals(DaemonOwnerStatus.ACTIVE, owner.status())
-                starts.incrementAndGet()
-                processExited = false
-                return object : DaemonStartedUnstop {
-                    override fun awaitExit(active: () -> Boolean): Int {
-                        awaited.incrementAndGet()
-                        awaitHook()
-                        if (failAwait) error("unknown process result")
-                        check(active())
-                        synchronized(stopped) { stopped[identity] = false }
-                        processExited = true
-                        return 0
+            override fun prepareUnstop(identity: SelectedTargetIdentity, recipient: Boolean, active: () -> Boolean): DaemonUnstopLaunch? {
+                if (!active()) return null
+                return DaemonUnstopLaunch {
+                    assertEquals(StoppedRecoveryStage.CLAIMED, journal.load().latest?.stage)
+                    assertEquals(DaemonOwnerStatus.ACTIVE, owner.status())
+                    starts.incrementAndGet()
+                    processExited = false
+                    object : DaemonStartedUnstop {
+                        override fun awaitExit(active: () -> Boolean): Int {
+                            awaited.incrementAndGet()
+                            awaitHook()
+                            if (failAwait) error("unknown process result")
+                            check(active())
+                            synchronized(stopped) { stopped[identity] = false }
+                            processExited = true
+                            return 0
+                        }
+                        override fun close() { if (terminateOnClose) processExited = true }
+                        override fun terminated() = processExited
                     }
-                    override fun close() { if (terminateOnClose) processExited = true }
-                    override fun terminated() = processExited
                 }
             }
             override fun close() = Unit

@@ -119,17 +119,17 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         } else emptyList()
         usableFcmMcsNetwork(facts(capabilities), networks)
     }.getOrDefault(false)
-    override fun disconnectedMcsQualified(): Boolean {
+    override fun disconnectedMcsAttemptAllowed(): Boolean {
         val identity = gmsPackage() ?: return false
-        // Prefer current receiver capability. The reviewed version only supplies a fallback
-        // for legacy dumps which omit export metadata; it never overrides contrary evidence.
+        // Prefer current receiver metadata. A complete exact filter with omitted export metadata
+        // permits only the existing bounded attempt; command/readback must still show its result.
         if (!qualifiedGmsMcsIdentity(identity, Os.getuid(), environment().currentUser,
                 packagesForUid(identity.uid))) return false
         val protected = api.getMethod("isProtectedBroadcast", String::class.java)
             .invoke(remote, FcmRecoveryPolicy.MCS_ACTION) as? Boolean
         if (protected != false || !FcmPackageStateReader.read()) return false
         return FcmMcsReceiverReader.read(identity.uid,
-            allowReviewedMissingExported = identity.versionCode == FcmRecoveryPolicy.MCS_VERSION)
+            allowMetadataMissingAttempt = true)
     }
     override fun recoverySenderQualified(): Boolean {
         if (Os.getuid() != 2000) return false

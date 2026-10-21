@@ -291,11 +291,12 @@ internal class DaemonShellStorage private constructor(
         }
         private fun decode(role: DaemonRecordRole, bytes: ByteArray): ByteArray {
             check(bytes.size in ENVELOPE_BYTES..role.maximumBytes + ENVELOPE_BYTES)
-            val body = bytes.copyOfRange(0, bytes.size - 32)
-            check(MessageDigest.isEqual(MessageDigest.getInstance("SHA-256").digest(body), bytes.copyOfRange(body.size, bytes.size)))
-            return DataInputStream(ByteArrayInputStream(body)).use {
+            val bodySize = bytes.size - 32
+            val digest = MessageDigest.getInstance("SHA-256").apply { update(bytes, 0, bodySize) }.digest()
+            check(MessageDigest.isEqual(digest, bytes.copyOfRange(bodySize, bytes.size)))
+            return DataInputStream(ByteArrayInputStream(bytes, 0, bodySize)).use {
                 check(it.readInt() == 0x47445331 && it.readInt() == role.ordinal)
-                val size = it.readInt(); check(size in 0..role.maximumBytes && size == body.size - 12)
+                val size = it.readInt(); check(size in 0..role.maximumBytes && size == bodySize - 12)
                 ByteArray(size).also { payload -> it.readFully(payload); check(it.read() == -1) }
             }
         }

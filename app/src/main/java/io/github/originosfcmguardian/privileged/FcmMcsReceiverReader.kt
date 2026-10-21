@@ -14,7 +14,7 @@ internal object FcmMcsReceiverReader {
     // Diagnostic lines only: legitimate receiver actions/history can contain EXCEPTION.
     private val dumpError = Regex("(?i)^\\s*(?:\\*+\\s*)?(?:permission denial\\b|permission denied\\b|error (?:while )?dumping\\b|[A-Za-z0-9_.$]*Exception(?::\\s+\\S|\\s+\\S|$)|dump timeout\\b)")
     private val exportMetadata = Regex("exported=(true|false)")
-    internal class Collector(private val uid: Int, private val allowReviewedMissingExported: Boolean = false) {
+    internal class Collector(private val uid: Int, private val allowMetadataMissingAttempt: Boolean = false) {
         private val line = ByteArray(8192)
         private var lineSize = 0
         private var ignoredLongLine = false
@@ -40,11 +40,13 @@ internal object FcmMcsReceiverReader {
         private var pid: String? = null
         private fun finishFilter() {
             if (gmsOwner && FcmRecoveryPolicy.MCS_ACTION in actions) {
-                val reviewedLegacyFilter = allowReviewedMissingExported && exported == null &&
+                // This exact complete shape permits a bounded attempt, not a claim that the
+                // receiver is exported. Explicit contrary metadata always rejects the request.
+                val metadataMissingAttempt = allowMetadataMissingAttempt && exported == null &&
                     actions.toSet() == setOf(FcmRecoveryPolicy.MCS_ACTION,
                         "com.google.android.gms.gcm.ACTION_HEARTBEAT_NOW") && actions.size == 2
                 if (!owner || !ownerConfirmed || permission || actions.distinct().size != actions.size ||
-                    (exported != true && !reviewedLegacyFilter)) failed = true
+                    (exported != true && !metadataMissingAttempt)) failed = true
                 else matches++
             }
             actions.clear(); permission = false; permissionSeen = false; exported = null; filter = false
@@ -128,11 +130,11 @@ internal object FcmMcsReceiverReader {
         }
         fun finish(): Boolean { finishFilter(); return !failed && total > 0 && lineSize == 0 && !ignoredLongLine && headers == 1 && !registered && matches == 1 }
     }
-    internal fun parse(bytes: ByteArray, uid: Int, allowReviewedMissingExported: Boolean = false): Boolean =
-        Collector(uid, allowReviewedMissingExported).let { it.accept(bytes) && it.finish() }
-    fun read(uid: Int, allowReviewedMissingExported: Boolean = false): Boolean {
+    internal fun parse(bytes: ByteArray, uid: Int, allowMetadataMissingAttempt: Boolean = false): Boolean =
+        Collector(uid, allowMetadataMissingAttempt).let { it.accept(bytes) && it.finish() }
+    fun read(uid: Int, allowMetadataMissingAttempt: Boolean = false): Boolean {
         // Parser construction can throw on Android ICU: do not start a child before it succeeds.
-        val collector = Collector(uid, allowReviewedMissingExported)
+        val collector = Collector(uid, allowMetadataMissingAttempt)
         val child = ProcessBuilder("/system/bin/dumpsys", "-t", "2", "activity", "broadcasts").start()
         val buffer = ByteArray(4096)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2500)
