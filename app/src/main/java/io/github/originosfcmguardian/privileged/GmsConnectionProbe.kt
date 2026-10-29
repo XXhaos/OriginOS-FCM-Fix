@@ -125,10 +125,14 @@ internal fun observeGmsConnection(
 /** One worker, no queue, bounded caller latency even when a system Binder read is stuck. */
 internal class GmsConnectionProbeRunner(
     private val portFactory: () -> GmsConnectionReadPort, private val budgetMillis: Long = 8_000,
+    keepAliveMillis: Long = 30_000,
+    threadFactory: ThreadFactory = ThreadFactory { task ->
+        Thread(task, "guardian-gms-connection-read").apply { isDaemon = true }
+    },
 ) {
-    init { require(budgetMillis in 1..8_000) }
-    private val worker = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),
-        { task -> Thread(task, "guardian-gms-connection-read").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
+    init { require(budgetMillis in 1..8_000); require(keepAliveMillis > 0) }
+    private val worker = ThreadPoolExecutor(0, 1, keepAliveMillis, TimeUnit.MILLISECONDS, SynchronousQueue(),
+        threadFactory, ThreadPoolExecutor.AbortPolicy())
     private val activity = PrivilegedWorkerActivity()
     fun isQuiescent(): Boolean = activity.isQuiescent()
     fun read(requestId: Long, wasCancelled: () -> Boolean): GmsConnectionObservation {

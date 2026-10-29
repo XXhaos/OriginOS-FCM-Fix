@@ -70,7 +70,8 @@ internal interface DaemonFcmShellPort : AutoCloseable {
 
 /** Production shell implementation: no Android Context, App callback or app-side runtime object. */
 internal class SystemDaemonFcmShellPort : DaemonFcmShellPort {
-    private val reads = GmsConnectionProbeRunner(::SystemGmsConnectionReadPort)
+    private val reads = GmsConnectionProbeRunner(::SystemGmsConnectionReadPort,
+        keepAliveMillis = DAEMON_READ_WORKER_KEEP_ALIVE_MILLIS)
     private val recovery = FcmRecoveryRunner()
     private val heartbeat = GmsHeartbeatRunner()
     override fun read(id: Long, cancelled: () -> Boolean) = reads.read(id, cancelled)

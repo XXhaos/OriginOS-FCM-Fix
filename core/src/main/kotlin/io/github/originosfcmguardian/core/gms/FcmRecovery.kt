@@ -31,10 +31,20 @@ object FcmRecoveryPolicy {
         sample.observation == SocketObservation.OBSERVED &&
         sample.tcp.completeness == SourceCompleteness.COMPLETE && sample.tcp6.completeness == SourceCompleteness.COMPLETE
     /** Includes boot: a changed boot conservatively requires a fresh explicit trial confirmation. */
-    fun binding(sample: GmsConnectionObservation.Sample): String = MessageDigest.getInstance("SHA-256")
-        .digest(listOf(sample.uid, sample.versionCode, sample.firstInstallTime, sample.lastUpdateTime,
-            sample.signerSha256, sample.bootId).joinToString("|").toByteArray(Charsets.US_ASCII))
-        .joinToString("") { "%02x".format(it.toInt() and 255) }
+    fun binding(sample: GmsConnectionObservation.Sample): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(listOf(sample.uid, sample.versionCode,
+            sample.firstInstallTime, sample.lastUpdateTime, sample.signerSha256, sample.bootId)
+            .joinToString("|").toByteArray(Charsets.US_ASCII))
+        // Preserve persisted bindings exactly; only replace per-byte Formatter allocations.
+        val encoded = CharArray(digest.size * 2)
+        for (index in digest.indices) {
+            val byte = digest[index].toInt() and 255
+            encoded[index * 2] = HEX[byte ushr 4]
+            encoded[index * 2 + 1] = HEX[byte and 15]
+        }
+        return String(encoded)
+    }
+    private const val HEX = "0123456789abcdef"
 }
 
 enum class FcmRecoveryStatus { NOT_SENT, REQUESTED, UNKNOWN }

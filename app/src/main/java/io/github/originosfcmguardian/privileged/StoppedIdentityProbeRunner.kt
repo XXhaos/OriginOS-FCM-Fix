@@ -2,6 +2,7 @@ package io.github.originosfcmguardian.privileged
 
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -15,12 +16,16 @@ import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
 internal class StoppedIdentityProbeRunner(
     private val portFactory: () -> StoppedIdentityReadPort,
     private val budgetMillis: Long = 8_000,
+    keepAliveMillis: Long = 30_000,
+    threadFactory: ThreadFactory = ThreadFactory { task ->
+        Thread(task, "guardian-telegram-identity-read").apply { isDaemon = true }
+    },
 ) {
-    init { require(budgetMillis in 1..8_000) }
+    init { require(budgetMillis in 1..8_000); require(keepAliveMillis > 0) }
 
     private val worker = ThreadPoolExecutor(
-        0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),
-        { runnable -> Thread(runnable, "guardian-telegram-identity-read").apply { isDaemon = true } },
+        0, 1, keepAliveMillis, TimeUnit.MILLISECONDS, SynchronousQueue(),
+        threadFactory,
         ThreadPoolExecutor.AbortPolicy(),
     )
     private val activity = PrivilegedWorkerActivity()

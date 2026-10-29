@@ -10,6 +10,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -44,10 +45,15 @@ internal data class AutomaticTargetReaderGauges(val actualActive: Int, val poolS
 internal class BoundedAutomaticTargetRead(
     private val timeoutMillis: Long = 5_000,
     maxParallel: Int = CHUNK_SIZE,
+    keepAliveMillis: Long = 30_000,
+    threadFactory: ThreadFactory = ThreadFactory { task ->
+        Thread(task, "guardian-auto-target-read").apply { isDaemon = true }
+    },
 ) : AutoCloseable {
     private val parallelLimit = maxParallel.also { require(it in 1..8) }
-    private val workers = ThreadPoolExecutor(0, parallelLimit, 30, TimeUnit.SECONDS, SynchronousQueue(),
-        { task -> Thread(task, "guardian-auto-target-read").apply { isDaemon = true } },
+    init { require(timeoutMillis > 0); require(keepAliveMillis > 0) }
+    private val workers = ThreadPoolExecutor(0, parallelLimit, keepAliveMillis, TimeUnit.MILLISECONDS, SynchronousQueue(),
+        threadFactory,
         ThreadPoolExecutor.AbortPolicy())
     private val actualActive = AtomicInteger(0)
     private val activity = PrivilegedWorkerActivity()
@@ -55,8 +61,6 @@ internal class BoundedAutomaticTargetRead(
     private val timeouts = AtomicLong(0)
     private val rejections = AtomicLong(0)
     fun diagnosticGauges() = AutomaticTargetReaderGauges(actualActive.get(), workers.poolSize, timeouts.get(), rejections.get())
-
-    init { require(timeoutMillis > 0) }
 
     suspend fun <T> readChunk(targets: List<T>, read: (T) -> AutomaticTargetObservation): List<AutomaticTargetObservation> {
         require(targets.size <= parallelLimit)

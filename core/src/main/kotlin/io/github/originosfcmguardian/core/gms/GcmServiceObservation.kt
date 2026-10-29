@@ -41,18 +41,26 @@ object GcmServiceParser {
         var durationMillis: Long? = null
         var lines = 0
         for (line in text.lineSequence()) {
-            if (++lines > MAX_LINES || line.toByteArray(Charsets.UTF_8).size > MAX_LINE_BYTES) return unknown(SourceCompleteness.TRUNCATED)
+            if (++lines > MAX_LINES || exceedsLineByteLimit(line)) return unknown(SourceCompleteness.TRUNCATED)
             if (failure.containsMatchIn(line) || failureBanner.containsMatchIn(line)) return unknown(if (line.contains("permission", true)) SourceCompleteness.DENIED else SourceCompleteness.UNAVAILABLE)
-            val trimmed = line.trim()
-            if (trimmed.startsWith("SERVICE ")) {
-                if (!header.matches(line) || ++headers != 1) return unknown(SourceCompleteness.MALFORMED)
+            // Only the leading offset is needed to recognize fields. Avoid copying the
+            // entire indented line (including private diagnostics) just to inspect it.
+            var start = 0
+            while (start < line.length && line[start].isWhitespace()) start++
+            if (line.startsWith("SERVICE ", start)) {
+                // trim().startsWith("SERVICE ") ignored a bare SERVICE marker
+                // followed only by whitespace. Preserve that recognition boundary.
+                var end = line.length
+                while (end > start && line[end - 1].isWhitespace()) end--
+                if (end - start >= "SERVICE ".length && (!header.matches(line) || ++headers != 1))
+                    return unknown(SourceCompleteness.MALFORMED)
             }
-            if (trimmed.startsWith("Is client connected:")) {
+            if (line.startsWith("Is client connected:", start)) {
                 val match = connected.matchEntire(line)
                 if (headers != 1 || match == null || ++fields != 1) return unknown(SourceCompleteness.MALFORMED)
                 state = if (match.groupValues[1] == "true") GcmConnectionState.REPORTED_CONNECTED else GcmConnectionState.REPORTED_DISCONNECTED
             }
-            if (trimmed.startsWith("connectTime=")) {
+            if (line.startsWith("connectTime=", start)) {
                 durationFields++
                 val match = connectionTime.matchEntire(line)
                 durationMillis = if (headers == 1 && match != null && parseElapsedDuration(match.groupValues[2]) != null)
@@ -62,6 +70,29 @@ object GcmServiceParser {
         return if (headers == 1 && fields == 1) GcmServiceSource(state, SourceCompleteness.COMPLETE,
             connectedDurationMillis = durationMillis.takeIf { durationFields == 1 && state == GcmConnectionState.REPORTED_CONNECTED })
         else unknown(SourceCompleteness.MALFORMED)
+    }
+
+    /** The strict decoder above guarantees paired surrogates. Count their original
+     * UTF-8 bytes without allocating a second byte array for every diagnostics line.
+     * Keep this check in line order so a later long line cannot hide an earlier denial. */
+    private fun exceedsLineByteLimit(line: String): Boolean {
+        // Every valid UTF-16 code unit contributes between one and three UTF-8
+        // bytes (a surrogate pair contributes four together). Most lines need no scan.
+        if (line.length <= MAX_LINE_BYTES / 3) return false
+        if (line.length > MAX_LINE_BYTES) return true
+        var bytes = 0
+        var index = 0
+        while (index < line.length) {
+            val char = line[index++]
+            bytes += when {
+                char.code < 0x80 -> 1
+                char.code < 0x800 -> 2
+                char.isHighSurrogate() -> { index++; 4 }
+                else -> 3
+            }
+            if (bytes > MAX_LINE_BYTES) return true
+        }
+        return false
     }
 
     private fun parseElapsedDuration(text: String): Long? = runCatching {

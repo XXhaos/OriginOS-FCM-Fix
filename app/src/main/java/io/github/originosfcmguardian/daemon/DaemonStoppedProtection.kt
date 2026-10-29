@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
+// Retain read workers across the host's post-cycle 30-second wait; idle workers still expire.
+internal const val DAEMON_READ_WORKER_KEEP_ALIVE_MILLIS = 90_000L
+
 /** Only the fixed package-unstop operation; process waiting must occur outside owner.startWrite. */
 internal interface DaemonStartedUnstop : AutoCloseable {
     fun awaitExit(active: () -> Boolean): Int
@@ -30,7 +33,8 @@ internal fun interface DaemonUnstopLaunch { fun start(): DaemonStartedUnstop }
 
 /** Fixed four bounded system-read lanes survive poll timeouts; no App Context or Binder callbacks. */
 internal class SystemDaemonStoppedShellPort : DaemonStoppedShellPort {
-    private val readers = Array(4) { StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort, 4_000) }
+    private val readers = Array(4) { StoppedIdentityProbeRunner(::SystemStoppedIdentityReadPort, 4_000,
+        keepAliveMillis = DAEMON_READ_WORKER_KEEP_ALIVE_MILLIS) }
     private val cursor = AtomicInteger()
     override fun isQuiescent(): Boolean = readers.all { it.isQuiescent() } && PackageUnstopCapability.isQuiescent()
     override fun observe(id: Long, identity: SelectedTargetIdentity, recipient: Boolean,
@@ -115,7 +119,8 @@ internal class DaemonStoppedProtection(
     private val shell: DaemonStoppedShellPort,
     private val elapsed: () -> Long,
     private val wall: () -> Long = System::currentTimeMillis,
-    private val targetReader: BoundedAutomaticTargetRead = BoundedAutomaticTargetRead(),
+    private val targetReader: BoundedAutomaticTargetRead = BoundedAutomaticTargetRead(
+        keepAliveMillis = DAEMON_READ_WORKER_KEEP_ALIVE_MILLIS),
     private val readbackPause: () -> Unit = { Thread.sleep(1_000) },
 ) : AutoCloseable {
     private val busy = AtomicBoolean()
