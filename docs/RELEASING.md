@@ -61,8 +61,35 @@ d662d39e97573ed1759994033584109eb26d06b57c7cae81a7cf3d4d840dfa9d
 
 源码 ZIP 必须使用最终发布提交的 `git archive` 生成，包含根目录 LICENSE、NOTICE、第三方声明及 licenses/，不得直接压缩维护者工作目录。Git 标签也应指向该提交。公开 manifest 记录该源码提交、版本、APK 签名及实际检查范围，不包含本机路径或私人诊断。
 
+在 Windows 上导出时，使用 `git -c core.autocrlf=false -c core.eol=lf archive`，以免本机默认行尾转换破坏生成文件的逐字节校验；仓库明确指定的文件属性仍生效。
+
 签名助手先生成 APK 的校验值；发布前补齐最终 `SHA256SUMS.txt`，覆盖正式 APK、源码 ZIP 和公开 manifest，不包含校验文件自身。上传前重新校验四个文件，并在发布后核对下载文件与本地 SHA-256 一致。
 
 不上传签名材料、本地 Gradle/SDK 缓存、依赖导出输入中的本地路径、R8 映射、原始私人诊断、内部工作记录或 debug APK。保留旧正式发行文件及其真实版本信息，不把旧测试包重新标记为本次正式包。
+
+## GitHub 发行同步
+
+Gitea 的 Git 推送镜像仅同步提交、分支和标签，不能自动复制 Release 说明与附件。Gitea 是正式发行的来源；`.github/workflows/sync-gitea-releases.yml` 在 GitHub 使用托管 Linux 运行器，将已发布版本复制到 [GitHub Releases](https://github.com/XXhaos/OriginOS-FCM-Fix/releases)。这与前面的 Gitea 构建 CI 是两个独立工作流，不需要 `guardian-ci` 运行器，也不在云端重新构建或签名 APK。
+
+- 在维护者 `main` 分支推送、手动运行和每小时第 23、53 分钟检查；定时任务可能延迟，并非即时同步。首次先确认工作流已随 Git 镜像抵达 GitHub，Actions 已启用且任务成功。
+- 使用 GitHub 自动提供、仅作用于当前仓库的 `GITHUB_TOKEN`，权限为 `contents: write`；无需添加 PAT 或把签名材料放入 Secrets。现有 Gitea 镜像凭据仍需有推送 `.github/workflows/` 文件的权限。
+- 只从固定公开 Gitea 仓库读取已发布版本，并复制前述四份附件。两端标签必须已经存在，且与 manifest 的源码提交一致；不会自动创建或移动标签。
+- 上传前核对 manifest、原签名证书指纹声明、文件名、大小和 SHA-256；上传后校验 GitHub 附件。复用既有正式 APK 的字节，不重新签名；源 APK 的实际证书验收仍由正式签名流程负责。
+- 新版本先创建草稿，四份附件全部就绪后才公开。重复运行跳过已匹配附件；同名附件校验不同则失败并保留原文件，不自动覆盖或删除。
+
+维护者可在 GitHub **Actions → Mirror Gitea releases → Run workflow** 立即同步，分支选 `main`，可填 `v1.0.0` 等标签；留空检查所有已发布版本。同步失败时检查任务日志，特别是源站可达性、Git 镜像是否滞后、附件校验和 GitHub 权限。GitHub 定时任务只运行默认分支；公共仓库连续 60 天无活动可能被自动停用，可在 Actions 中重新启用。工作流不会改变仓库可见性，私有仓库的发行也需要对应访问权限。
+
+普通中断留下的草稿可以重跑续传；若 GitHub 上传错误留下 `starter` 状态或零字节的同名附件，脚本会安全停止。维护者需核对并手动移除该未完成的草稿附件后重跑，不自动删除已上传内容。
+
+本机只读验证源发行（不访问目标、无需凭据）：
+
+```sh
+python tools/sync_gitea_releases.py --source-only --tag v1.0.0
+python -m unittest discover -s tools/tests -p 'test_sync_gitea_releases.py'
+```
+
+不带 `--source-only` 的默认运行也只检查，不发布；仅明确传入 `--publish` 才会写入 GitHub，且需要当前进程的 `GITHUB_TOKEN`。不要将 token 值粘贴到命令、文档或日志中。正常发行只需在 Gitea 完成发布后等待工作流，或手动运行一次。
+
+参考：[Gitea 镜像范围](https://docs.gitea.com/usage/repository/repo-mirror/)、[GitHub Release API](https://docs.github.com/en/rest/releases/releases)、[GITHUB_TOKEN](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token)、[定时工作流](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
 
 签名工具参考：[Android 应用签名](https://developer.android.com/studio/publish/app-signing)、[apksigner](https://developer.android.com/tools/apksigner)、[apkanalyzer](https://developer.android.com/tools/apkanalyzer)。

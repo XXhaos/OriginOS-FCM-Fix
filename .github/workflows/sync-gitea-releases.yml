@@ -1,0 +1,42 @@
+name: Mirror Gitea releases
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23,53 * * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional Gitea release tag; leave empty to sync all published versions'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-gitea-releases
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    # Forks and manually selected development branches must not publish.
+    if: github.repository == 'XXhaos/OriginOS-FCM-Fix' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out trusted source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test release synchronization
+        run: python3 -m unittest discover -s tools/tests -p 'test_sync_gitea_releases.py'
+      - name: Mirror verified release notes and assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_TAG: ${{ inputs.tag }}
+        run: |
+          args=()
+          if [ -n "$SYNC_TAG" ]; then args+=(--tag "$SYNC_TAG"); fi
+          python3 tools/sync_gitea_releases.py --publish "${args[@]}"
