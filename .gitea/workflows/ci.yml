@@ -1,0 +1,42 @@
+name: Source build and checks
+
+# Maintainer-controlled branches only. See docs/BUILDING.md for runner policy.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    # Requires an explicitly provisioned, isolated Linux runner.
+    runs-on: guardian-ci
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: https://github.com/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up JDK 17
+        uses: https://github.com/actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: https://github.com/android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-37 build-tools;36.0.0'
+      - name: Check toolchain
+        run: |
+          java -version
+          python3 --version
+          bash ./gradlew --version
+      - name: Run host tests, lint and unsigned release build
+        run: >-
+          bash ./gradlew --no-daemon --stacktrace
+          :core:test :app:testDebugUnitTest :app:lintDebug
+          :app:assembleRelease :app:exportReleaseDependencies
+      - name: Check committed dependency attribution
+        run: python3 tools/generate_dependency_notices.py --check

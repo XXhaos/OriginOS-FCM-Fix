@@ -2,5 +2,5 @@
 gradlew text eol=lf
 gradlew.bat text eol=crlf
 *.jar binary
-# Preserve captured fixture bytes, including command-help trailing spaces.
-docs/fixtures/** whitespace=-blank-at-eol
+# Preserve upstream attribution bytes, including original line endings and EOF.
+licenses/dependencies/upstream/** -text whitespace=-blank-at-eof

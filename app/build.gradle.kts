@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.originosfcmguardian"
         minSdk = 30
         targetSdk = 37
-        versionCode = 98
-        versionName = "0.1.0"
+        versionCode = 99
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -42,12 +42,37 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    packaging {
-        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
-    }
-
     // Retain explicit redistribution license texts in both APK variants.
     sourceSets.getByName("main").assets.srcDir(rootProject.file("licenses"))
+
+    packaging.resources.merges += setOf("/META-INF/AL2.0", "/META-INF/LGPL2.1", "/META-INF/LICENSE*", "/META-INF/NOTICE*")
+}
+
+// Explicit maintenance task; normal source builds need no signing key or notice-generation tools.
+// tools/generate_dependency_notices.py copies upstream notices into independently named assets.
+tasks.register("exportReleaseDependencies") {
+    val destination = layout.buildDirectory.file("reports/dependencies/release-artifacts.json")
+    outputs.file(destination)
+    outputs.upToDateWhen { false }
+    doLast {
+        val artifacts = configurations.getByName("releaseRuntimeClasspath").resolvedConfiguration.resolvedArtifacts
+            .filter { it.id.componentIdentifier !is org.gradle.api.artifacts.component.ProjectComponentIdentifier }
+            .distinctBy { "${it.moduleVersion.id}:${it.file.name}" }
+            .sortedBy { it.moduleVersion.id.toString() }
+            .map { artifact ->
+                val id = artifact.moduleVersion.id
+                val coordinate = "${id.group}:${id.name}:${id.version}"
+                val cachedPoms = gradle.gradleUserHomeDir.resolve("caches/modules-2/files-2.1/${id.group}/${id.name}/${id.version}")
+                    .walkTopDown().filter { it.isFile && it.name == "${id.name}-${id.version}.pom" }.toList()
+                val pom = cachedPoms.singleOrNull() ?: configurations.detachedConfiguration(
+                    dependencies.create("$coordinate@pom")
+                ).apply { isTransitive = false }.singleFile
+                mapOf("coordinate" to coordinate, "artifact" to artifact.file.absolutePath, "pom" to pom.absolutePath)
+            }
+        val output = destination.get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(artifacts)) + "\n")
+    }
 }
 
 dependencies {

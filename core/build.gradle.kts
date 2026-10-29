@@ -15,9 +15,3 @@ dependencies {
 tasks.test {
     useJUnitPlatform()
 }
-
-sourceSets {
-    test {
-        resources.srcDir("../docs/fixtures/phase0/20260926-pd2609")
-    }
-}
