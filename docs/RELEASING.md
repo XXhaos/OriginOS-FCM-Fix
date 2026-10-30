@@ -67,6 +67,8 @@ d662d39e97573ed1759994033584109eb26d06b57c7cae81a7cf3d4d840dfa9d
 
 不上传签名材料、本地 Gradle/SDK 缓存、依赖导出输入中的本地路径、R8 映射、原始私人诊断、内部工作记录或 debug APK。保留旧正式发行文件及其真实版本信息，不把旧测试包重新标记为本次正式包。
 
+2026-10-30 的公开历史清理保留 `v1.0.0` 的源码树及 APK 原字节，只迁移标签对应的提交标识，并重新导出源码 ZIP、更新 manifest 与校验文件。原有测试声明保持不变。`main` 中新的诊断导出提示尚未包含在该旧版 APK 中。
+
 ## GitHub 发行同步
 
 Gitea 的 Git 推送镜像仅同步提交、分支和标签，不能自动复制 Release 说明与附件。Gitea 是正式发行的来源；`.github/workflows/sync-gitea-releases.yml` 在 GitHub 使用托管 Linux 运行器，将已发布版本复制到 [GitHub Releases](https://github.com/XXhaos/OriginOS-FCM-Fix/releases)。这与前面的 Gitea 构建 CI 是两个独立工作流，不需要 `guardian-ci` 运行器，也不在云端重新构建或签名 APK。

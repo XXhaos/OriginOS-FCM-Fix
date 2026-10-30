@@ -22,7 +22,7 @@ import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
 internal fun DiagnosticReportExportButton(busy: Boolean, onExport: (DiagnosticReportFormat) -> Unit) {
     var choosingFormat by rememberSaveable { mutableStateOf(false) }
     OutlinedButton(onClick = { choosingFormat = true }, enabled = !busy) {
-        Text(if (busy) "正在准备…" else "导出脱敏报告")
+        Text(if (busy) "正在准备…" else "导出诊断报告")
     }
     if (choosingFormat) {
         AlertDialog(
@@ -30,6 +30,7 @@ internal fun DiagnosticReportExportButton(busy: Boolean, onExport: (DiagnosticRe
             title = { Text("选择报告格式") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("报告包含机型、所选应用及运行状态，分享前请检查并移除不希望公开的信息。")
                     OutlinedButton(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.small, enabled = !busy, onClick = {
                         choosingFormat = false
                         onExport(DiagnosticReportFormat.JSON)

@@ -38,3 +38,16 @@ service-account*.json
 firebase-admin*.json
 .private-transfer/
 *.private-handoff.tar.gz
+
+# Private development records belong outside the public repository
+/docs/fixtures/
+/docs/history/
+/docs/*HANDOFF*.md
+/docs/SIGNING_BACKUP.md
+/docs/WORKLOG.md
+/docs/DEVICE_FINDINGS.md
+/docs/DEVICE_ACCEPTANCE_QUEUE.md
+/docs/FIELD_LOG_REVIEW_*.md
+/START_HERE.md
+/design-qa.md
+/OriginOS_FCM_Guardian_Development_Spec.md

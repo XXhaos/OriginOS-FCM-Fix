@@ -6,7 +6,7 @@ Windows PowerShell，在已设置 `JAVA_HOME` 和 `ANDROID_HOME` 后：
 
 ```powershell
 & "$env:ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" --licenses
-& "$env:ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" 'platform-tools' 'platforms;android-37' 'build-tools;36.0.0'
+& "$env:ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" 'platform-tools' 'platforms;android-37.0' 'build-tools;36.0.0'
 .\gradlew.bat --version
 .\gradlew.bat :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleRelease
 .\gradlew.bat :app:assembleDebug
@@ -16,7 +16,7 @@ Linux/macOS，在已设置 `JAVA_HOME` 和 `ANDROID_HOME` 后：
 
 ```sh
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
-"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-37' 'build-tools;36.0.0'
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-37.0' 'build-tools;36.0.0'
 bash ./gradlew --version
 bash ./gradlew :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleRelease
 bash ./gradlew :app:assembleDebug

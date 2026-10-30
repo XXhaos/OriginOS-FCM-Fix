@@ -18,8 +18,9 @@ class DiagnosticReportExportButtonTest {
         var exports = 0
         compose.setContent { MaterialTheme { DiagnosticReportExportButton(false) { exports++ } } }
         compose.onNodeWithText("选择报告格式").assertDoesNotExist()
-        compose.onNodeWithText("导出脱敏报告").performClick()
+        compose.onNodeWithText("导出诊断报告").performClick()
         compose.onNodeWithText("选择报告格式").assertExists()
+        compose.onNodeWithText("报告包含机型、所选应用及运行状态，分享前请检查并移除不希望公开的信息。").assertExists()
         compose.runOnIdle { assertEquals(0, exports) }
         compose.onNodeWithText("取消").performClick()
         compose.onNodeWithText("选择报告格式").assertDoesNotExist()
@@ -39,7 +40,7 @@ class DiagnosticReportExportButtonTest {
     private fun checkFormat(label: String, expected: DiagnosticReportFormat) {
         val exports = mutableListOf<DiagnosticReportFormat>()
         compose.setContent { MaterialTheme { DiagnosticReportExportButton(false) { exports += it } } }
-        compose.onNodeWithText("导出脱敏报告").performClick()
+        compose.onNodeWithText("导出诊断报告").performClick()
         compose.onNodeWithText(label).performClick()
         compose.onNodeWithText("选择报告格式").assertDoesNotExist()
         compose.runOnIdle { assertEquals(listOf(expected), exports) }

@@ -69,13 +69,13 @@ class CompactDiagnosticsScreenTest {
         compose.onNodeWithText("主动获取测试令牌").assertDoesNotExist()
         compose.onNodeWithText("所选应用通知记录").assertDoesNotExist()
         compose.onNodeWithText("一键修复").assertDoesNotExist()
-        evidence.checked(SyntheticPhase.EXPORT_SCROLLED) { compose.onNodeWithText("导出脱敏报告").performScrollTo() }
+        evidence.checked(SyntheticPhase.EXPORT_SCROLLED) { compose.onNodeWithText("导出诊断报告").performScrollTo() }
         compose.waitForIdle()
         evidence.checked(SyntheticPhase.EXPORT_READY) {
-            compose.onNodeWithText("导出脱敏报告").assertIsDisplayed().assertIsEnabled()
+            compose.onNodeWithText("导出诊断报告").assertIsDisplayed().assertIsEnabled()
             compose.runOnIdle { assertEquals(0, exports) }
         }
-        compose.onNodeWithText("导出脱敏报告").performClick()
+        compose.onNodeWithText("导出诊断报告").performClick()
         compose.runOnIdle { assertEquals(0, exports) }
         compose.onNodeWithText("JSON（结构化）").performClick()
         compose.waitForIdle()
@@ -91,7 +91,7 @@ class CompactDiagnosticsScreenTest {
         compose.onNodeWithText("导出报告").assertDoesNotExist()
         compose.onNodeWithText("返回").performClick()
         compose.onNodeWithText("Guardian").assertExists()
-        compose.onNodeWithText("导出脱敏报告").performScrollTo().assertIsEnabled()
+        compose.onNodeWithText("导出诊断报告").performScrollTo().assertIsEnabled()
         compose.runOnIdle { assertEquals(1, exports) }
     }
 
