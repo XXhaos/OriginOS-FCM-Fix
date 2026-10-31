@@ -43,6 +43,15 @@ README.md, CONTRIBUTING.md and docs/BUILDING.md before changing behavior.
 - Gitea is the source of truth for code, workflow files, tags and release
   announcements. Commit and push file changes to Gitea, then verify the GitHub
   mirror. Do not fix mirrored files only on GitHub or disclose the source host.
+- Treat the actual Gitea address as private in every future change. Never put
+  its URL, clone/remote address, hostname or identifying server address in
+  tracked files, commit/tag messages, public logs, issues/PRs, release notes,
+  APKs, source archives or other published artifacts. Use GitHub public links
+  and synthetic example origins. Read the real endpoint only from authorized
+  private configuration or encrypted Secrets such as `GITEA_SOURCE_URL`; never
+  echo it. Before committing or publishing, inspect changes and generated
+  public content for source-address disclosures. Keep private audit evidence
+  outside the repository and never reintroduce old unsanitized history.
 - Routine development and release announcements need only Gitea. During an
   active maintenance task, still investigate failed or missing GitHub Actions,
   delayed mirrors/releases, expired credentials, environment gates and disabled

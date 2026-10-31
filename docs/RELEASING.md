@@ -88,6 +88,8 @@ Gitea 已经有四份正式附件的版本继续复用原字节同步，现有 v
 
 源站 HTTPS 根地址只保存在仓库 Actions Secret `GITEA_SOURCE_URL`，不得写入公开源码、日志或附件。发布说明和附件（含嵌套 APK/ZIP）若含源站域名，发布会停止。已有镜像凭据仍需能推送 `.github/workflows/`。
 
+此隐私约定适用于以后的每次修改：Gitea 的真实 URL、克隆/远端地址、域名及可识别源站的服务器地址均不得进入受版本控制的文件、提交/标签说明、公开日志、Issues/PR、发行说明或任何公开附件。对外链接统一使用 GitHub，示例使用虚构地址；真实配置仅从已授权的私有配置或加密 Secrets 读取，不回显。提交和发布前检查改动及生成内容，私有审计记录留在仓库外，避免旧的未脱敏历史再次混入。
+
 正式签名 Secrets 放在 GitHub 环境 `guardian-release`，部署分支只允许 `main`：
 
 | Environment Secret | 内容 |
