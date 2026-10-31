@@ -37,3 +37,22 @@ README.md, CONTRIBUTING.md and docs/BUILDING.md before changing behavior.
   never expose signing secrets to source builds, PRs, caches or artifacts.
 - Keep user documentation concise and record public changes in CHANGELOG.md.
   Keep private development evidence outside the tracked source tree.
+
+## Gitea source and GitHub operations
+
+- Gitea is the source of truth for code, workflow files, tags and release
+  announcements. Commit and push file changes to Gitea, then verify the GitHub
+  mirror. Do not fix mirrored files only on GitHub or disclose the source host.
+- Routine development and release announcements need only Gitea. During an
+  active maintenance task, still investigate failed or missing GitHub Actions,
+  delayed mirrors/releases, expired credentials, environment gates and disabled
+  schedules. GitHub Settings, Secrets, environments and Actions enablement are
+  service configuration maintained on GitHub; Gitea pushes do not repair them.
+- With existing authorization and access, diagnose and perform routine recovery
+  on the relevant service rather than defaulting to asking the user to operate
+  GitHub manually. Request input or confirmation only when actually required;
+  preserve the original signing identity, secret handling and release safeguards.
+- Read [release troubleshooting](docs/RELEASING.md#核验与故障处理). After recovery,
+  verify matching source/mirror refs and the relevant actual workflow or release
+  result. A successful Git push or a mirrored tag alone does not prove a build
+  or Release succeeded.
