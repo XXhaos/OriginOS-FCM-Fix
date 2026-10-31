@@ -1,0 +1,130 @@
+name: Android build and checks
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Build only the maintainer's mirrored main branch; no source-host or signing secrets.
+    if: github.repository == 'XXhaos/OriginOS-FCM-Fix' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out mirrored source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17 and Gradle dependency cache
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install required Android SDK packages
+        run: |
+          test "$(uname -m)" = x86_64
+          test -n "$ANDROID_HOME"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platform-tools' 'platforms;android-37.0' 'build-tools;36.0.0'
+
+      - name: Run host tests, lint and unsigned builds
+        run: |
+          bash ./gradlew --no-daemon --console=plain --max-workers=2 \
+            :core:test :app:testDebugUnitTest :app:lintDebug \
+            :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest \
+            :app:exportReleaseDependencies
+
+      - name: Verify dependency attribution
+        run: python3 tools/generate_dependency_notices.py --check
+
+      - name: Verify packaged privilege boundaries
+        shell: pwsh
+        run: ./tools/verify_privilege_artifacts.ps1
+
+      - name: Test release synchronization
+        run: python3 -m unittest discover -s tools/tests -p 'test_sync_gitea_releases.py'
+
+      - name: Prepare CI APK downloads
+        env:
+          CI_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p build/ci-apks
+          cp app/build/outputs/apk/debug/app-debug.apk build/ci-apks/
+          cp app/build/outputs/apk/release/app-release-unsigned.apk build/ci-apks/
+          cp app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk build/ci-apks/
+          printf '%s\n' "$CI_COMMIT" > build/ci-apks/SOURCE_COMMIT.txt
+          cat > build/ci-apks/README.txt <<'EOF'
+          CI builds for source verification, not official signed releases.
+          app-debug.apk uses a temporary runner-generated debug signing identity.
+          app-release-unsigned.apk must be signed before it can be installed.
+          app-debug-androidTest.apk is a compiled instrumentation test package;
+          these tests were not executed on a device or emulator.
+          Download official signed APKs from this repository's Releases page.
+          EOF
+          (cd build/ci-apks && sha256sum ./*.apk > SHA256SUMS.txt)
+
+      - name: Upload CI APKs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: android-ci-apks-${{ github.sha }}
+          path: build/ci-apks/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload test and lint reports
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: android-ci-reports-${{ github.sha }}
+          path: |
+            core/build/reports/tests/test/
+            core/build/test-results/test/TEST-*.xml
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/test-results/testDebugUnitTest/TEST-*.xml
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summarize verification
+        if: ${{ always() && !cancelled() }}
+        env:
+          BUILD_RESULT: ${{ job.status }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          totals = dict(tests=0, failures=0, errors=0, skipped=0)
+          reports = [*Path('core/build/test-results/test').glob('TEST-*.xml'),
+                     *Path('app/build/test-results/testDebugUnitTest').glob('TEST-*.xml')]
+          for report in reports:
+              suite = ET.parse(report).getroot()
+              for key in totals:
+                  totals[key] += int(suite.get(key, '0'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write('### Android verification\n\n')
+              output.write(f"Job result: {os.environ['BUILD_RESULT']}\n\n")
+              if reports:
+                  output.write('Host unit tests: ' + ', '.join(f'{key}={value}' for key, value in totals.items()) + '\n\n')
+              else:
+                  output.write('Host unit test reports were not produced.\n\n')
+              output.write('APK downloads are CI artifacts, not official signed releases. '
+                           'The AndroidTest target compiles test APKs only; no device or emulator tests were run.\n')
+          PY

@@ -1,9 +1,7 @@
 name: Source build and checks
 
-# Maintainer-controlled branches only. See docs/BUILDING.md for runner policy.
+# Optional manual self-hosted fallback. Automatic builds run on the GitHub mirror.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

@@ -7,7 +7,9 @@ $androidNamespace = 'http://schemas.android.com/apk/res/android'
 $results = @()
 $sdkRoot = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { $env:ANDROID_SDK_ROOT }
 if (-not $sdkRoot) { throw 'Set ANDROID_HOME or ANDROID_SDK_ROOT.' }
-$apkAnalyzer = Join-Path $sdkRoot 'cmdline-tools/latest/bin/apkanalyzer.bat'
+$apkAnalyzerName = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') { 'apkanalyzer.bat' } else { 'apkanalyzer' }
+$apkAnalyzer = Join-Path $sdkRoot "cmdline-tools/latest/bin/$apkAnalyzerName"
+if (-not (Test-Path -LiteralPath $apkAnalyzer -PathType Leaf)) { throw 'Android SDK apkanalyzer was not found under cmdline-tools/latest/bin.' }
 foreach ($variant in @('debug', 'release')) {
     $capitalized = (Get-Culture).TextInfo.ToTitleCase($variant)
     $manifestPath = Join-Path $Repository "app/build/intermediates/merged_manifest/$variant/process${capitalized}MainManifest/AndroidManifest.xml"

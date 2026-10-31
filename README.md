@@ -22,6 +22,8 @@ Guardian 会检查可用的系统接口与权限，并根据当前条件执行�
 
 需要 JDK 17、Android SDK 37，使用仓库中的 Gradle wrapper。构建与验证命令见[构建说明](docs/BUILDING.md)，协作约定见[贡献指南](CONTRIBUTING.md)。
 
+代码在 Gitea 维护并同步到 GitHub；同步后的 `main` 会触发 [Android 自动构建](https://github.com/XXhaos/OriginOS-FCM-Fix/actions/workflows/android-ci.yml)。测试报告、调试 APK 和未签名 Release APK 可在对应运行的 Artifacts 下载，保留 14 天。CI 包使用临时调试签名或尚未签名，正式安装请使用 Releases。
+
 请通过 [Issues](https://github.com/XXhaos/OriginOS-FCM-Fix/issues) 报告普通问题；提交前删除账号、设备标识、应用列表和其他私人信息。敏感漏洞请遵循[安全说明](SECURITY.md)。
 
 本项目采用 [Apache License 2.0](LICENSE)；第三方组件信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。版本变化见[更新记录](CHANGELOG.md)。

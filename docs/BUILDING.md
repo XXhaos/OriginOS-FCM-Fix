@@ -48,11 +48,21 @@ python tools/generate_dependency_notices.py --check
 
 Linux/macOS 对应使用 `bash ./gradlew :app:exportReleaseDependencies` 和 `python3 tools/generate_dependency_notices.py --check`。若调整依赖后检查失败，去掉 `--check` 重新生成，审阅 `licenses/dependencies/`、根目录第三方声明和许可证后一起提交。导出的 `app/build/reports/dependencies/release-artifacts.json` 含本地缓存路径，仅作生成工具输入，不作为公开附件。
 
-## Gitea CI 与执行权限
+## GitHub 自动构建
 
-`.gitea/workflows/ci.yml` 为 `main` push 和手动触发提供主机测试、Debug lint、未签名 release 构建及依赖归属检查；不签名、不上传 APK、不自动发布。工作流存在不代表服务器已配置 runner 或 CI 已通过，实际结果以对应提交的 Actions 日志为准。
+日常在 Gitea 修改并提交 `main`，推送镜像抵达 GitHub 后，`.github/workflows/android-ci.yml` 自动运行；也可在 [Android build and checks](https://github.com/XXhaos/OriginOS-FCM-Fix/actions/workflows/android-ci.yml) 中手动选择 `main` 运行。工作流文件仍在 Gitea 源码中维护。
 
-维护者必须先配置标签为 `guardian-ci` 的隔离 Linux runner，提供 Bash、Git、Python 3、可运行 Node 20 actions 的运行环境及足够磁盘空间，并允许访问 Gitea、GitHub action 源、JDK/SDK 下载和 Gradle 依赖源。该标签应映射到专门的临时容器或临时虚拟机；不得映射到持有私人数据、签名材料、Docker 管理套接字或其他生产凭据的日常工作主机。Android SDK 安装 action 会接受 SDK 许可，启用前应由维护者确认。
+使用 GitHub 托管的 Ubuntu 24.04 x86-64、JDK 17、API 37 和 Build Tools 36.0.0，执行核心及 Android 主机单元测试、lint、Debug/未签名 Release/AndroidTest APK 构建、依赖声明检查、打包权限边界和发行同步脚本测试。SDK 使用托管镜像预装的命令行工具与许可配置；不运行设备或模拟器测试。
+
+运行页的 Artifacts 提供 `android-ci-apks-<提交>` 和 `android-ci-reports-<提交>`，保留 14 天。APK 附带源码提交标识与 SHA-256；Debug 使用该次临时运行环境的调试签名，Release 无正式签名，不能作为官方覆盖升级包。正式下载和签名仍遵循[发布说明](RELEASING.md)，CI 不发布 Release。
+
+构建仅在维护者仓库的 `main` 上运行，只有 `contents: read` 权限，checkout 不保留凭据，不读取源站或签名 Secrets；公开 fork/PR 不自动执行。下载附件只包含明确列出的 APK 和测试/lint 报告，不包含 keystore、R8 映射或含本机路径的依赖导出输入。并发提交会取消旧的构建任务，不影响独立的 Release 同步。
+
+## Gitea 手动备用 CI 与执行权限
+
+`.gitea/workflows/ci.yml` 仅手动触发，提供主机测试、Debug lint、未签名 release 构建及依赖归属检查；日常自动检查由前述 GitHub 工作流承担，避免没有自托管 runner 的源站持续排队。工作流存在不代表服务器已配置 runner 或 CI 已通过，实际结果以对应提交的 Actions 日志为准。
+
+维护者必须先配置标签为 `guardian-ci` 的隔离 Linux x86-64 runner，提供 Bash、Git、Python 3、可运行 Node 20 actions 的运行环境及足够磁盘空间，并允许访问 Gitea、GitHub action 源、JDK/SDK 下载和 Gradle 依赖源。该标签应映射到专门的临时容器或临时虚拟机；不得映射到持有私人数据、签名材料、Docker 管理套接字或其他生产凭据的日常工作主机。Android SDK 安装 action 会接受 SDK 许可，启用前应由维护者确认。
 
 工作流显式从 GitHub 获取 `checkout@v4`、`setup-java@v4` 和 `setup-android@v3`；升级或启用前应审阅这些外部执行依赖与 runner 配置。checkout 不保留认证信息。Gitea 版本对 token 权限支持可能不同，维护者应在服务器/仓库设置中确保任务 token 只有读取源码所需权限。仓库 Actions 功能与手动触发也需当前服务器版本支持并启用。
 
