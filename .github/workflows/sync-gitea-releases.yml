@@ -35,6 +35,7 @@ jobs:
       - name: Mirror verified release notes and assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_SOURCE_URL: ${{ secrets.GITEA_SOURCE_URL }}
           SYNC_TAG: ${{ inputs.tag }}
         run: |
           args=()

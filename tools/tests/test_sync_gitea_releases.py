@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+import urllib.error
+import zipfile
+from unittest.mock import MagicMock, patch
 
 MODULE = Path(__file__).resolve().parents[1] / 'sync_gitea_releases.py'
 SPEC = importlib.util.spec_from_file_location('sync_gitea_releases', MODULE)
@@ -15,6 +17,14 @@ sys.modules[SPEC.name] = syncer
 SPEC.loader.exec_module(syncer)
 TAG = 'v1.0.0'
 COMMIT = 'a' * 40
+
+
+def archive_bytes(entries):
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, 'w', zipfile.ZIP_DEFLATED) as output:
+        for name, content in entries.items():
+            output.writestr(name, content)
+    return data.getvalue()
 
 
 def fixture():
@@ -192,6 +202,131 @@ class ReleaseSyncTests(unittest.TestCase):
         self.assertIsNone(redirected.get_header('Authorization'))
         with self.assertRaisesRegex(syncer.SyncError, 'destination'):
             handler.redirect_request(request, None, 302, 'Found', {}, syncer.SOURCE + '/steal')
+
+    def test_source_origin_is_required_before_any_network_request(self):
+        with patch.dict(syncer.os.environ, {}, clear=True), patch.object(syncer.Client, 'request') as request:
+            with self.assertRaisesRegex(syncer.SyncError, 'GITEA_SOURCE_URL is required'):
+                syncer.main(['--source-only'])
+            request.assert_not_called()
+
+    def test_source_origin_rejects_credentials_paths_and_invalid_ports(self):
+        for value in ['', 'http://example.org', 'https://user:secret@example.org',
+                      'https://example.org/path', 'https://example.org?token=private',
+                      'https://example.org#fragment', 'https://example.org:8443',
+                      'https://example.org:not-a-port']:
+            with self.subTest(value=value), self.assertRaises(syncer.SyncError):
+                syncer.source_origin(value)
+        self.assertEqual(syncer.source_origin(' https://Example.org/ '), 'https://example.org')
+
+    def test_configured_origin_is_used_without_hardcoded_host(self):
+        client = syncer.Client(source_url='https://private-origin.example.org')
+        with patch.object(client, 'request', return_value=[]) as request:
+            client.source('/releases')
+            self.assertEqual(request.call_args.args[0],
+                             'https://private-origin.example.org/api/v1/repos/' + syncer.REPOSITORY + '/releases')
+
+    def test_source_errors_never_print_source_host(self):
+        client = syncer.Client(source_url='https://private-origin.example.org')
+        opener = unittest.mock.Mock()
+        for error in [urllib.error.HTTPError(client.source_url, 503, 'Unavailable', {}, None),
+                      urllib.error.URLError(client.source_url + '/private')]:
+            opener.open.side_effect = error
+            with patch.object(syncer.urllib.request, 'build_opener', return_value=opener):
+                with self.assertRaises(syncer.SyncError) as stopped:
+                    client.source('/releases')
+                self.assertNotIn('private-origin', str(stopped.exception))
+
+    def test_invalid_response_header_does_not_expose_source_host(self):
+        host = 'private-origin.example.org'
+        client = syncer.Client(source_url='https://' + host)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.headers = {'Content-Length': host}
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(syncer.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaisesRegex(syncer.SyncError, 'invalid response') as stopped:
+                client.source('/releases')
+        self.assertNotIn(host, str(stopped.exception))
+
+    def test_unexpected_cli_errors_do_not_print_remote_values(self):
+        host = 'private-origin.example.org'
+        for error in [ValueError(host), KeyError(host), OSError(host)]:
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(syncer, 'main', side_effect=error), \
+                    patch('sys.stderr', new_callable=io.StringIO) as output:
+                self.assertEqual(syncer.cli(['--source-only']), 1)
+                self.assertNotIn(host, output.getvalue())
+                self.assertIn('invalid remote response or release data', output.getvalue())
+
+    def test_notes_and_compressed_archives_cannot_disclose_source_host(self):
+        def archive(content):
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, 'w', zipfile.ZIP_DEFLATED) as output:
+                output.writestr('README.md', content)
+            return data.getvalue()
+
+        for location in ['body', 'source', 'apk', 'utf16', 'utf16be']:
+            release, files = fixture()
+            apk, source, _, _ = syncer.names_for(TAG)
+            files[apk] = archive(b'public binary content')
+            files[source] = archive(b'public source content')
+            host = b'private-origin.example.org'
+            if location == 'body':
+                release['body'] = 'https://' + host.decode()
+            else:
+                content = host.decode().encode('utf-16le') if location == 'utf16' else \
+                    host.decode().encode('utf-16be') if location == 'utf16be' else host
+                files[apk if location == 'apk' else source] = archive(
+                    content)
+            prepared = syncer.Prepared(release, files, COMMIT)
+            with self.subTest(location=location), self.assertRaisesRegex(syncer.SyncError, 'source host'):
+                syncer.check_public_content(prepared, 'https://' + host.decode())
+        release, files = fixture()
+        apk, source, _, _ = syncer.names_for(TAG)
+        files[apk] = archive(b'public binary content')
+        files[source] = archive(b'public source content')
+        syncer.check_public_content(syncer.Prepared(release, files, COMMIT),
+                                   'https://private-origin.example.org')
+
+    def test_nested_zip_jar_apk_and_disguised_archives_are_inspected(self):
+        host = 'private-origin.example.org'
+        for name in ['nested.zip', 'nested.jar', 'nested.apk', 'payload.bin']:
+            release, files = fixture()
+            apk, source, _, _ = syncer.names_for(TAG)
+            files[apk] = archive_bytes({'classes.dex': b'public binary content'})
+            files[source] = archive_bytes({name: archive_bytes({'README.md': host.encode()})})
+            with self.subTest(name=name), self.assertRaisesRegex(syncer.SyncError, 'source host'):
+                syncer.check_public_content(syncer.Prepared(release, files, COMMIT), 'https://' + host)
+
+    def test_nested_archive_depth_is_limited(self):
+        for depth in [4, 5]:
+            release, files = fixture()
+            apk, source, _, _ = syncer.names_for(TAG)
+            files[apk] = archive_bytes({'classes.dex': b'public binary content'})
+            content, name = b'public source content', 'README.md'
+            for _ in range(depth):
+                content = archive_bytes({name: content})
+                name = 'nested.jar'
+            files[source] = content
+            prepared = syncer.Prepared(release, files, COMMIT)
+            with self.subTest(depth=depth):
+                if depth == 4:
+                    syncer.check_public_content(prepared, 'https://private-origin.example.org')
+                else:
+                    with self.assertRaisesRegex(syncer.SyncError, 'inspection depth'):
+                        syncer.check_public_content(prepared, 'https://private-origin.example.org')
+
+    def test_nested_archives_share_one_uncompressed_byte_budget(self):
+        release, files = fixture()
+        apk, source, _, _ = syncer.names_for(TAG)
+        files[apk] = archive_bytes({'classes.dex': b'public'})
+        files[source] = archive_bytes({'nested.jar': archive_bytes({'README.md': b'x' * 800}),
+                                       'public.txt': b'y' * 200})
+        with patch.object(syncer, 'MAX_ASSET', 1024), \
+                self.assertRaisesRegex(syncer.SyncError, 'inspection limits'):
+            syncer.check_public_content(syncer.Prepared(release, files, COMMIT),
+                                       'https://private-origin.example.org')
 
 
 if __name__ == '__main__':

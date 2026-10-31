@@ -6,6 +6,7 @@ Gitea is read anonymously. Only --publish permits GitHub mutations.
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import PurePosixPath
@@ -14,17 +15,19 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 
 REPOSITORY = 'XXhaos/OriginOS-FCM-Fix'
-SOURCE = 'https://source.example.invalid'
-SOURCE_API = f'{SOURCE}/api/v1/repos/{REPOSITORY}'
+SOURCE = 'https://source.example.invalid'  # Synthetic origin for offline tests only.
 TARGET_API = f'https://api.github.com/repos/{REPOSITORY}'
 UPLOAD_API = f'https://uploads.github.com/repos/{REPOSITORY}'
 CERTIFICATE = 'd662d39e97573ed1759994033584109eb26d06b57c7cae81a7cf3d4d840dfa9d'
 VERSION = re.compile(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?\Z')
 SHA = re.compile(r'[a-f0-9]{40}\Z')
 MAX_ASSET = 100 * 1024 * 1024
+MAX_ARCHIVE_DEPTH = 4
+MAX_ARCHIVE_ENTRIES = 20000
 
 
 class SyncError(Exception):
@@ -52,6 +55,68 @@ def safe_https(url, hosts):
             and not parts.username and not parts.password, 'Unexpected download destination')
 
 
+def source_origin(value):
+    require(isinstance(value, str) and bool(value.strip()), 'GITEA_SOURCE_URL is required')
+    try:
+        parts = urllib.parse.urlsplit(value.strip())
+        valid = (parts.scheme == 'https' and parts.hostname
+                 and re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', parts.hostname)
+                 and parts.port in (None, 443)
+                 and not parts.username and not parts.password
+                 and parts.path in ('', '/') and not parts.query and not parts.fragment)
+    except ValueError:
+        valid = False
+    require(valid, 'GITEA_SOURCE_URL must be an HTTPS origin without credentials or a path')
+    return 'https://' + parts.hostname
+
+
+def check_public_content(prepared, origin):
+    """Reject source-host disclosures before copying notes or attachments to GitHub."""
+    host = urllib.parse.urlsplit(origin).hostname
+    needles = (host.encode(), host.encode('utf-16le'), host.encode('utf-16be'))
+    remaining_bytes = MAX_ASSET
+    remaining_entries = MAX_ARCHIVE_ENTRIES
+
+    def check(data):
+        lowered = data.lower()
+        require(not any(needle in lowered for needle in needles),
+                'Configured source host found in public release content')
+
+    def inspect(name, data, depth):
+        nonlocal remaining_bytes, remaining_entries
+        check(name.encode())
+        check(data)
+        # Inspect ZIP-compatible payloads even if their filename hides the archive type.
+        if not (name.lower().endswith(('.zip', '.jar', '.apk'))
+                or zipfile.is_zipfile(io.BytesIO(data))):
+            return
+        require(depth <= MAX_ARCHIVE_DEPTH, 'Public archive exceeds inspection depth')
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                entries = archive.infolist()
+                require(len(entries) <= remaining_entries
+                        and sum(item.file_size for item in entries) <= remaining_bytes,
+                        'Public archive exceeds inspection limits')
+                remaining_entries -= len(entries)
+                for item in entries:
+                    check(item.filename.encode())
+                    if not item.is_dir():
+                        require(item.file_size <= remaining_bytes,
+                                'Public archive exceeds inspection limits')
+                        content = archive.read(item)
+                        require(len(content) <= remaining_bytes,
+                                'Public archive exceeds inspection limits')
+                        remaining_bytes -= len(content)
+                        inspect(item.filename, content, depth + 1)
+        except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError, EOFError, ValueError):
+            raise SyncError('Public archive cannot be inspected') from None
+
+    check(json.dumps({key: prepared.release.get(key) for key in ('name', 'body', 'tag_name')},
+                     ensure_ascii=False).encode())
+    for name, data in prepared.files.items():
+        inspect(name, data, 1)
+
+
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     def __init__(self, hosts):
         self.hosts = hosts
@@ -66,8 +131,10 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, token=None):
+    def __init__(self, token=None, source_url=SOURCE):
         self.token = token
+        self.source_url = source_origin(source_url)
+        self.source_api = f'{self.source_url}/api/v1/repos/{REPOSITORY}'
 
     def request(self, url, *, method='GET', body=None, authenticated=False,
                 binary=False, limit=4 * 1024 * 1024):
@@ -99,19 +166,21 @@ class Client:
                 return data if binary else json.loads(data)
         except urllib.error.HTTPError as error:
             # Do not print request headers, token, signed redirect URLs or response bodies.
-            raise SyncError(f'{method} {initial_host}: HTTP {error.code}') from None
+            raise SyncError(f'{method} remote service: HTTP {error.code}') from None
         except (urllib.error.URLError, TimeoutError) as error:
-            raise SyncError(f'{method} {initial_host}: network request failed ({type(error).__name__})') from None
+            raise SyncError(f'{method} remote service: network request failed ({type(error).__name__})') from None
+        except (ValueError, TypeError):
+            raise SyncError(f'{method} remote service: invalid response') from None
 
     def source(self, path):
-        return self.request(SOURCE_API + path)
+        return self.request(self.source_api + path)
 
     def target(self, path, method='GET', body=None):
         return self.request(TARGET_API + path, method=method, body=body, authenticated=True)
 
     def source_asset(self, release, asset):
         tag, name = release['tag_name'], asset['name']
-        expected = f'{SOURCE}/{REPOSITORY}/releases/download/{tag}/{name}'
+        expected = f'{self.source_url}/{REPOSITORY}/releases/download/{tag}/{name}'
         require(asset.get('browser_download_url') == expected, 'Unexpected Gitea attachment URL')
         limit = 256 * 1024 if name == 'artifact-manifest.json' else 32 * 1024 if name == 'SHA256SUMS.txt' else MAX_ASSET
         require(type(asset.get('size')) is int and 0 < asset['size'] <= limit, 'Invalid Gitea attachment size')
@@ -268,21 +337,29 @@ def main(argv=None):
         names_for(args.tag)
     token = os.environ.get('GITHUB_TOKEN')
     require(not args.publish or token, '--publish requires GITHUB_TOKEN')
-    client = Client(token)
+    client = Client(token, source_url=source_origin(os.environ.get('GITEA_SOURCE_URL')))
     releases = [r for r in list_pages(client, True) if not r.get('draft') and (not args.tag or r.get('tag_name') == args.tag)]
     require(releases or not args.tag, 'Requested published Gitea release not found')
     targets = [] if args.source_only else list(list_pages(client, False))
     for release in reversed(releases):
         prepared = prepare(client, release)
+        check_public_content(prepared, client.source_url)
         print(f"{release['tag_name']}: source validated; {len(prepared.files)} attachments; {prepared.commit}")
         if not args.source_only:
             sync(client, prepared, targets, args.publish)
     return 0
 
 
-if __name__ == '__main__':
+def cli(argv=None):
     try:
-        sys.exit(main())
-    except (SyncError, ValueError, KeyError, TypeError) as error:
+        return main(argv)
+    except SyncError as error:
         print(f'Release sync stopped: {error}', file=sys.stderr)
-        sys.exit(1)
+    except Exception:
+        # Remote response values and library exceptions may contain the private source host.
+        print('Release sync stopped: invalid remote response or release data', file=sys.stderr)
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(cli())
