@@ -8,36 +8,189 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Optional Gitea release tag; leave empty to sync all published versions'
+        description: 'Optional published source tag; leave empty to check all releases'
         required: false
         type: string
+      validate_only:
+        description: 'Build and verify the selected tag without changing any Release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: mirror-gitea-releases
   cancel-in-progress: false
 
 jobs:
-  mirror:
-    # Forks and manually selected development branches must not publish.
+  plan:
+    # Only trusted main may select source releases or publish existing assets.
     if: github.repository == 'XXhaos/OriginOS-FCM-Fix' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      has_pending: ${{ steps.plan.outputs.has_pending }}
+      tag: ${{ steps.plan.outputs.tag }}
+      commit: ${{ steps.plan.outputs.commit }}
+      minimum_version_code: ${{ steps.plan.outputs.minimum_version_code }}
+      plan_artifact: ${{ steps.upload.outputs.artifact-id }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Check out trusted source
-        uses: actions/checkout@v4
+      - name: Check out trusted release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Test release synchronization
-        run: python3 -m unittest discover -s tools/tests -p 'test_sync_gitea_releases.py'
-      - name: Mirror verified release notes and assets
+      - name: Test release tools
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
+      - name: Mirror existing assets and select one pending release
+        id: plan
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITEA_SOURCE_URL: ${{ secrets.GITEA_SOURCE_URL }}
           SYNC_TAG: ${{ inputs.tag }}
+          VALIDATE_ONLY: ${{ inputs.validate_only }}
         run: |
           args=()
           if [ -n "$SYNC_TAG" ]; then args+=(--tag "$SYNC_TAG"); fi
-          python3 tools/sync_gitea_releases.py --publish "${args[@]}"
+          if [ "$VALIDATE_ONLY" = true ]; then args+=(--validate-only); fi
+          python3 tools/release_automation.py plan --repository . \
+            --output release-plan.json --github-output "$GITHUB_OUTPUT" "${args[@]}"
+      - name: Preserve the exact release plan
+        id: upload
+        if: steps.plan.outputs.has_pending == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-plan.json
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.has_pending == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      candidate_artifact: ${{ steps.upload.outputs.artifact-id }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out trusted verification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          persist-credentials: false
+      - name: Check out the exact mirrored release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+      - name: Set up JDK 17 and Gradle cache
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: source/**/*.gradle.kts
+      - name: Install Android SDK packages
+        run: |
+          test "$(uname -m)" = x86_64
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platform-tools' 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Run tests, lint and unsigned builds without signing credentials
+        working-directory: source
+        run: |
+          bash ./gradlew --no-daemon --console=plain --max-workers=2 \
+            :core:test :app:testDebugUnitTest :app:lintDebug \
+            :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest \
+            :app:exportReleaseDependencies
+          python3 tools/generate_dependency_notices.py --check
+      - name: Verify packaged privilege boundaries
+        shell: pwsh
+        run: ./automation/tools/verify_privilege_artifacts.ps1 -Repository ./source
+      - name: Prepare unsigned candidate and exact source archive
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
+        run: |
+          python3 automation/tools/release_bundle.py stage --repository source \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --output candidate
+      - name: Upload this run's unsigned candidate
+        id: upload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  sign-and-publish:
+    needs: [plan, build]
+    # A new runner never executes tagged Gradle/source code or restores build caches.
+    if: github.repository == 'XXhaos/OriginOS-FCM-Fix' && github.ref == 'refs/heads/main'
+    environment: guardian-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out trusted signing and publishing tools only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up JDK 17 without a build cache
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install signing and inspection SDK tools
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Download only this run's selected candidate
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.build.outputs.candidate_artifact }}
+          path: candidate
+      - name: Download only this run's release plan
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.plan.outputs.plan_artifact }}
+          path: plan
+      - name: Sign with the original certificate and verify the result
+        env:
+          GUARDIAN_RELEASE_KEYSTORE_BASE64: ${{ secrets.GUARDIAN_RELEASE_KEYSTORE_BASE64 }}
+          GUARDIAN_RELEASE_KEY_ALIAS: ${{ secrets.GUARDIAN_RELEASE_KEY_ALIAS }}
+          GUARDIAN_RELEASE_STORE_PASSWORD: ${{ secrets.GUARDIAN_RELEASE_STORE_PASSWORD }}
+          GUARDIAN_RELEASE_KEY_PASSWORD: ${{ secrets.GUARDIAN_RELEASE_KEY_PASSWORD }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
+          MINIMUM_VERSION_CODE: ${{ needs.plan.outputs.minimum_version_code }}
+        run: |
+          python3 tools/release_bundle.py sign --candidate candidate \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --output release \
+            --minimum-version-code "$MINIMUM_VERSION_CODE"
+      - name: Recheck source identity, privacy and assets before publishing
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_SOURCE_URL: ${{ secrets.GITEA_SOURCE_URL }}
+        run: |
+          python3 tools/release_automation.py publish --plan plan/release-plan.json \
+            --directory release --repository .

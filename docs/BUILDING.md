@@ -54,7 +54,7 @@ Linux/macOS 对应使用 `bash ./gradlew :app:exportReleaseDependencies` 和 `py
 
 使用 GitHub 托管的 Ubuntu 24.04 x86-64、JDK 17、API 37 和 Build Tools 36.0.0，执行核心及 Android 主机单元测试、lint、Debug/未签名 Release/AndroidTest APK 构建、依赖声明检查、打包权限边界和发行同步脚本测试。SDK 使用托管镜像预装的命令行工具与许可配置；不运行设备或模拟器测试。
 
-运行页的 Artifacts 提供 `android-ci-apks-<提交>` 和 `android-ci-reports-<提交>`，保留 14 天。APK 附带源码提交标识与 SHA-256；Debug 使用该次临时运行环境的调试签名，Release 无正式签名，不能作为官方覆盖升级包。正式下载和签名仍遵循[发布说明](RELEASING.md)，CI 不发布 Release。
+运行页的 Artifacts 提供 `android-ci-apks-<提交>` 和 `android-ci-reports-<提交>`，保留 14 天。APK 附带源码提交标识与 SHA-256；Debug 使用该次临时运行环境的调试签名，Release 无正式签名，不能作为官方覆盖升级包。此工作流只做源码检查；Gitea 发布版本后的正式构建、签名与发布由[独立发行工作流](RELEASING.md#github-发行同步)完成。
 
 构建仅在维护者仓库的 `main` 上运行，只有 `contents: read` 权限，checkout 不保留凭据，不读取源站或签名 Secrets；公开 fork/PR 不自动执行。下载附件只包含明确列出的 APK 和测试/lint 报告，不包含 keystore、R8 映射或含本机路径的依赖导出输入。并发提交会取消旧的构建任务，不影响独立的 Release 同步。
 

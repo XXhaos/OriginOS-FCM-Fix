@@ -28,4 +28,4 @@ Guardian 会检查可用的系统接口与权限，并根据当前条件执行�
 
 本项目采用 [Apache License 2.0](LICENSE)；第三方组件信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。版本变化见[更新记录](CHANGELOG.md)。
 
-Gitea 作为正式发行来源；GitHub 镜像中的标签与 Release 分别同步，说明和附件由独立工作流复制，详见[发行同步说明](docs/RELEASING.md#github-发行同步)。
+Gitea 作为正式发行来源；发布新版本的标签和说明后，GitHub 自动测试、构建、使用原证书签名并上传对应 Release。已有四份附件的旧发行保持原文件同步，详见[发行说明](docs/RELEASING.md#github-发行同步)。

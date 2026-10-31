@@ -55,8 +55,8 @@ jobs:
         shell: pwsh
         run: ./tools/verify_privilege_artifacts.ps1
 
-      - name: Test release synchronization
-        run: python3 -m unittest discover -s tools/tests -p 'test_sync_gitea_releases.py'
+      - name: Test release tools
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
 
       - name: Prepare CI APK downloads
         env:

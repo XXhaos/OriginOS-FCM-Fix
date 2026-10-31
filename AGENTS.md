@@ -32,6 +32,8 @@ README.md, CONTRIBUTING.md and docs/BUILDING.md before changing behavior.
   device authorization records, private diagnostics or generated APKs.
 - Do not commit, push, tag or publish unless requested for the active task.
 - Public release artifacts must pass manifest, original-signer, checksum and
-  attribution checks. Follow docs/RELEASING.md; signing stays outside public CI.
+  attribution checks. Follow docs/RELEASING.md. Official automated signing is
+  authorized only in the isolated `guardian-release` GitHub environment job;
+  never expose signing secrets to source builds, PRs, caches or artifacts.
 - Keep user documentation concise and record public changes in CHANGELOG.md.
   Keep private development evidence outside the tracked source tree.
