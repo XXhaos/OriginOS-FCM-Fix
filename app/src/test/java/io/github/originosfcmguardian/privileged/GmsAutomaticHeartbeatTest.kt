@@ -189,7 +189,11 @@ class GmsAutomaticHeartbeatTest {
         var launches = 0
         val originalLifetime = Lifetime()
         val nextLifetime = Lifetime()
-        val runner = GmsHeartbeatRunner({ Port() }, { launches++; Child(accepted) }, clock = { time })
+        val workerThread = AtomicReference<Thread>()
+        val runner = GmsHeartbeatRunner({ workerThread.set(Thread.currentThread()); Port() },
+            { launches++; Child(accepted) }, clock = { time })
+        val workerField = GmsHeartbeatRunner::class.java.getDeclaredField("worker").apply { isAccessible = true }
+        (workerField.get(runner) as ThreadPoolExecutor).setKeepAliveTime(1, TimeUnit.MILLISECONDS)
         try {
             val original = runner.armAutomatic(1, caller, 1, gmsHeartbeatBindingDigest(sample), originalLifetime) { false }.session!!
             assertNotNull(originalLifetime.callback)
@@ -213,6 +217,11 @@ class GmsAutomaticHeartbeatTest {
             } while (nextArm.reason == GmsAutoArmReason.BUSY)
             assertEquals(GmsAutoArmReason.ARMED, nextArm.reason)
             val next = checkNotNull(nextArm.session)
+            // Future completion does not prove this no-queue worker can accept another task.
+            // Drain only the fixture's arm worker; the heartbeat below remains one attempt.
+            val thread = checkNotNull(workerThread.get())
+            thread.join(5_000)
+            assertFalse("Arm fixture worker must exit before the heartbeat submission", thread.isAlive)
             assertEquals(2L, next.generation)
             assertNotEquals(original.id, next.id)
             assertNotSame(originalLifetime, nextLifetime)
