@@ -137,4 +137,64 @@ class DaemonAdoptionRetryTest {
         gate.finish(ticket)
         assertFalse(gate.current(ticket))
     }
+
+    @Test fun foregroundActionReopensAnExhaustedSameServerBatchWithoutMakingPollingUnbounded() {
+        val gate = DaemonAdoptionRetry()
+        val server = Any()
+        repeat(3) {
+            if (it != 0) gate.rearm(server) // A real foreground/permission action, not a state update.
+            repeat(2) {
+                val ticket = requireNotNull(gate.offer(server, true, true))
+                assertTrue(gate.start(ticket)); gate.finish(ticket)
+            }
+            repeat(100) { assertNull(gate.offer(server, true, true)) }
+        }
+    }
+
+    @Test fun rearmDoesNotOverlapOrInvalidateAnAlreadyStartedPreflight() {
+        val gate = DaemonAdoptionRetry()
+        val server = Any()
+        val running = requireNotNull(gate.offer(server, true, true))
+        assertTrue(gate.start(running))
+        gate.rearm(server)
+        assertTrue(gate.current(running))
+        assertNull(gate.offer(server, true, true))
+        assertTrue(gate.finish(running))
+        val next = requireNotNull(gate.offer(server, true, true))
+        assertTrue(gate.start(next)); gate.finish(next)
+        assertNull(gate.offer(server, true, true))
+    }
+
+    @Test fun aTransientColdBindFailureUsesAtMostOneImmediateReadOnlyRetry() {
+        val gate = DaemonAdoptionRetry()
+        val server = Any()
+        val first = requireNotNull(gate.offer(server, true, true))
+        assertTrue(gate.start(first))
+        gate.retryReadOnlyFailure(first, DaemonAdoptionReason.BIND_TIMEOUT)
+        assertTrue(gate.finish(first))
+        val second = requireNotNull(gate.offer(server, true, true))
+        assertTrue(gate.start(second))
+        gate.retryReadOnlyFailure(second, DaemonAdoptionReason.BIND_TIMEOUT)
+        assertFalse(gate.finish(second))
+        assertNull(gate.offer(server, true, true))
+    }
+
+    @Test fun denialMalformedResponseOrOldEpochCannotScheduleAnAutomaticRetry() {
+        for (reason in listOf(DaemonAdoptionReason.PERMISSION_DENIED, DaemonAdoptionReason.WRONG_SERVICE_UID,
+            DaemonAdoptionReason.INVALID_RESPONSE, DaemonAdoptionReason.PRINCIPAL_CHANGED)) {
+            val gate = DaemonAdoptionRetry()
+            val first = requireNotNull(gate.offer(Any(), true, true))
+            assertTrue(gate.start(first))
+            gate.retryReadOnlyFailure(first, reason)
+            assertFalse(gate.finish(first))
+        }
+        val gate = DaemonAdoptionRetry()
+        val first = requireNotNull(gate.offer(Any(), true, true))
+        assertTrue(gate.start(first))
+        gate.readiness(null)
+        gate.retryReadOnlyFailure(first, DaemonAdoptionReason.BIND_DISCONNECTED)
+        assertFalse(gate.finish(first))
+        gate.rearm(null)
+        assertNull(gate.offer(null, true, true))
+    }
 }

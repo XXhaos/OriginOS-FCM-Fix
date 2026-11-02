@@ -22,12 +22,21 @@ object FcmRecoveryPolicy {
     }
     fun absent(sample: GmsConnectionObservation.Sample, now: Long) = qualified(sample, now) &&
         sample.gcmService.state == GcmConnectionState.SERVICE_ABSENT
-    fun disconnected(sample: GmsConnectionObservation.Sample, now: Long) = qualified(sample, now) &&
-        sample.gcmService.state == GcmConnectionState.REPORTED_DISCONNECTED &&
+    fun reportedDisconnected(sample: GmsConnectionObservation.Sample, now: Long) = qualified(sample, now) &&
+        sample.gcmService.state == GcmConnectionState.REPORTED_DISCONNECTED
+    /** A bounded native heartbeat follows the direct service report, never an inferred socket absence.
+     * Any attributed positive socket evidence still vetoes this disconnected-only operation. */
+    fun mcsRequestEligible(sample: GmsConnectionObservation.Sample, now: Long) = reportedDisconnected(sample, now) &&
+        sample.observation != SocketObservation.OBSERVED
+    /** Strong joint evidence remains separate from admission to one bounded MCS request. */
+    fun disconnected(sample: GmsConnectionObservation.Sample, now: Long) = reportedDisconnected(sample, now) &&
         sample.observation == SocketObservation.NO_MATCH &&
         sample.tcp.completeness == SourceCompleteness.COMPLETE && sample.tcp6.completeness == SourceCompleteness.COMPLETE
-    fun connected(sample: GmsConnectionObservation.Sample, now: Long) = qualified(sample, now) &&
-        sample.gcmService.state == GcmConnectionState.REPORTED_CONNECTED &&
+    /** Exact current GMS service authority; an unavailable UID socket table cannot erase its report. */
+    fun reportedConnected(sample: GmsConnectionObservation.Sample, now: Long) = qualified(sample, now) &&
+        sample.gcmService.state == GcmConnectionState.REPORTED_CONNECTED
+    /** Joint evidence retained for diagnostics; never invent a socket match from a service report. */
+    fun connected(sample: GmsConnectionObservation.Sample, now: Long) = reportedConnected(sample, now) &&
         sample.observation == SocketObservation.OBSERVED &&
         sample.tcp.completeness == SourceCompleteness.COMPLETE && sample.tcp6.completeness == SourceCompleteness.COMPLETE
     /** Includes boot: a changed boot conservatively requires a fresh explicit trial confirmation. */

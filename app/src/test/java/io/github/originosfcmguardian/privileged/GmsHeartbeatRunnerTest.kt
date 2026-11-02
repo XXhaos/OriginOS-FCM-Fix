@@ -14,14 +14,21 @@ class GmsHeartbeatRunnerTest {
     private val accepted = "Broadcasting: Intent { act=com.google.android.intent.action.MCS_HEARTBEAT flg=0x400000 pkg=com.google.android.gms }\nBroadcast completed: result=0\n"
     private class Port : GmsConnectionReadPort {
         var environment = GmsProbeEnvironment(0, 2000, "11111111-2222-3333-4444-555555555555")
-        var identity = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE, 10208, 99, 100, 200, "a".repeat(64))
+        var identity = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE, 10208, 99, 100, 200, FcmRecoveryPolicy.SIGNER)
         var owners = listOf(GMS_OBSERVATION_PACKAGE)
+        var members = emptyMap<String, GmsPackageIdentity>()
+        var memberRead: () -> Unit = {}
         var report = GcmServiceSource(GcmConnectionState.REPORTED_CONNECTED, SourceCompleteness.COMPLETE)
         var reads = 0
         var identityRead: () -> Unit = {}
+        var ownerRead: () -> Unit = {}
         override fun environment() = environment
         override fun gmsPackage(): GmsPackageIdentity { reads++; identityRead(); return identity }
-        override fun packagesForUid(uid: Int) = if (uid == 10238) listOf("io.github.originosfcmguardian") else owners
+        override fun packageIdentity(packageName: String): GmsPackageIdentity? { memberRead(); return members[packageName] }
+        override fun packagesForUid(uid: Int): List<String> {
+            if (uid == 10238) return listOf("io.github.originosfcmguardian")
+            ownerRead(); return owners
+        }
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(SourceCompleteness.UNAVAILABLE, false)
         override fun gcmService(interrupted: () -> Boolean) = report
         override fun reconnectReceivers() = GmsReceiverInspection(false, emptyList())
@@ -56,12 +63,12 @@ class GmsHeartbeatRunnerTest {
             assertEquals(1, calls); assertTrue(child.destroyed && child.closed)
         } finally { runner.close() }
     }
-    @Test fun disconnectedUnknownWrongUserRootSharedOwnerAndFinalIdentityDriftNeverLaunch() {
+    @Test fun disconnectedUnknownWrongUserRootUntrustedGmsAndFinalIdentityDriftNeverLaunch() {
         val ports = listOf(Port().apply { report = GcmServiceSource(GcmConnectionState.REPORTED_DISCONNECTED, SourceCompleteness.COMPLETE) },
             Port().apply { report = GcmServiceSource.unavailable() },
             Port().apply { environment = environment.copy(currentUser = 10) },
             Port().apply { environment = environment.copy(serviceUid = 0) },
-            Port().apply { owners = listOf(GMS_OBSERVATION_PACKAGE, "other.pkg") },
+            Port().apply { identity = identity.copy(signerSha256 = "a".repeat(64)) },
             Port().apply { identityRead = { if (reads == 3) identity = identity.copy(signerSha256 = "b".repeat(64)) } })
         ports.forEach { port ->
             var launched = false
@@ -80,7 +87,38 @@ class GmsHeartbeatRunnerTest {
         try {
             assertEquals(GmsHeartbeatStatus.REQUESTED, runner.request(1) { false }.status)
             assertEquals(1, launches)
-            assertEquals(3, port.reads)
+            assertTrue(port.reads >= 3)
+        } finally { runner.close() }
+    }
+
+    @Test fun fixedOfficialGmsHeartbeatDoesNotRequirePeerSigningButFinalMembershipDriftNeverLaunches() {
+        val peerName = "org.example.googlemember"
+        fun port() = Port().apply {
+            identity = identity.copy(signerSha256 = FcmRecoveryPolicy.SIGNER)
+            owners = listOf(GMS_OBSERVATION_PACKAGE, peerName)
+            members = mapOf(peerName to identity.copy(packageName = peerName, applicationPackageName = peerName,
+                signerSha256 = "b".repeat(64), signingCertificateHistorySha256 = listOf(FcmRecoveryPolicy.SIGNER, "b".repeat(64))))
+        }
+        val acceptedPort = port(); var launches = 0
+        val acceptedRunner = GmsHeartbeatRunner({ acceptedPort }, { launches++; Child(accepted) })
+        try {
+            assertEquals(GmsHeartbeatStatus.REQUESTED, acceptedRunner.request(1) { false }.status)
+            assertEquals(1, launches)
+        } finally { acceptedRunner.close() }
+        val unavailablePeer = port().apply { members = emptyMap() }
+        val peerIndependent = GmsHeartbeatRunner({ unavailablePeer }, { launches++; Child(accepted) })
+        try { assertEquals(GmsHeartbeatStatus.REQUESTED, peerIndependent.request(2) { false }.status) }
+        finally { peerIndependent.close() }
+        val rejected = port()
+        observeGmsConnection(1, rejected)
+        val observationReads = rejected.reads
+        rejected.reads = 0
+        rejected.identityRead = { if (rejected.reads == observationReads + 1) rejected.owners = listOf(GMS_OBSERVATION_PACKAGE) }
+        var rejectedLaunches = 0
+        val runner = GmsHeartbeatRunner({ rejected }, { rejectedLaunches++; Child(accepted) })
+        try {
+            assertEquals(GmsHeartbeatReason.IDENTITY_CHANGED, runner.request(3) { false }.reason)
+            assertEquals(0, rejectedLaunches)
         } finally { runner.close() }
     }
 
@@ -96,7 +134,10 @@ class GmsHeartbeatRunnerTest {
             val port = Port().apply {
                 identity = identity.copy(signerSha256 = "b".repeat(64),
                     signingCertificateHistorySha256 = listOf(FcmRecoveryPolicy.SIGNER, "b".repeat(64)))
-                identityRead = { if (reads == 3) identity = mutation(identity) }
+                observeGmsConnection(1, this)
+                val observationReads = reads
+                reads = 0
+                identityRead = { if (reads == observationReads + 1) identity = mutation(identity) }
             }
             var launches = 0
             val runner = GmsHeartbeatRunner({ port }, { launches++; Child(accepted) })

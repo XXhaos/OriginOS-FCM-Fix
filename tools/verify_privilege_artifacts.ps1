@@ -1,4 +1,7 @@
-param([string]$Repository = (Split-Path -Parent $PSScriptRoot))
+param(
+    [string]$Repository = (Split-Path -Parent $PSScriptRoot),
+    [string]$ReleaseApkPath
+)
 
 # v18 external-only host artifact gate. Does not touch the device or private data.
 $ErrorActionPreference = 'Stop'
@@ -24,6 +27,18 @@ foreach ($variant in @('debug', 'release')) {
         $provider.GetAttribute('exported', $androidNamespace) -ne 'true' -or
         $provider.GetAttribute('authorities', $androidNamespace) -ne 'io.github.originosfcmguardian.shizuku') {
         throw "$variant external Shizuku provider boundary is missing or changed."
+    }
+    $updateProvider = $manifest.SelectSingleNode('/manifest/application/provider[@android:name="io.github.originosfcmguardian.update.UpdateFileProvider"]', $namespaces)
+    if ($null -eq $updateProvider -or $updateProvider.GetAttribute('exported', $androidNamespace) -ne 'false' -or
+        $updateProvider.GetAttribute('grantUriPermissions', $androidNamespace) -ne 'true' -or
+        $updateProvider.GetAttribute('authorities', $androidNamespace) -ne 'io.github.originosfcmguardian.updates' -or
+        $updateProvider.SelectNodes('meta-data[@android:name="android.support.FILE_PROVIDER_PATHS"]', $namespaces).Count -ne 1) {
+        throw "$variant must keep a private, URI-grant-only update provider."
+    }
+    [xml]$updatePaths = Get-Content -LiteralPath (Join-Path $Repository 'app/src/main/res/xml/update_file_paths.xml')
+    if ($updatePaths.paths.ChildNodes.Count -ne 1 -or $updatePaths.paths.ChildNodes[0].LocalName -ne 'cache-path' -or
+        $updatePaths.paths.ChildNodes[0].GetAttribute('path') -ne 'updates/') {
+        throw 'Update provider may expose only its update cache directory.'
     }
     foreach ($node in $manifest.SelectNodes('/manifest/application/*')) {
         $component = $node.GetAttribute('name', $androidNamespace)
@@ -87,6 +102,9 @@ foreach ($variant in @('debug', 'release')) {
     } elseif ($null -ne $lifecycleDriver) { throw 'Release must not contain the lifecycle acceptance driver.' }
     $apkName = if ($variant -eq 'debug') { 'app-debug.apk' } else { 'app-release-unsigned.apk' }
     $apkPath = Join-Path $Repository "app/build/outputs/apk/$variant/$apkName"
+    if ($variant -eq 'release' -and $ReleaseApkPath) {
+        $apkPath = (Resolve-Path -LiteralPath $ReleaseApkPath -ErrorAction Stop).Path
+    }
     $archive = [System.IO.Compression.ZipFile]::OpenRead($apkPath)
     try {
         if (@($archive.Entries | Where-Object { $_.FullName -match 'libprivkitstarter|priv-kit-attribution' }).Count -ne 0) {
@@ -114,6 +132,7 @@ foreach ($variant in @('debug', 'release')) {
     $results += [pscustomobject]@{
         variant = $variant
         externalProvider = 'PASS'
+        privateUpdateCacheProvider = 'PASS'
         noInternalComponentsWssNativeDex = 'PASS'
         preservedPrivateProtectionAndTile = 'PASS'
         tileLongPressMainActivity = 'PASS'

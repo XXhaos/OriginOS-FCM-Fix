@@ -14,6 +14,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CombinedDiagnosticReportTest {
+    @Test fun initialConfirmationReadFailureIsExportedEvenBeforeRecoveryConsentOrEventsExist() {
+        val failure = io.github.originosfcmguardian.fcmprotection.FcmInitialReadFailure(
+            io.github.originosfcmguardian.privileged.GmsConnectionReadStage.BIND,
+            io.github.originosfcmguardian.core.gms.GmsUnknown.TIMED_OUT, 8123, 456)
+        val protection = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(
+            confirmationFailure = io.github.originosfcmguardian.fcmprotection.FcmProtectionConfirmationFailure.READ_UNAVAILABLE,
+            initialReadFailure = failure)
+        val report = buildCombinedDiagnosticReport(HomeUiState(fcmProtection = protection), environment(), 9000)
+        assertEquals(failure, report.fcmProtection.initialReadFailure)
+        assertTrue(report.fcmRecoveryTrial.events.isEmpty())
+        val json = encodeCombinedDiagnosticReport(report).toString(Charsets.UTF_8)
+        assertTrue(json.contains("\"initialReadFailure\":{\"scope\":\"APP_INITIAL_CONFIRMATION\",\"stage\":\"BIND\",\"reason\":\"TIMED_OUT\",\"atEpochMillis\":8123,\"elapsedMillis\":456}"))
+        assertFalse(json.contains("exception")); assertFalse(json.contains("signerSha256"))
+        val empty = encodeCombinedDiagnosticReport(report.copy(fcmProtection = protection.copy(initialReadFailure = null)))
+            .toString(Charsets.UTF_8)
+        assertTrue(empty.contains("\"initialReadFailure\":null"))
+    }
+
     @Test fun unifiedProtectionSnapshotsAreExportedWithoutAuthoritySecrets() {
         val protection = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(configured = true,
             maintenance = io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState.WAITING_CONNECTED,
@@ -271,6 +289,55 @@ class CombinedDiagnosticReportTest {
             CombinedDiagnosticExportResult.Missing,
             PreparedCombinedDiagnosticExport().consume(documentSelected = true),
         )
+    }
+
+    @Test
+    fun coldStartFailureIsExportedWithoutDaemonHistoryOrProtectionConsent() {
+        val report = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9_000).copy(
+            daemonAdoption = io.github.originosfcmguardian.daemon.DaemonAdoptionDiagnostics(
+                status = io.github.originosfcmguardian.daemon.DaemonAdoptionStatus.FAILED,
+                stage = io.github.originosfcmguardian.daemon.DaemonAdoptionStage.BIND,
+                reason = io.github.originosfcmguardian.daemon.DaemonAdoptionReason.BIND_TIMEOUT,
+                attemptCount = 2, lastAttemptAtEpochMillis = 8_000, lastOutcomeAtEpochMillis = 8_500))
+        val json = encodeCombinedDiagnosticReport(report).decodeToString()
+        assertTrue(json.contains("\"daemonAdoption\":{\"scope\":\"CURRENT_APP_PROCESS_FIRST_ADOPTION_ONLY\","))
+        assertTrue(json.contains("\"status\":\"FAILED\",\"stage\":\"BIND\",\"reason\":\"BIND_TIMEOUT\","))
+        assertTrue(json.contains("\"attemptCount\":2,\"lastAttemptAtEpochMillis\":8000,\"lastOutcomeAtEpochMillis\":8500"))
+        assertTrue(json.contains("\"confirmationFailure\":null"))
+        assertEquals(io.github.originosfcmguardian.daemon.DaemonDiagnosticsAvailability.NOT_COLLECTED,
+            report.daemonDiagnostics.availability)
+    }
+
+    @Test
+    fun pendingUnifiedSwitchIntentIsDiagnosticOnlyAndDoesNotInventFcmConsent() {
+        val report = buildCombinedDiagnosticReport(HomeUiState(
+            pushActivation = io.github.originosfcmguardian.pushactivation.PushActivationUiState(pending = true)), environment(), 9_000)
+        val json = encodeCombinedDiagnosticReport(report).decodeToString()
+        assertTrue(json.contains("\"scope\":\"CURRENT_APP_PROCESS_PENDING_INTENT_PROJECTION\",\"pending\":true"))
+        assertFalse(report.fcmProtection.configured)
+        assertFalse(report.automaticProtection.enabled)
+    }
+
+    @Test
+    fun activationFailureEvidenceExportsFixedCategoriesWithoutRequestOrPrincipalIds() {
+        val report = buildCombinedDiagnosticReport(HomeUiState(
+            pushActivation = io.github.originosfcmguardian.pushactivation.PushActivationUiState(
+                pending = true, origin = io.github.originosfcmguardian.pushactivation.PushActivationOrigin.RESTORED,
+                confirmedAtEpochMillis = 7_000, confirmedVersionCode = 104,
+                recordedDispatches = 2,
+                lastDispatch = io.github.originosfcmguardian.pushactivation.PushActivationDispatch.SAFE_RETRY,
+                lastAttempt = io.github.originosfcmguardian.pushactivation.PushActivationAttemptDiagnostic(
+                    "SAFE_RETRY", "PREPARATION", "READ_UNKNOWN", "BRIDGE_UNAVAILABLE"))), environment(), 9_000)
+        val json = encodeCombinedDiagnosticReport(report).decodeToString()
+        assertTrue(json.contains("\"origin\":\"RESTORED\",\"confirmedAtEpochMillis\":7000,\"confirmedVersionCode\":104"))
+        assertTrue(json.contains("\"dispatchesThisProcess\":0,\"recordedDispatchAdmissions\":2"))
+        assertTrue(json.contains("\"lastRemoteOutcome\":\"SAFE_RETRY\",\"lastRemoteReason\":\"PREPARATION\""))
+        assertTrue(json.contains("\"lastPreparationReason\":\"READ_UNKNOWN\",\"lastReadUnknown\":\"BRIDGE_UNAVAILABLE\""))
+        val markdown = encodeCombinedDiagnosticMarkdown(report).decodeToString()
+        assertTrue(markdown.contains("记录的开启派发准入次数"))
+        assertTrue(markdown.contains("旧开启记录未保存的派发次数与结果保持未知"))
+        assertFalse(json.contains("ticketId")); assertFalse(json.contains("commandId"))
+        assertFalse(report.fcmProtection.configured)
     }
 
     private fun environment() = DiagnosticEnvironment(

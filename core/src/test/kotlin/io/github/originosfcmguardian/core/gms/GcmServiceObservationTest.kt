@@ -48,13 +48,38 @@ class GcmServiceObservationTest {
             assertEquals(millis, source.connectedDurationMillis)
         }
     }
+    @Test fun `elapsed clock variants accept total minutes and zero or padded hours`() {
+        for ((text, millis) in listOf("0:01/00:00" to 1_000L, "1:02/00:00" to 62_000L,
+            "000:05/00:00" to 5_000L, "60:00/00:00" to 3_600_000L,
+            "123:45/00:00" to 7_425_000L, "0:00:01/00:00" to 1_000L,
+            "00:10:20/00:00" to 620_000L, "0001:02:03/00:00" to 3_723_000L)) {
+            val source = parse(dump("true") + "    connectTime=$text\n")
+            assertEquals(GcmConnectionState.REPORTED_CONNECTED, source.state)
+            assertEquals(SourceCompleteness.COMPLETE, source.completeness)
+            assertEquals(millis, source.connectedDurationMillis)
+            assertEquals(null, parse(dump("false") + "    connectTime=$text\n").connectedDurationMillis)
+        }
+    }
+    @Test fun `previous session numeric ranges overflow and explicit unknown markers do not hide current duration`() {
+        for (previous in listOf("0", "123", "0:01", "60:00", "99:99", "00:00:00",
+            "1:99:99", "9999999999999999:99:99", "-", "--:--", "--:--:--")) {
+            val source = parse(dump("true") + "    connectTime=54:47/$previous\n")
+            assertEquals(GcmConnectionState.REPORTED_CONNECTED, source.state)
+            assertEquals(SourceCompleteness.COMPLETE, source.completeness)
+            assertEquals(3_287_000L, source.connectedDurationMillis, "previous shape $previous")
+        }
+        assertEquals(0L, parse(dump("true") + "    connectTime=0:00/-\n").connectedDurationMillis)
+    }
     @Test fun `optional duration cannot invent a session or invalidate existing connection qualification`() {
         val duration = "    connectTime=54:47/00:00\n"
         assertEquals(null, parse(dump("false") + duration).connectedDurationMillis)
         assertEquals(null, parse(dump("true")).connectedDurationMillis)
-        for (bad in listOf("54:47/bad", "60:00/00:00", "12:60/00:00", "-1:00/00:00",
-            "0:01/00:00", "0:00:01/00:00", "1:60:00/00:00", "9999999999999999:00:00/00:00",
-            "54:47/60:00", "５４:４７/00:00", "54:47/00:00 extra")) {
+        for (bad in listOf("54:47/bad", "12:60/00:00", "-1:00/00:00", "1:60:00/00:00",
+            "9999999999999999:00:00/00:00", "9999999999999999:00/00:00", "５４:４７/00:00",
+            "54:47/00:00 extra", "54:47/00:00/private", "54:47//00:00", "54:47/", "/00:00",
+            "54:47/--", "54:47/-1", "54:47/1:2", "54:47/1:00:00:00", "54:47/--:-- extra",
+            "54:47/unknown", "54:47/00:00ms", "54:47 /00:00", "54:47/ 00:00",
+            "1:2/00:00", "1:2:03/00:00", "1:02:3/00:00", "1:02:03:04/00:00", "+1:00/00:00")) {
             val source = parse(dump("true") + "    connectTime=$bad\n")
             assertEquals(GcmConnectionState.REPORTED_CONNECTED, source.state)
             assertEquals(SourceCompleteness.COMPLETE, source.completeness)
@@ -62,6 +87,15 @@ class GcmServiceObservationTest {
         }
         assertEquals(null, parse(dump("true") + duration + duration).connectedDurationMillis)
         assertEquals(null, parse(duration + dump("true")).connectedDurationMillis)
+    }
+    @Test fun `expanded optional duration cannot bypass identity boolean errors or complete input bounds`() {
+        val duration = "    connectTime=00:10:20/--:--\n"
+        assertEquals(null, parse(dump("true") + duration + duration).connectedDurationMillis)
+        assertUnknown((dump("true") + duration).replace("user=0", "user=10"))
+        assertUnknown(dump("true") + duration + "    Is client connected: false\n")
+        assertUnknown(dump("true") + duration + "Permission Denial\n", SourceCompleteness.DENIED)
+        assertUnknown((dump("true") + duration).trimEnd(), SourceCompleteness.TRUNCATED)
+        assertUnknown(dump("true") + duration + "x".repeat(GcmServiceParser.MAX_LINE_BYTES + 1) + "\n", SourceCompleteness.TRUNCATED)
     }
     @Test fun `ambiguous duplicate conflicting malformed and absent fields fail closed`() {
         listOf(header, "", dump("true") + "    Is client connected: false\n",

@@ -29,9 +29,6 @@ class MainActivity : ComponentActivity() {
     private val combinedDiagnosticExportLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument(DiagnosticReportFormat.JSON.mimeType),
     ) { uri -> viewModel.saveCombinedDiagnosticReportExport(uri) }
-    private val markdownDiagnosticExportLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument(DiagnosticReportFormat.MARKDOWN.mimeType),
-    ) { uri -> viewModel.saveCombinedDiagnosticReportExport(uri) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,7 +53,6 @@ class MainActivity : ComponentActivity() {
                     onClearCorruptTargetSelection = viewModel::clearCorruptTargetSelection,
                     onExportCombinedDiagnosticReport = ::exportCombinedDiagnosticReport,
                     onOpenFcmDiagnostics = { io.github.originosfcmguardian.fcm.openGmsDiagnostics(this) },
-                    onReadGmsConnection = { viewModel.readGmsConnection(preserveObservation = true) },
                     onRequestFcmProtection = viewModel::requestFcmProtection,
                     onConfirmFcmProtection = viewModel::confirmPushProtection,
                     onDismissFcmProtection = viewModel::dismissFcmProtection,
@@ -110,15 +106,12 @@ class MainActivity : ComponentActivity() {
         viewModel.onAutostartSettingsLaunchResult(AutostartSettingsLauncher.open(this))
     }
 
-    private fun exportCombinedDiagnosticReport(format: DiagnosticReportFormat) {
-        viewModel.prepareCombinedDiagnosticReportExport(format) {
+    private fun exportCombinedDiagnosticReport() {
+        viewModel.prepareCombinedDiagnosticReportExport {
             if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || isFinishing || isDestroyed) {
                 false
             } else {
-                when (format) {
-                    DiagnosticReportFormat.JSON -> combinedDiagnosticExportLauncher.launch(format.fileName)
-                    DiagnosticReportFormat.MARKDOWN -> markdownDiagnosticExportLauncher.launch(format.fileName)
-                }
+                combinedDiagnosticExportLauncher.launch(DiagnosticReportFormat.JSON.fileName)
                 true
             }
         }

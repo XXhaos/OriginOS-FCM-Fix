@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.originosfcmguardian"
         minSdk = 30
         targetSdk = 37
-        versionCode = 99
-        versionName = "1.0.0"
+        versionCode = 110
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

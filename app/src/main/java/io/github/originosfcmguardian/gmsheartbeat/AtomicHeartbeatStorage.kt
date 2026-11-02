@@ -31,6 +31,11 @@ internal class AtomicHeartbeatStorage(context: Context) : HeartbeatStorage {
             }
         } catch (_: Exception) { HeartbeatResumeBlock.STORAGE_FAILURE }
     }
+    override fun cleanOffHaltForDaemonMigration(): Boolean =
+        present(haltFile) && Files.isRegularFile(haltFile.toPath(), LinkOption.NOFOLLOW_LINKS) && haltFile.length() == 1L &&
+            haltFile.inputStream().use { it.read() == 1 && it.read() == -1 } &&
+            !present(pendingFile) && !present(File(file.baseFile.path + ".new")) &&
+            !present(File(file.baseFile.path + ".bak"))
     private fun present(target: File): Boolean {
         if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) return true
         check(Files.notExists(target.toPath(), LinkOption.NOFOLLOW_LINKS))

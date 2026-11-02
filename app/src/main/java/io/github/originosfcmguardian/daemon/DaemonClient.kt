@@ -6,21 +6,24 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.DeadObjectException
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import io.github.originosfcmguardian.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -34,44 +37,62 @@ internal class DaemonClient(context: Context, private val onDisconnect: () -> Un
     private val arguments = Shizuku.UserServiceArgs(ComponentName(app.packageName, ProtectionDaemonService::class.java.name))
         .daemon(true).tag("guardian-protection-v1").processNameSuffix("guardian_protection")
         .debuggable(BuildConfig.DEBUG).version(BuildConfig.VERSION_CODE)
-    private fun lane(name: String) = ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, SynchronousQueue(),
-        { r -> Thread(r, name).apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
-    private val reads = lane("guardian-daemon-read")
-    private val controls = lane("guardian-daemon-control")
+    private val reads = DaemonReadRpc()
+    private val controls = DaemonControlRpc()
 
     private suspend fun connect(): IProtectionDaemon = binding.withLock {
         remote.get()?.takeIf { it.asBinder().isBinderAlive }?.let { return@withLock it }
-        check(Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED)
-        withTimeout(12_000) {
+        try {
+            if (!Shizuku.pingBinder()) throw DaemonAdoptionException(DaemonAdoptionStage.READINESS, DaemonAdoptionReason.NOT_READY)
+            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
+                throw DaemonAdoptionException(DaemonAdoptionStage.READINESS, DaemonAdoptionReason.PERMISSION_DENIED)
+        } catch (failure: Exception) { throw classified(DaemonAdoptionStage.READINESS, failure) }
+        withTimeoutOrNull(12_000) {
             suspendCancellableCoroutine { continuation ->
+                val completion = DaemonBindingCompletion<IProtectionDaemon> { result ->
+                    if (continuation.isActive) result.fold(continuation::resume, continuation::resumeWithException)
+                }
+                fun failed(failure: Exception) {
+                    completion.failed(classified(DaemonAdoptionStage.BIND, failure))
+                }
+                continuation.invokeOnCancellation { completion.cancel() }
                 val next = object : ServiceConnection {
                     override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                         if (connection !== this) return
                         if (service == null || !service.isBinderAlive) {
-                            if (continuation.isActive) continuation.resumeWithException(IllegalStateException("Daemon unavailable"))
+                            failed(DaemonAdoptionException(DaemonAdoptionStage.BIND, DaemonAdoptionReason.BIND_DISCONNECTED))
                             return
                         }
                         val api = IProtectionDaemon.Stub.asInterface(service)
                         try {
                             val death = IBinder.DeathRecipient {
                                 if (remote.compareAndSet(api, null)) onDisconnect()
+                                failed(DaemonAdoptionException(DaemonAdoptionStage.BIND, DaemonAdoptionReason.DEAD_BINDER))
                             }
                             service.linkToDeath(death, 0)
                             linkedDeath = service to death
                             remote.set(api)
-                            if (!service.isBinderAlive && remote.compareAndSet(api, null)) onDisconnect()
+                            if (!service.isBinderAlive) {
+                                if (remote.compareAndSet(api, null)) onDisconnect()
+                                failed(DaemonAdoptionException(DaemonAdoptionStage.BIND, DaemonAdoptionReason.DEAD_BINDER))
+                                return
+                            }
                         } catch (failure: Exception) {
                             remote.compareAndSet(api, null)
-                            if (continuation.isActive) continuation.resumeWithException(failure)
+                            failed(failure)
                             return
                         }
-                        if (continuation.isActive) continuation.resume(api)
+                        completion.connected(api)
                     }
                     private fun disconnected() {
-                        if (connection === this && remote.getAndSet(null) != null) onDisconnect()
+                        if (connection !== this) return
+                        if (remote.getAndSet(null) != null) onDisconnect()
+                        // A cold bind can fail before an endpoint was ever published.
+                        failed(DaemonAdoptionException(DaemonAdoptionStage.BIND, DaemonAdoptionReason.BIND_DISCONNECTED))
                     }
                     override fun onServiceDisconnected(name: ComponentName?) = disconnected()
                     override fun onBindingDied(name: ComponentName?) = disconnected()
+                    override fun onNullBinding(name: ComponentName?) = disconnected()
                 }
                 Handler(Looper.getMainLooper()).post {
                     if (!continuation.isActive) return@post
@@ -86,11 +107,11 @@ internal class DaemonClient(context: Context, private val onDisconnect: () -> Un
                         connection = next
                         Shizuku.bindUserService(arguments, next)
                     }
-                    catch (failure: Exception) { if (continuation.isActive) continuation.resumeWithException(failure) }
+                    catch (failure: Exception) { failed(failure) }
                 }
                 // Do not remove a daemon after a UI timeout; the next request may reconnect to it.
             }
-        }
+        } ?: throw DaemonAdoptionException(DaemonAdoptionStage.BIND, DaemonAdoptionReason.BIND_TIMEOUT)
     }
 
     suspend fun call(operation: Int, request: Bundle = Bundle()): Bundle = callOn(connect(), operation, request)
@@ -102,23 +123,74 @@ internal class DaemonClient(context: Context, private val onDisconnect: () -> Un
         read = { callOn(it, DaemonWire.READ_DIAGNOSTICS, Bundle()) })
 
     private suspend fun callOn(api: IProtectionDaemon, operation: Int, request: Bundle): Bundle {
+        val rpcStage = if (operation == DaemonWire.PREFLIGHT) DaemonAdoptionStage.PREFLIGHT else DaemonAdoptionStage.HANDOFF
         val reader = operation in setOf(DaemonWire.PREFLIGHT, DaemonWire.READ_GMS, DaemonWire.STATUS, DaemonWire.BEGIN_SNAPSHOT,
             DaemonWire.SNAPSHOT_CHUNK, DaemonWire.END_SNAPSHOT, DaemonWire.QUERY, DaemonWire.IMPORT_OFFSET,
             DaemonWire.READ_DIAGNOSTICS)
-        return withTimeout(30_000) {
-            suspendCancellableCoroutine { continuation ->
-                val future = try { (if (reader) reads else controls).submit {
-                    val result = runCatching {
-                        check(api.getServiceUid() == 2000)
-                        DaemonWire.checkReply(api.transact(operation, request))
-                    }
-                    if (continuation.isActive) result.fold(continuation::resume, continuation::resumeWithException)
-                } } catch (failure: Exception) {
-                    continuation.resumeWithException(failure); null
+        if (reader) return try {
+            reads.call { checkActive ->
+                checkActive()
+                if (api.getServiceUid() != 2000) throw DaemonAdoptionException(
+                    DaemonAdoptionStage.SERVICE_IDENTITY, DaemonAdoptionReason.WRONG_SERVICE_UID)
+                checkActive()
+                val reply = api.transact(operation, request)
+                if (!reply.getBoolean("ok")) {
+                    if (operation == DaemonWire.PREFLIGHT)
+                        daemonPreflightFailure(reply.getString("adoptionStage"), reply.getString("adoptionReason"))?.let { throw it }
+                    throw DaemonAdoptionException(rpcStage, when (reply.getString("error")) {
+                        "BUSY" -> DaemonAdoptionReason.BUSY
+                        "OWNER_CONFLICT" -> DaemonAdoptionReason.OWNER_CONFLICT
+                        "INVALID_REQUEST" -> DaemonAdoptionReason.INVALID_REQUEST
+                        "UNAVAILABLE", "NOT_READY" -> DaemonAdoptionReason.REMOTE_UNAVAILABLE
+                        else -> DaemonAdoptionReason.INVALID_RESPONSE
+                    })
                 }
-                continuation.invokeOnCancellation { future?.cancel(true) }
+                reply
             }
-        }
+        } catch (_: TimeoutException) {
+            throw DaemonAdoptionException(rpcStage, DaemonAdoptionReason.TIMED_OUT)
+        } catch (failure: Exception) { throw classified(rpcStage, failure) }
+        val actionEntered = AtomicBoolean()
+        val fcmStage = operation == DaemonWire.STAGE && request.getInt("command", -1) == DaemonWire.FCM_ON
+        return try {
+            controls.call { checkActive ->
+                actionEntered.set(true)
+                checkActive()
+                if (api.getServiceUid() != 2000) throw DaemonAdoptionException(
+                    DaemonAdoptionStage.SERVICE_IDENTITY, DaemonAdoptionReason.WRONG_SERVICE_UID)
+                checkActive() // A timed-out queued control must never dispatch later.
+                val reply = api.transact(operation, request)
+                if (!reply.getBoolean("ok")) {
+                    if (fcmStage) decodeDaemonFcmNotStaged(reply.getString("error"),
+                        reply.getString("fcmPreparationReason"), reply.getString("fcmReadUnknown"))?.let {
+                        throw DaemonFcmNotStagedException(it)
+                    }
+                    throw DaemonAdoptionException(rpcStage, when (reply.getString("error")) {
+                        "BUSY" -> DaemonAdoptionReason.BUSY
+                        "OWNER_CONFLICT" -> DaemonAdoptionReason.OWNER_CONFLICT
+                        "INVALID_REQUEST" -> DaemonAdoptionReason.INVALID_REQUEST
+                        "UNAVAILABLE", "NOT_READY" -> DaemonAdoptionReason.REMOTE_UNAVAILABLE
+                        else -> DaemonAdoptionReason.INVALID_RESPONSE
+                    })
+                }
+                reply
+            }
+        } catch (_: TimeoutException) {
+            throw DaemonAdoptionException(rpcStage, DaemonAdoptionReason.TIMED_OUT)
+        } catch (failure: RejectedExecutionException) {
+            if (fcmStage && !actionEntered.get()) throw DaemonFcmNotStagedException(
+                DaemonFcmPreparationFailure(DaemonFcmPreparationReason.CLIENT_BUSY))
+            throw classified(rpcStage, failure)
+        } catch (failure: Exception) { throw classified(rpcStage, failure) }
+    }
+
+    private fun classified(stage: DaemonAdoptionStage, failure: Throwable): Throwable = when (failure) {
+        is CancellationException, is DaemonAdoptionException, is DaemonFcmNotStagedException -> failure
+        is DeadObjectException -> DaemonAdoptionException(stage, DaemonAdoptionReason.DEAD_BINDER)
+        is SecurityException -> DaemonAdoptionException(stage, DaemonAdoptionReason.SECURITY_ERROR)
+        is RejectedExecutionException -> DaemonAdoptionException(stage, DaemonAdoptionReason.BUSY)
+        else -> DaemonAdoptionException(stage, if (stage == DaemonAdoptionStage.BIND)
+            DaemonAdoptionReason.BIND_FAILED else DaemonAdoptionReason.REMOTE_UNAVAILABLE)
     }
     suspend fun bootstrap(intent: DaemonMigrationIntent): Bundle = call(DaemonWire.BOOTSTRAP, Bundle().apply {
         putString("instance", intent.owner.installInstance); putLong("epoch", intent.owner.ownerEpoch); putString("migration", intent.migrationId)

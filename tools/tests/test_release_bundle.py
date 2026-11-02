@@ -77,6 +77,14 @@ class ReleaseBundleTests(unittest.TestCase):
         environment = patch.dict(os.environ, self.secrets)
         environment.start()
         self.addCleanup(environment.stop)
+        # Windows chmod/stat do not expose POSIX owner-only modes. Keep checking
+        # the requested creation flags/modes there, and their actual effect on POSIX.
+        chmod = patch.object(bundle.os, 'chmod', wraps=os.chmod)
+        self.key_chmod = chmod.start()
+        self.addCleanup(chmod.stop)
+        key_open = patch.object(bundle.os, 'open', wraps=os.open)
+        self.key_open = key_open.start()
+        self.addCleanup(key_open.stop)
 
     def git(self, *arguments):
         return subprocess.run(['git', '-C', str(self.repository), *arguments], check=True,
@@ -85,18 +93,22 @@ class ReleaseBundleTests(unittest.TestCase):
     def fake_tool(self, arguments, **kwargs):
         args = [str(value) for value in arguments]
         self.calls.append(args)
-        if Path(args[0]).name == 'git':
+        tool = Path(args[0]).stem.lower()
+        if tool == 'git':
             return self.real_run(arguments, **kwargs)
-        if Path(args[0]).name == 'apkanalyzer':
+        if tool == 'apkanalyzer':
             field = args[2]
             return {'application-id': b'io.github.originosfcmguardian', 'version-name': self.tag[1:].encode(),
                     'version-code': str(self.version_code).encode(), 'min-sdk': b'30',
                     'target-sdk': b'37', 'debuggable': b'false'}[field]
-        if Path(args[0]).name == 'apksigner' and args[1] == 'sign':
+        if tool == 'apksigner' and args[1] == 'sign':
             key = Path(args[args.index('--ks') + 1])
             self.key_paths.append(key)
-            self.assertEqual(stat.S_IMODE(key.parent.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
+            self.key_chmod.assert_any_call(str(key.parent), 0o700)
+            self.key_open.assert_any_call(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            if os.name != 'nt':
+                self.assertEqual(stat.S_IMODE(key.parent.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
             self.assertEqual(key.read_bytes(), b'not-a-real-keystore')
             self.assertIn('env:GUARDIAN_RELEASE_STORE_PASSWORD', args)
             self.assertIn('env:GUARDIAN_RELEASE_KEY_PASSWORD', args)
@@ -105,7 +117,7 @@ class ReleaseBundleTests(unittest.TestCase):
             self.assertEqual(args[args.index('--v4-signing-enabled') + 1], 'false')
             Path(args[args.index('--out') + 1]).write_bytes(Path(args[-1]).read_bytes() + b'fixture signature')
             return b''
-        if Path(args[0]).name == 'apksigner' and args[1] == 'verify':
+        if tool == 'apksigner' and args[1] == 'verify':
             return ('Number of signers: ' + str(len(self.certificates)) + '\n' + ''.join(
                 'Signer #' + number + ' certificate SHA-256 digest: ' + certificate + '\n'
                 for number, certificate in self.certificates)).encode()
@@ -139,7 +151,7 @@ class ReleaseBundleTests(unittest.TestCase):
         for key in self.key_paths:
             self.assertFalse(key.exists())
             self.assertFalse(key.parent.exists())
-        self.assertTrue(all(Path(call[0]).name in ('git', 'apkanalyzer', 'apksigner') for call in self.calls))
+        self.assertTrue(all(Path(call[0]).stem.lower() in ('git', 'apkanalyzer', 'apksigner') for call in self.calls))
 
     def test_stage_refuses_wrong_checkout_or_wrong_tag(self):
         with self.assertRaisesRegex(bundle.BundleError, 'Checkout or tag'):
@@ -226,9 +238,15 @@ class ReleaseBundleTests(unittest.TestCase):
         source = self.candidate / 'source.zip'
         saved = self.root / 'saved-source.zip'
         source.rename(saved)
-        source.symlink_to(saved)
-        with self.assertRaisesRegex(bundle.BundleError, 'regular artifact'):
-            self.sign()
+        with self.subTest(artifact='symbolic link'):
+            try:
+                source.symlink_to(saved)
+            except OSError as error:
+                if os.name == 'nt' and getattr(error, 'winerror', None) == 1314:
+                    self.skipTest('Windows lacks symbolic-link creation privilege')
+                raise
+            with self.assertRaisesRegex(bundle.BundleError, 'regular artifact'):
+                self.sign()
 
     def test_version_code_must_increase_and_match_actual_apk(self):
         self.stage()
@@ -244,7 +262,7 @@ class ReleaseBundleTests(unittest.TestCase):
                              ('version-code', b'0'), ('min-sdk', b'29'), ('target-sdk', b'36'),
                              ('debuggable', b'true')]:
             def altered(arguments, **kwargs):
-                if Path(str(arguments[0])).name == 'apkanalyzer' and arguments[2] == field:
+                if Path(str(arguments[0])).stem.lower() == 'apkanalyzer' and arguments[2] == field:
                     return value
                 return fake_tool(arguments, **kwargs)
             with self.subTest(field=field), patch.object(bundle, 'run_tool', side_effect=altered), \

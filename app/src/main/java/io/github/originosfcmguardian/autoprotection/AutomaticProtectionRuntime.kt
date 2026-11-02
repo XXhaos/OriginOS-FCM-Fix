@@ -251,22 +251,32 @@ object AutomaticProtectionRuntime {
     }
 
     /** Success means actual workers and FIFO persistence have settled, not Future cancellation. */
-    suspend fun awaitDaemonMigrationDrain(context: Context): Boolean = withContext(Dispatchers.IO) { withTimeoutOrNull(45_000) {
+    suspend fun awaitDaemonMigrationDrain(context: Context,
+        stage: (io.github.originosfcmguardian.daemon.DaemonAdoptionStage) -> Unit = {}): Boolean = withContext(Dispatchers.IO) { withTimeoutOrNull(45_000) {
         if (!migrationPrepared) return@withTimeoutOrNull false
+        stage(io.github.originosfcmguardian.daemon.DaemonAdoptionStage.DRAIN_LOCAL_SERVICE)
         if (!AutomaticProtectionService.awaitDaemonMigrationDrain()) return@withTimeoutOrNull false
+        stage(io.github.originosfcmguardian.daemon.DaemonAdoptionStage.DRAIN_STOPPED)
         if (!StoppedRecoveryController.awaitDaemonMigrationDrain()) return@withTimeoutOrNull false
         if (AndroidRecoveryJournal.open(context.applicationContext).load().latest?.requiresReconcile == true)
             return@withTimeoutOrNull false
         val persisted = CompletableDeferred<Unit>()
         synchronized(this@AutomaticProtectionRuntime) { authorityExecutor.execute { persisted.complete(Unit) } }
         persisted.await()
-        if (!FcmProtectionRuntime.awaitDaemonMigrationDrain(context)) return@withTimeoutOrNull false
+        if (!FcmProtectionRuntime.awaitDaemonMigrationDrain(context, stage)) return@withTimeoutOrNull false
+        stage(io.github.originosfcmguardian.daemon.DaemonAdoptionStage.DRAIN_ENDPOINTS)
         val drained = ShizukuExecutor.awaitDaemonMigrationDrain()
         if (drained) io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.markMigrationWorkersDrained()
         drained
     } ?: false }
 
     @Synchronized internal fun publishDaemonState(value: AutomaticProtectionState) { mutable.value = value }
+
+    /** A new explicit remote ON supersedes the original local notification's negative continuity. */
+    @Synchronized internal fun invalidateLegacyNotificationStop() {
+        migrationRetiredSessionId = null
+        ++revision
+    }
 
     fun start(context: Context, identity: SelectedTargetIdentity): Boolean {
         if (!localExecutionAllowed(context)) return false
@@ -551,26 +561,36 @@ object AutomaticProtectionRuntime {
         stop(context, reason, null)
     }
 
-    private fun stop(context: Context, reason: ProtectionLifecycleReason, expectedSessionId: String?) {
+    private fun stop(context: Context, reason: ProtectionLifecycleReason, expectedSessionId: String?,
+        expectedActivationToken: Long? = null) {
+        // A notification must carry its issued token, never sample a replacement ON's current one.
+        if (expectedSessionId != null && expectedActivationToken == null) return
         // Notification actions must still name the exact old session, not a replacement local owner.
         val expectedRevision = if (expectedSessionId == null) null else synchronized(this) {
             if (!matchesLegacyNotificationStop(expectedSessionId, pendingStart, grant?.id,
                     migrationPrepared || DaemonAppRuntime.remoteOwnershipClaimed(), migrationRetiredSessionId)) return
             revision
         }
-        ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.EXPLICIT_MASTER_OFF, reason)
         val initiallyLocal = localExecutionAllowed(context)
-        if (!initiallyLocal && expectedSessionId == null) { DaemonAppRuntime.stop(context); return }
-        // A stale notification must not even pause a replacement FCM host before the exact recheck.
-        // The matched grant's cancellation below performs its identity-scoped hostEnded teardown.
-        if (initiallyLocal && expectedSessionId == null) FcmProtectionRuntime.masterOff()
         val app = context.applicationContext
         var forward = false
-        val cancel = synchronized(this) {
+        var cancel: (() -> Unit)? = null
+        // Notification admission is prepared outside both monitors; only its CPU queue offer
+        // may run inside the activation fence. Actual daemon IO follows after both locks exit.
+        val admitRemote = if (expectedSessionId != null) DaemonAppRuntime.prepareNotificationStop(app) else null
+        var finishRemote: (() -> Unit)? = null
+        val admit = {
+          synchronized(this) {
             when (legacyNegativeAdmission(!initiallyLocal || migrationPrepared || DaemonAppRuntime.remoteOwnershipClaimed(),
                 expectedSessionId, expectedRevision, revision, pendingStart, grant?.id, migrationRetiredSessionId)) {
-                LegacyNegativeAdmission.REMOTE -> { forward = true; return@synchronized null }
-                LegacyNegativeAdmission.STALE -> return
+                LegacyNegativeAdmission.REMOTE -> {
+                    forward = true
+                    // For notifications this also holds the activation fence: a newer explicit
+                    // master ON cannot invalidate the session between this check and OFF offer.
+                    if (expectedSessionId != null) finishRemote = checkNotNull(admitRemote).invoke()
+                    return@synchronized true
+                }
+                LegacyNegativeAdmission.STALE -> return@synchronized false
                 LegacyNegativeAdmission.LOCAL -> Unit
             }
             restoreBlocked = true
@@ -600,10 +620,26 @@ object AutomaticProtectionRuntime {
                 }
                 retireServiceWhenIdle(stoppedRevision)
             }
-            current?.cancel
+            cancel = current?.cancel
+            true
+          }
         }
-        // Daemon admission can persist a negative intent; never call it under the old monitor.
-        if (forward) { DaemonAppRuntime.stop(app); return }
+        if (expectedSessionId != null) {
+            val accepted = io.github.originosfcmguardian.pushactivation.PushActivationRuntime.cancelIfCurrent(
+                context, checkNotNull(expectedActivationToken), admit = admit)
+            if (!accepted) return
+            ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.EXPLICIT_MASTER_OFF, reason)
+            // Match the original local FCM host too: a later ON may already own a new host.
+            if (!forward) FcmProtectionRuntime.masterOff(expectedSessionId)
+            finishRemote?.invoke()
+        } else {
+            io.github.originosfcmguardian.pushactivation.PushActivationRuntime.cancelExplicit(context)
+            ProtectionLifecycleDiagnostics.record(ProtectionLifecycleEventKind.EXPLICIT_MASTER_OFF, reason)
+            if (!initiallyLocal) { DaemonAppRuntime.stop(context); return }
+            FcmProtectionRuntime.masterOff()
+            if (!admit()) return
+            if (forward) { DaemonAppRuntime.stop(app); return }
+        }
         cancel?.invoke()
     }
 
@@ -1001,8 +1037,8 @@ object AutomaticProtectionRuntime {
         }
     }
 
-    internal fun stopSession(context: Context, id: String) {
-        stop(context, ProtectionLifecycleReason.NOTIFICATION_STOP, id)
+    internal fun stopSession(context: Context, id: String, activationToken: Long) {
+        stop(context, ProtectionLifecycleReason.NOTIFICATION_STOP, id, activationToken)
     }
 
     /** Stop old RPC authority synchronously; callback runs only after durable exact-target removal. */

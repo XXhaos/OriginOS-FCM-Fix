@@ -41,7 +41,7 @@ class GmsSigningTrustTest {
         }
     }
 
-    @Test fun disconnectedMcsRequiresGoogleAnchorExclusiveOwnerAndPrimaryShellUser() {
+    @Test fun disconnectedMcsRequiresExactGoogleAuthorityActualMembershipAndPrimaryShellUser() {
         val owners = listOf(GMS_OBSERVATION_PACKAGE)
         assertTrue(qualifiedGmsMcsIdentity(identity(), 2000, 0, owners))
         assertTrue(qualifiedGmsMcsIdentity(identity().copy(signerSha256 = anchor,
@@ -50,7 +50,10 @@ class GmsSigningTrustTest {
         assertFalse(qualifiedGmsMcsIdentity(identity().copy(hasMultipleSigners = true), 2000, 0, owners))
         assertFalse(qualifiedGmsMcsIdentity(identity(), 0, 0, owners))
         assertFalse(qualifiedGmsMcsIdentity(identity(), 2000, 10, owners))
-        assertFalse(qualifiedGmsMcsIdentity(identity(), 2000, 0, owners + "other.pkg"))
+        assertTrue(qualifiedGmsMcsIdentity(identity(), 2000, 0, owners + "other.pkg"))
+        assertFalse(qualifiedGmsMcsIdentity(identity(), 2000, 0, listOf("other.pkg")))
+        assertFalse(qualifiedGmsMcsIdentity(identity(), 2000, 0, owners + GMS_OBSERVATION_PACKAGE))
+        assertFalse(qualifiedGmsMcsIdentity(identity(), 2000, 0, null as List<String>?))
         assertFalse(qualifiedGmsMcsIdentity(identity().copy(applicationPackageName = "other.pkg"), 2000, 0, owners))
         assertFalse(qualifiedGmsMcsIdentity(identity().copy(uid = 1010234), 2000, 0, owners))
     }

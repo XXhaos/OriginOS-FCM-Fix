@@ -20,6 +20,9 @@ internal data class GmsReceiverInspection(val complete: Boolean, val receivers: 
 internal interface GmsConnectionReadPort {
     fun environment(): GmsProbeEnvironment
     fun gmsPackage(): GmsPackageIdentity?
+    /** Internal PM read for a member returned by getPackagesForUid; never an arbitrary IPC input. */
+    fun packageIdentity(packageName: String): GmsPackageIdentity? =
+        if (packageName == GMS_OBSERVATION_PACKAGE) gmsPackage() else null
     fun packagesForUid(uid: Int): List<String>?
     fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean): SocketSource
     fun gcmService(interrupted: () -> Boolean): GcmServiceSource = GcmServiceSource.unavailable()
@@ -47,11 +50,8 @@ internal fun gmsSigningHistoryDigests(certificates: List<ByteArray>): List<Strin
     return hashes.takeIf { it.distinct().size == it.size }
 }
 
-internal fun validGmsPackageIdentity(value: GmsPackageIdentity?): GmsPackageIdentity? = value?.takeIf {
-    it.packageName == GMS_OBSERVATION_PACKAGE && it.applicationPackageName == GMS_OBSERVATION_PACKAGE &&
-        it.uid in 10_000..99_999 && it.versionCode >= 0 && it.firstInstallTime > 0 && it.lastUpdateTime > 0 &&
-        it.signerSha256.matches(Regex("[a-f0-9]{64}"))
-}
+internal fun validGmsPackageIdentity(value: GmsPackageIdentity?): GmsPackageIdentity? =
+    validGmsUidPackageIdentity(value, GMS_OBSERVATION_PACKAGE)
 
 /** A canonical authority pin, not an alternative current-signer identity. */
 internal fun gmsGoogleTrustAnchor(identity: GmsPackageIdentity): String? {
@@ -76,16 +76,28 @@ internal fun gmsIdentityMatchesSample(identity: GmsPackageIdentity?, sample: Gms
 }
 
 internal fun qualifiedGmsMcsIdentity(identity: GmsPackageIdentity?, serviceUid: Int, currentUser: Int,
-    owners: List<String>?): Boolean = validGmsPackageIdentity(identity)?.let {
-    serviceUid == 2000 && currentUser == 0 && owners == listOf(GMS_OBSERVATION_PACKAGE) &&
+    owners: GmsPackageOwnership?): Boolean = validGmsPackageIdentity(identity)?.let {
+    serviceUid == 2000 && currentUser == 0 && owners != null && owners.gms == it &&
+        qualifiedGmsPackageOwnership(it, owners.members) == owners &&
         gmsGoogleTrustAnchor(it) == FcmRecoveryPolicy.SIGNER
 } == true
 
+internal fun qualifiedGmsMcsIdentity(identity: GmsPackageIdentity?, serviceUid: Int, currentUser: Int,
+    owners: List<String>?): Boolean =
+    qualifiedGmsMcsIdentity(identity, serviceUid, currentUser, qualifiedGmsPackageOwnership(identity, owners))
+
 internal fun observeGmsConnection(
     requestId: Long, port: GmsConnectionReadPort, interruption: () -> GmsUnknown? = { null },
+    ownershipObserved: (GmsPackageOwnership) -> Unit = {},
     nowMillis: () -> Long = System::currentTimeMillis,
 ): GmsConnectionObservation {
     fun unknown(reason: GmsUnknown) = GmsConnectionObservation.Unknown(requestId, reason)
+    fun ownershipUnavailable(expected: GmsPackageIdentity): GmsConnectionObservation.Unknown {
+        interruption()?.let { return unknown(it) }
+        val current = validGmsPackageIdentity(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
+        if (gmsGoogleTrustAnchor(current) != FcmRecoveryPolicy.SIGNER) return unknown(GmsUnknown.IDENTITY_UNKNOWN)
+        return unknown(if (current != expected) GmsUnknown.IDENTITY_CHANGED else GmsUnknown.SHARED_UID)
+    }
     if (requestId <= 0) return unknown(GmsUnknown.INVALID_REQUEST)
     return try {
         interruption()?.let { return unknown(it) }
@@ -93,13 +105,19 @@ internal fun observeGmsConnection(
         if (environment.serviceUid != 2000) return unknown(GmsUnknown.SHELL_UNAVAILABLE)
         if (environment.currentUser != 0) return unknown(GmsUnknown.WRONG_USER)
         val before = validGmsPackageIdentity(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
+        if (gmsGoogleTrustAnchor(before) != FcmRecoveryPolicy.SIGNER) return unknown(GmsUnknown.IDENTITY_UNKNOWN)
         interruption()?.let { return unknown(it) }
-        if (port.packagesForUid(before.uid) != listOf(GMS_OBSERVATION_PACKAGE)) return unknown(GmsUnknown.SHARED_UID)
+        val ownersBefore = readGmsPackageOwnership(port, before) { interruption() != null }
+            ?: return ownershipUnavailable(before)
+        // UID-wide sockets are attributable only to an exclusively owned GMS UID. Peer
+        // metadata is optional evidence and must never add Binder work to this fixed target read.
+        val exclusive = ownersBefore.members == listOf(GMS_OBSERVATION_PACKAGE)
         val sampledAt = nowMillis()
         val sampledElapsed = port.elapsedRealtime()
-        val tcp = port.sockets(false, before.uid) { interruption() != null }
+        val unavailableSocket = SocketSource(SourceCompleteness.UNAVAILABLE, false)
+        val tcp = if (exclusive) port.sockets(false, before.uid) { interruption() != null } else unavailableSocket
         interruption()?.let { return unknown(it) }
-        val tcp6 = port.sockets(true, before.uid) { interruption() != null }
+        val tcp6 = if (exclusive) port.sockets(true, before.uid) { interruption() != null } else unavailableSocket
         interruption()?.let { return unknown(it) }
         val serviceAt = nowMillis()
         val serviceElapsed = port.elapsedRealtime()
@@ -111,10 +129,13 @@ internal fun observeGmsConnection(
         interruption()?.let { return unknown(it) }
         val after = validGmsPackageIdentity(port.gmsPackage()) ?: return unknown(GmsUnknown.IDENTITY_UNKNOWN)
         if (before != after || port.environment() != environment) return unknown(GmsUnknown.IDENTITY_CHANGED)
-        if (port.packagesForUid(after.uid) != listOf(GMS_OBSERVATION_PACKAGE)) return unknown(GmsUnknown.SHARED_UID)
+        val ownersAfter = readGmsPackageOwnership(port, after) { interruption() != null }
+            ?: return ownershipUnavailable(after)
+        if (ownersBefore != ownersAfter) return unknown(GmsUnknown.IDENTITY_CHANGED)
         // Recheck environment after the final ownership Binder call as well.
         if (port.environment() != environment) return unknown(GmsUnknown.IDENTITY_CHANGED)
         interruption()?.let { return unknown(it) }
+        ownershipObserved(ownersAfter)
         // Compare raw current signer and PM evidence before deriving the wire-compatible authority pin.
         GmsConnectionObservation.Sample(requestId, after.uid, after.versionCode, after.firstInstallTime,
             after.lastUpdateTime, gmsGoogleTrustAnchor(after) ?: after.signerSha256, environment.bootId, sampledAt, sampledElapsed,

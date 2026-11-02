@@ -295,8 +295,6 @@ class DaemonHeartbeatDerivationTest {
             sample.copy(gcmService = source.copy(state = GcmConnectionState.REPORTED_DISCONNECTED)),
             sample.copy(gcmService = source.copy(state = GcmConnectionState.UNKNOWN)),
             sample.copy(gcmService = source.copy(state = GcmConnectionState.SERVICE_ABSENT)),
-            sample.copy(tcp = SocketSource(SourceCompleteness.COMPLETE, false)),
-            sample.copy(tcp6 = SocketSource(SourceCompleteness.PARTIAL, false)),
             sample.copy(gcmService = source.copy(state = GcmConnectionState.UNKNOWN, completeness = SourceCompleteness.PARTIAL)),
             sample.copy(gcmService = source.copy(elapsedRealtimeMillis = 10_001)),
         )
@@ -308,6 +306,19 @@ class DaemonHeartbeatDerivationTest {
                 f.root.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION))).used)
         }
         assertNotNull(f.owner.deriveBundledHeartbeat(f.root, f.record, f.root.snapshot().dataRevision, sample, boot, f.now))
+    }
+
+    @Test fun completeCurrentOfficialServiceCanMaterializeNativeHeartbeatWithoutSocketAttribution() {
+        for (socket in listOf(SocketSource(SourceCompleteness.UNAVAILABLE, false),
+            SocketSource(SourceCompleteness.COMPLETE, false), SocketSource(SourceCompleteness.PARTIAL, false))) {
+            val f = Fixture(); assertTrue(f.activate())
+            val serviceOnly = sample.copy(tcp = socket, tcp6 = socket)
+            assertFalse(FcmRecoveryPolicy.connected(serviceOnly, f.now))
+            assertNotNull(f.owner.deriveBundledHeartbeat(f.root, f.record, f.root.snapshot().dataRevision,
+                serviceOnly, boot, f.now))
+            assertTrue(DaemonHeartbeatDerivationPermitCodec.decode(requireNotNull(
+                f.root.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION))).used)
+        }
     }
 
     @Test fun exactParentBothBindingsAndRecordAreRequired() {

@@ -37,6 +37,10 @@ SDK 路径也可写入本机 `local.properties` 的 `sdk.dir`，不要提交该�
 
 设备测试需要兼容的 Android 设备、Shizuku 和适用的授权环境。主机测试及 lint 不能验证 OriginOS 后台行为、真实 FCM 到达率或设备兼容性。
 
+发行工具测试可运行 `python -m unittest discover -s tools/tests -p "test_*.py"`。Windows 缺少创建符号链接权限时，仅跳过对应的符号链接子分支；Linux CI 仍执行实际权限和符号链接检查。
+
+本地签名构建的文件名可能为 `app-release.apk`。运行权限边界检查时，可用 `tools/verify_privilege_artifacts.ps1 -ReleaseApkPath app/build/outputs/apk/release/app-release.apk` 显式检查该包；默认仍检查普通源码构建的未签名 release。
+
 ## 依赖归属检查
 
 `licenses/` 作为 APK assets 打包，保存项目及运行时依赖的许可与上游声明。Python 3 仅用于维护、检查生成内容，不是普通 Android 构建依赖：

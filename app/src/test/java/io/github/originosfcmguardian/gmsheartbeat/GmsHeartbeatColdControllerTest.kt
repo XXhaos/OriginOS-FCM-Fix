@@ -9,6 +9,28 @@ import org.junit.Test
 import java.util.UUID
 
 class GmsHeartbeatColdControllerTest {
+    @Test fun migrationAfterInitialBundledOffCleanupRetainsOffBytesAndCreatesNoHeartbeat() = runBlocking {
+        Fixture(cold = false).use { f ->
+            f.controller.disable()
+            yield()
+            val off = f.store.read()!!
+            val before = f.storage.memory.bytes!!.copyOf()
+            val events = f.storage.events.toList()
+            assertFalse(off.configured)
+            assertTrue(f.storage.haltPresent)
+            f.controller.prepareForDaemonMigration()
+            assertTrue(f.controller.awaitDaemonMigrationDrain())
+            assertFalse(f.controller.migrationEndpointClosureAttested())
+            assertArrayEquals(before, f.storage.memory.bytes)
+            assertEquals(events, f.storage.events)
+            assertTrue(f.storage.haltPresent)
+            assertEquals(0, f.backend.qualificationCount)
+            assertEquals(0, f.backend.arms)
+            assertEquals(0, f.backend.requests)
+            assertEquals(0, f.backend.revokes)
+        }
+    }
+
     @Test fun migrationClosesMemoryFirstThenRequiresOriginalEndpointAcknowledgementWithoutNewConsent() = runBlocking {
         Fixture(cold = false).use { f ->
             assertTrue(f.controller.confirmDurable())

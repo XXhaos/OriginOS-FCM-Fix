@@ -88,6 +88,11 @@ data class CombinedDiagnosticReport(
     val protectionLifecycle: io.github.originosfcmguardian.autoprotection.ProtectionLifecycleSnapshot = io.github.originosfcmguardian.autoprotection.ProtectionLifecycleSnapshot(),
     val protectionResources: io.github.originosfcmguardian.autoprotection.ProtectionResourceSnapshot = io.github.originosfcmguardian.autoprotection.ProtectionResourceSnapshot(),
     val daemonDiagnostics: io.github.originosfcmguardian.daemon.DaemonDiagnosticsSnapshot = io.github.originosfcmguardian.daemon.DaemonDiagnosticsSnapshot(),
+    val daemonAdoption: io.github.originosfcmguardian.daemon.DaemonAdoptionDiagnostics = io.github.originosfcmguardian.daemon.DaemonAdoptionDiagnostics(),
+    val pushActivation: io.github.originosfcmguardian.pushactivation.PushActivationUiState = io.github.originosfcmguardian.pushactivation.PushActivationUiState(),
+    val fcmConnectionRead: DiagnosticFcmConnectionRead = DiagnosticFcmConnectionRead(),
+    val gmsAutoHeartbeat: DiagnosticHeartbeatState = DiagnosticHeartbeatState(),
+    val exportRedacted: Boolean = false,
 )
 
 /**
@@ -150,6 +155,7 @@ fun buildCombinedDiagnosticReport(
             guardianVersionName = environment.guardianVersionName.take(MAX_TEXT_LENGTH),
         ),
         shizukuStatus = state.shizuku.status.name,
+        pushActivation = state.pushActivation,
         targets = if (
             state.targetSelectionStoreCorrupt ||
             state.targetSelectionLoadState != HomeSourceLoadState.LOADED
@@ -164,6 +170,8 @@ fun buildCombinedDiagnosticReport(
             }
         },
         sourceAvailability = sources,
+        fcmConnectionRead = diagnosticFcmConnectionRead(state),
+        gmsAutoHeartbeat = diagnosticHeartbeatState(state.gmsAutoHeartbeat),
         fcmRecoveryTrial = state.fcmRecovery.copy(events = state.fcmRecovery.events.takeLast(64),
             episodesSnapshot = FcmRecoveryEpisodeSnapshot()),
         fcmRecoveryEpisodes = episodeSnapshot,
@@ -226,6 +234,11 @@ internal fun episodeSourceAvailability(snapshot: FcmRecoveryEpisodeSnapshot): Di
 fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray {
     val json = buildString {
         append("{\"schema\":").string(DIAGNOSTIC_REPORT_SCHEMA)
+        if (report.exportRedacted) {
+            append(",\"redaction\":{\"schema\":\"guardian.diagnostic-redaction.v1\",")
+            append("\"appReferences\":\"REPORT_LOCAL\",\"appNamesOmitted\":true,")
+            append("\"processIdentifiers\":\"ONE_WAY_REFERENCE\"}")
+        }
         append(",\"capturedAtEpochMillis\":").append(report.capturedAtEpochMillis)
         append(",\"environment\":{")
         field("sdkInt", report.environment.sdkInt)
@@ -312,6 +325,37 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
         appendProtectionResourceJson(report.protectionResources, report.daemonDiagnostics.availability.name)
         append(",\"daemonDiagnostics\":")
         appendDaemonDiagnosticsJson(report.daemonDiagnostics)
+        append(",\"daemonAdoption\":{")
+        with(report.daemonAdoption) {
+            field("scope", "CURRENT_APP_PROCESS_FIRST_ADOPTION_ONLY")
+            field("status", status.name)
+            field("stage", stage.name)
+            field("reason", reason.name)
+            field("attemptCount", attemptCount)
+            field("lastAttemptAtEpochMillis", lastAttemptAtEpochMillis)
+            field("lastOutcomeAtEpochMillis", lastOutcomeAtEpochMillis, comma = false)
+        }
+        append('}')
+        append(",\"pushActivation\":{")
+        with(report.pushActivation) {
+            field("scope", "CURRENT_APP_PROCESS_PENDING_INTENT_PROJECTION")
+            field("pending", pending)
+            field("busy", busy)
+            field("blocked", blocked)
+            field("storageFailed", storageFailed)
+            field("reason", reason.name)
+            field("origin", origin.name)
+            field("confirmedAtEpochMillis", confirmedAtEpochMillis)
+            field("confirmedVersionCode", confirmedVersionCode)
+            field("dispatchesThisProcess", dispatchesThisProcess)
+            field("recordedDispatchAdmissions", recordedDispatches?.toLong())
+            field("lastDispatch", lastDispatch?.name)
+            field("lastRemoteOutcome", lastAttempt?.remoteOutcome)
+            field("lastRemoteReason", lastAttempt?.remoteReason)
+            field("lastPreparationReason", lastAttempt?.preparationReason)
+            field("lastReadUnknown", lastAttempt?.readUnknown, comma = false)
+        }
+        append('}')
         append(",\"sourceAvailability\":{")
         report.sourceAvailability.entries.forEachIndexed { index, entry ->
             if (index > 0) append(',')
@@ -324,7 +368,48 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
         field("requiresConfirmation", report.fcmProtection.requiresConfirmation)
         field("maintenance", report.fcmProtection.maintenance.name)
         field("confirmationFailure", report.fcmProtection.confirmationFailure?.name)
-        field("recoveryReady", report.fcmProtection.recoveryReady, comma = false)
+        field("recoveryReady", report.fcmProtection.recoveryReady)
+        append("\"initialReadFailure\":")
+        report.fcmProtection.initialReadFailure?.let { failure ->
+            append('{')
+            field("scope", "APP_INITIAL_CONFIRMATION")
+            field("stage", failure.stage.name)
+            field("reason", failure.reason.name)
+            field("atEpochMillis", failure.atEpochMillis)
+            field("elapsedMillis", failure.elapsedMillis, comma = false)
+            append('}')
+        } ?: append("null")
+        append('}')
+        append(",\"gmsAutoHeartbeat\":{")
+        with(report.gmsAutoHeartbeat) {
+            field("scope", DIAGNOSTIC_HEARTBEAT_SCOPE)
+            field("limitations", DIAGNOSTIC_HEARTBEAT_LIMITATIONS)
+            field("configured", configured)
+            field("active", active)
+            field("paused", paused)
+            field("stopPending", stopPending)
+            field("durableConsent", durableConsent)
+            field("resumeAuthorized", resumeAuthorized)
+            field("waitingForHost", waitingForHost)
+            field("resumeBlocked", resumeBlocked)
+            field("requiresConfirmation", requiresConfirmation)
+            field("lastStatus", lastStatus?.name, comma = false)
+        }
+        append('}')
+        append(",\"fcmConnectionRead\":{")
+        with(report.fcmConnectionRead) {
+            field("scope", "CURRENT_HOME_UI_MEMORY_ONLY")
+            field("attempted", attempted)
+            field("busy", busy)
+            field("readCompletedAtElapsedMillis", readCompletedAtElapsedMillis)
+            field("networkChanged", networkChanged)
+            field("networkTrackingAvailable", networkTrackingAvailable)
+            field("networkKnown", networkKnown)
+            append("\"foreground\":")
+            fcmObservation(foreground)
+            append(",\"automatic\":")
+            fcmObservation(automatic)
+        }
         append('}')
         append(",\"fcmRecoveryTrial\":{")
         field("configured", report.fcmRecoveryTrial.configured)
@@ -423,6 +508,21 @@ fun encodeCombinedDiagnosticReport(report: CombinedDiagnosticReport): ByteArray 
     val bytes = json.toByteArray(Charsets.UTF_8)
     require(bytes.size <= MAX_REPORT_BYTES) { "Combined diagnostic report exceeds size limit" }
     return bytes
+}
+
+private fun StringBuilder.fcmObservation(value: DiagnosticFcmObservation) {
+    append('{')
+    field("kind", value.kind.name)
+    field("unknownReason", value.unknownReason?.name)
+    field("gmsVersionCode", value.gmsVersionCode)
+    field("sampleObservedAtEpochMillis", value.sampleObservedAtEpochMillis)
+    field("sampleElapsedRealtimeMillis", value.sampleElapsedRealtimeMillis)
+    field("serviceState", value.serviceState?.name)
+    field("serviceCompleteness", value.serviceCompleteness?.name)
+    field("serviceObservedAtEpochMillis", value.serviceObservedAtEpochMillis)
+    field("serviceElapsedRealtimeMillis", value.serviceElapsedRealtimeMillis)
+    field("connectedDurationMillis", value.connectedDurationMillis, comma = false)
+    append('}')
 }
 
 private fun StringBuilder.field(name: String, value: String?, comma: Boolean = true): StringBuilder {

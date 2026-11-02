@@ -43,7 +43,9 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
         if (!drain.enter()) return DaemonWire.failure("UNAVAILABLE")
         val identity = Binder.clearCallingIdentity()
         return try {
-            check(!destroyed.get() && getServiceUid() == 2000)
+            check(!destroyed.get())
+            if (getServiceUid() != 2000) throw DaemonAdoptionException(
+                DaemonAdoptionStage.SERVICE_IDENTITY, DaemonAdoptionReason.WRONG_SERVICE_UID)
             val caller = authenticate(uid)
             val data = requireNotNull(request)
             when (operation) {
@@ -51,7 +53,9 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
                     DaemonWire.keys(data)
                     // Authentication and UID checks above are read-only. No shell directory,
                     // import, control record or protection consent is created by preflight.
-                    check(SystemDaemonOwnerEnvironmentReadPort().guardianExitHistory(caller.realUid) != null)
+                    val history = runCatching { SystemDaemonOwnerEnvironmentReadPort().guardianExitHistory(caller.realUid) }.getOrNull()
+                    if (history == null) throw DaemonAdoptionException(
+                        DaemonAdoptionStage.EXIT_HISTORY, DaemonAdoptionReason.EXIT_HISTORY_UNAVAILABLE)
                     DaemonWire.success { putInt("uid", getServiceUid()) }
                 }
                 DaemonWire.BOOTSTRAP -> {
@@ -61,6 +65,13 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
                     bootstrap(caller, intent)
                 }
                 else -> operate(operation, data, caller, pid)
+            }
+        } catch (failure: DaemonAdoptionException) {
+            recordFailure(operation, failure)
+            DaemonWire.failure("UNAVAILABLE").apply {
+                if (operation == DaemonWire.PREFLIGHT) {
+                    putString("adoptionStage", failure.stage.name); putString("adoptionReason", failure.reason.name)
+                }
             }
         } catch (failure: IllegalArgumentException) { recordFailure(operation, failure); DaemonWire.failure("INVALID_REQUEST") }
         catch (failure: Exception) { recordFailure(operation, failure); DaemonWire.failure("UNAVAILABLE") }
@@ -75,15 +86,26 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
     }
 
     private fun authenticate(uid: Int): DaemonCallerEvidence {
-        require(uid in 10_000..99_999)
-        val port = SystemDaemonOwnerEnvironmentReadPort()
-        val before = port.environment()
-        check(before.shellUid == 2000 && before.currentUser == 0 && before.userUnlocked)
-        val installed = requireNotNull(port.guardianPackage())
-        check(installed.installed && installed.enabled && !installed.stopped && installed.requestsRuntimePermission &&
-            installed.installation.identity.uid == uid && port.packagesForUid(uid) == listOf(GUARDIAN_PACKAGE_NAME) &&
-            port.shizukuRuntimePermission(uid) == true)
-        check(port.guardianPackage() == installed && port.environment() == before)
+        fun unavailable(reason: DaemonAdoptionReason): Nothing = throw DaemonAdoptionException(DaemonAdoptionStage.AUTHENTICATION, reason)
+        if (uid !in 10_000..99_999) unavailable(DaemonAdoptionReason.PRINCIPAL_CHANGED)
+        val port = runCatching { SystemDaemonOwnerEnvironmentReadPort() }.getOrNull()
+            ?: unavailable(DaemonAdoptionReason.ENVIRONMENT_UNAVAILABLE)
+        val before = runCatching { port.environment() }.getOrNull() ?: unavailable(DaemonAdoptionReason.ENVIRONMENT_UNAVAILABLE)
+        if (before.shellUid != 2000 || before.currentUser != 0 || !before.userUnlocked)
+            unavailable(DaemonAdoptionReason.ENVIRONMENT_UNAVAILABLE)
+        val installed = runCatching { port.guardianPackage() }.getOrNull() ?: unavailable(DaemonAdoptionReason.PRINCIPAL_UNAVAILABLE)
+        val owners = runCatching { port.packagesForUid(uid) }.getOrNull() ?: unavailable(DaemonAdoptionReason.PRINCIPAL_UNAVAILABLE)
+        if (!installed.installed || !installed.enabled || installed.stopped || !installed.requestsRuntimePermission ||
+            installed.installation.identity.uid != uid || owners != listOf(GUARDIAN_PACKAGE_NAME))
+            unavailable(DaemonAdoptionReason.PRINCIPAL_CHANGED)
+        when (runCatching { port.shizukuRuntimePermission(uid) }.getOrNull()) {
+            true -> Unit
+            false -> unavailable(DaemonAdoptionReason.PERMISSION_DENIED)
+            null -> unavailable(DaemonAdoptionReason.PERMISSION_UNAVAILABLE)
+        }
+        val after = runCatching { port.guardianPackage() to port.environment() }.getOrNull()
+            ?: unavailable(DaemonAdoptionReason.PRINCIPAL_UNAVAILABLE)
+        if (after.first != installed || after.second != before) unavailable(DaemonAdoptionReason.PRINCIPAL_CHANGED)
         return DaemonCallerEvidence(uid, installed.installation)
     }
 
@@ -92,14 +114,16 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
 
     private fun bootstrap(caller: DaemonCallerEvidence, intent: DaemonMigrationIntent): Bundle {
         host?.takeUnless { it.isFullyReleased() }?.let {
-            check(installedOwner == intent.owner && installedMigration == intent.migrationId)
+            if (installedOwner != intent.owner || installedMigration != intent.migrationId)
+                return DaemonWire.failure("OWNER_CONFLICT")
             return DaemonWire.status(it.status(caller))
         }
         if (!creating.compareAndSet(false, true)) return DaemonWire.failure("BUSY")
         try {
             check(!destroyed.get())
             host?.takeUnless { it.isFullyReleased() }?.let {
-                check(installedOwner == intent.owner && installedMigration == intent.migrationId)
+                if (installedOwner != intent.owner || installedMigration != intent.migrationId)
+                    return DaemonWire.failure("OWNER_CONFLICT")
                 return DaemonWire.status(it.status(caller))
             }
             val environment = SystemDaemonOwnerEnvironmentReadPort().environment()
@@ -160,8 +184,18 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
                 val expected = DaemonWire.record(DaemonWire.nested(data, "expected"))
                 val id = DaemonWire.text(data, "id")
                 val command = DaemonWire.int(data, "command")
-                val challenge = if (command == DaemonWire.FCM_ON) current.stageFcmOn(caller, expected, id, historical(caller, pid))
-                else current.stage(caller, expected, id, when (command) {
+                if (command == DaemonWire.FCM_ON) {
+                    val historical = try { historical(caller, pid) } catch (_: Exception) {
+                        return if (current.fcmNotStagedProof(caller, expected, id))
+                            fcmNotStaged(DaemonFcmPreparationFailure(DaemonFcmPreparationReason.CALLER_UNAVAILABLE))
+                        else DaemonWire.failure("NOT_READY")
+                    }
+                    val attempt = current.stageFcmOnDetailed(caller, expected, id, historical)
+                    attempt.notStaged?.let { return fcmNotStaged(it) }
+                    // An unproved null or a missing request after a challenge remains NOT_READY.
+                    return controlChallenge(current, caller, attempt.challenge)
+                }
+                val challenge = current.stage(caller, expected, id, when (command) {
                     DaemonWire.ACTIVATE -> DaemonProtectionCommand.Activate
                     DaemonWire.MASTER_ON -> DaemonProtectionCommand.MasterOn
                     DaemonWire.MASTER_OFF -> DaemonProtectionCommand.MasterOff
@@ -240,6 +274,11 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
         return DaemonWire.success {
             putBundle("challenge", DaemonWire.challenge(challenge)); request?.let { putBundle("request", DaemonWire.request(it)) }
         }
+    }
+
+    private fun fcmNotStaged(failure: DaemonFcmPreparationFailure): Bundle = DaemonWire.failure("FCM_NOT_STAGED").apply {
+        putString("fcmPreparationReason", failure.reason.name)
+        failure.readUnknown?.let { putString("fcmReadUnknown", it.name) }
     }
 
     override fun destroy() {

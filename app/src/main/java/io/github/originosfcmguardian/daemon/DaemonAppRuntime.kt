@@ -73,6 +73,7 @@ internal object DaemonAppRuntime {
     private val reconnectRequests = DaemonRestoreCompletion()
     @Volatile private var adopting: DaemonMigrationIntent? = null
     private val adoptionRetry = DaemonAdoptionRetry()
+    private val adoptionJournal = DaemonAdoptionJournal()
     private val mutable = MutableStateFlow<DaemonProtectionRootSnapshot?>(null)
     val snapshots = mutable.asStateFlow()
     private val projected = MutableStateFlow<DaemonUiSnapshot?>(null)
@@ -96,8 +97,23 @@ internal object DaemonAppRuntime {
 
     private fun onPrivilegeEvent() {
         // Scope belongs to the App, not the current screen. A ready callback creates no consent.
-        app?.let { application -> scope.launch { adoptWhenReady(application) } }
+        app?.let { application -> scope.launch {
+            if (!isRemoteOwned(application)) adoptionRetry.rearm(adoptionReadyIdentity())
+            adoptWhenReady(application)
+        } }
     }
+
+    /** One actual foreground action can retry cold binding on the same Shizuku server.
+     * Ordinary state/poll refreshes intentionally do not replenish this bounded batch. */
+    fun onForeground(context: Context) {
+        initialize(context)
+        scope.launch {
+            if (!isRemoteOwned(context)) adoptionRetry.rearm(adoptionReadyIdentity())
+            adoptWhenReady(context)
+        }
+    }
+
+    fun adoptionDiagnostics(): DaemonAdoptionDiagnostics = adoptionJournal.snapshot()
 
     private fun adoptionReadyIdentity(): Any? = runCatching {
         if (Shizuku.pingBinder() && Shizuku.getUid() == 2000 &&
@@ -166,7 +182,14 @@ internal object DaemonAppRuntime {
                     reconnectDaemonWhileReady(
                         ready = { runCatching { Shizuku.pingBinder() && Shizuku.getUid() == 2000 &&
                             Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false) },
-                        reconnect = { control.withLock { restoreLocked() } },
+                        reconnect = { control.withLock {
+                            try { restoreLocked() }
+                            catch (failure: Exception) {
+                                if (adoptionJournal.snapshot().status != DaemonAdoptionStatus.ADOPTED)
+                                    recordAdoptionFailure(failure, DaemonAdoptionStage.HANDOFF, DaemonAdoptionReason.HANDOFF_UNAVAILABLE)
+                                throw failure
+                            }
+                        } },
                         failed = ::unavailable)
                 } }.getOrDefault(false)
                 if (!restored) unavailable()
@@ -183,8 +206,17 @@ internal object DaemonAppRuntime {
         val application = checkNotNull(app)
         val task = scope.launch(start = CoroutineStart.LAZY) {
             try { migrate(application, ticket) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { if (remoteOwned == true) unavailable() }
+            catch (cancelled: CancellationException) {
+                if (ticket.started) adoptionJournal.failed(if (remoteOwned == true) DaemonAdoptionStage.HANDOFF else DaemonAdoptionStage.PREFLIGHT,
+                    DaemonAdoptionReason.CANCELLED, System.currentTimeMillis())
+                throw cancelled
+            }
+            catch (failure: Exception) {
+                if (ticket.started) recordAdoptionFailure(failure,
+                    if (remoteOwned == true) DaemonAdoptionStage.HANDOFF else DaemonAdoptionStage.PREFLIGHT,
+                    if (remoteOwned == true) DaemonAdoptionReason.HANDOFF_UNAVAILABLE else DaemonAdoptionReason.REMOTE_UNAVAILABLE)
+                if (remoteOwned == true) unavailable()
+            }
         }
         task.invokeOnCompletion {
             if (adoptionRetry.finish(ticket) && remoteOwned != true)
@@ -205,39 +237,96 @@ internal object DaemonAppRuntime {
         adoptionRetry.readiness(beforeReady)
         currentCoroutineContext().ensureActive()
         if (!adoptionRetry.start(ticket)) return@withLock false
+        adoptionJournal.begin(System.currentTimeMillis())
         val bridge = checkNotNull(client)
-        val preflight = try { DaemonWire.int(bridge.call(DaemonWire.PREFLIGHT), "uid") == 2000 }
+        val preflight = try {
+            val reply = bridge.call(DaemonWire.PREFLIGHT)
+            val uid = try { DaemonWire.int(reply, "uid") } catch (_: Exception) {
+                throw DaemonAdoptionException(DaemonAdoptionStage.PREFLIGHT, DaemonAdoptionReason.INVALID_RESPONSE)
+            }
+            if (uid != 2000) throw DaemonAdoptionException(DaemonAdoptionStage.SERVICE_IDENTITY,
+                DaemonAdoptionReason.WRONG_SERVICE_UID)
+            true
+        }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { false }
+            catch (failure: Exception) {
+                recordAdoptionFailure(failure, DaemonAdoptionStage.PREFLIGHT, DaemonAdoptionReason.REMOTE_UNAVAILABLE)
+                adoptionRetry.retryReadOnlyFailure(ticket,
+                    (failure as? DaemonAdoptionException)?.reason ?: DaemonAdoptionReason.REMOTE_UNAVAILABLE)
+                false
+            }
         if (!preflight) return@withLock false // No marker: existing verified owner has not been changed.
         // A completed preflight from a previous server/permission epoch is not transferable.
-        if (!adoptionStillLocal()) { restore(context); return@withLock false }
-        if (!adoptionCandidateReady()) return@withLock false
-        val afterReady = adoptionReadyIdentity() ?: return@withLock false
+        if (!adoptionStillLocal()) {
+            adoptionJournal.failed(DaemonAdoptionStage.MIGRATION_BARRIER, DaemonAdoptionReason.STORAGE_UNAVAILABLE, System.currentTimeMillis())
+            restore(context); return@withLock false
+        }
+        if (!adoptionCandidateReady()) {
+            adoptionJournal.failed(DaemonAdoptionStage.POSTFLIGHT, DaemonAdoptionReason.CONFIGURATION_CHANGED, System.currentTimeMillis())
+            return@withLock false
+        }
+        val afterReady = adoptionReadyIdentity() ?: run {
+            adoptionJournal.failed(DaemonAdoptionStage.POSTFLIGHT, DaemonAdoptionReason.READINESS_CHANGED, System.currentTimeMillis())
+            return@withLock false
+        }
         adoptionRetry.readiness(afterReady)
         currentCoroutineContext().ensureActive()
-        if (!adoptionRetry.current(ticket)) return@withLock false
+        if (!adoptionRetry.current(ticket)) {
+            adoptionJournal.failed(DaemonAdoptionStage.POSTFLIGHT, DaemonAdoptionReason.READINESS_CHANGED, System.currentTimeMillis())
+            return@withLock false
+        }
         val intent = DaemonMigrationIntent(DaemonOwnerKey(UUID.randomUUID().toString(), 1), UUID.randomUUID().toString())
         synchronized(initialization) { adopting = intent; remoteOwned = true }
         unavailable() // Clear actual-running claims before legacy collectors stop forwarding.
-        if (!AutomaticProtectionRuntime.prepareForDaemonMigration(context)) return@withLock false
+        adoptionJournal.progress(DaemonAdoptionStage.HANDOFF_PREPARE)
+        if (!AutomaticProtectionRuntime.prepareForDaemonMigration(context)) {
+            adoptionJournal.failed(DaemonAdoptionStage.HANDOFF_PREPARE, DaemonAdoptionReason.HANDOFF_UNAVAILABLE, System.currentTimeMillis())
+            return@withLock false
+        }
         // From this point even a failed marker write cannot reopen the old in-memory dispatcher.
-        if (!pointerStore!!.begin(intent)) { unavailable(); return@withLock false }
+        adoptionJournal.progress(DaemonAdoptionStage.MIGRATION_BARRIER)
+        if (!pointerStore!!.begin(intent)) {
+            adoptionJournal.failed(DaemonAdoptionStage.MIGRATION_BARRIER, DaemonAdoptionReason.STORAGE_UNAVAILABLE, System.currentTimeMillis())
+            unavailable(); return@withLock false
+        }
         try {
             withTimeout(150_000) { restoreLocked() }
+            adoptionJournal.adopted(System.currentTimeMillis())
             true
-        } catch (_: Exception) { unavailable(); false } finally { adopting = null }
+        } catch (failure: Exception) {
+            recordAdoptionFailure(failure, DaemonAdoptionStage.HANDOFF, DaemonAdoptionReason.HANDOFF_UNAVAILABLE)
+            unavailable(); false
+        } finally { adopting = null }
+    }
+
+    private fun recordAdoptionFailure(failure: Exception, stage: DaemonAdoptionStage, reason: DaemonAdoptionReason) {
+        val classified = failure as? DaemonAdoptionException
+        val observed = adoptionJournal.snapshot().stage
+        val actualStage = if (stage == DaemonAdoptionStage.HANDOFF && observed != DaemonAdoptionStage.NONE)
+            observed else stage
+        val actualReason = classified?.reason ?: when (failure) {
+            is TimeoutCancellationException -> DaemonAdoptionReason.TIMED_OUT
+            is CancellationException -> DaemonAdoptionReason.CANCELLED
+            else -> daemonAdoptionStageFailureReason(actualStage, reason)
+        }
+        // Client HANDOFF is a generic RPC lane; the active migration phase is more precise.
+        val reportedStage = classified?.stage?.takeUnless { it == DaemonAdoptionStage.HANDOFF } ?: actualStage
+        adoptionJournal.failed(reportedStage, actualReason, System.currentTimeMillis())
     }
 
     /** Permanent INTENT may precede the first export; a frozen export is never recreated. */
     private suspend fun resumeMigrationLocked(intent: DaemonMigrationIntent, stop: DaemonAppStopIntent? = null) {
         if (stop != null) check(stop.intent == intent && stop.command.kind == DaemonWire.MASTER_OFF)
         val context = checkNotNull(app)
+        adoptionJournal.progress(DaemonAdoptionStage.HANDOFF_PREPARE)
         check(AutomaticProtectionRuntime.prepareForDaemonMigration(context))
-        check(AutomaticProtectionRuntime.awaitDaemonMigrationDrain(context))
+        check(AutomaticProtectionRuntime.awaitDaemonMigrationDrain(context, adoptionJournal::progress))
+        adoptionJournal.progress(DaemonAdoptionStage.EXPORT_READ)
         val frozen = exportStore!!.read(intent) ?: run {
             val imported = AppDaemonDomainExport(AndroidAppDaemonDomainReadPort(context)).prepared(intent.owner, intent.migrationId)
+            adoptionJournal.progress(DaemonAdoptionStage.EXPORT_VALIDATE)
             validateDaemonMigrationHeartbeat(imported)
+            adoptionJournal.progress(DaemonAdoptionStage.EXPORT_WRITE)
             check(exportStore!!.saveOnce(intent, DaemonProtectionRootCodec.encode(imported)))
             checkNotNull(exportStore!!.read(intent))
         }
@@ -251,10 +340,12 @@ internal object DaemonAppRuntime {
             return
         }
         val bridge = checkNotNull(client)
+        adoptionJournal.progress(DaemonAdoptionStage.BOOTSTRAP)
         val bootstrapped = DaemonWire.appStatus(bridge.bootstrap(intent))
         val existing = bootstrapped.record?.let { bridge.snapshot() }
         val priorStop = if (stop == null || existing == null) null else
             existing.bytes(DaemonDomainRole.CONTROL_PROPOSAL)?.let(DaemonControlProposalCodec::decode)?.takeIf { it.requestId == stop.id }
+        adoptionJournal.progress(DaemonAdoptionStage.IMPORT)
         val prepared = if (priorStop != null) {
             val base = DaemonProtectionRootSnapshot(existing!!.control,
                 existing.domains() + (DaemonDomainRole.CONTROL_PROPOSAL to null), existing.receipts, existing.halt, existing.dataRevision)
@@ -264,6 +355,7 @@ internal object DaemonAppRuntime {
         } else bridge.import(frozen.snapshot())
         val aggregate = bridge.snapshot()
         check(aggregate.control == prepared && prepared.mode == DaemonControlMode.PREPARED)
+        adoptionJournal.progress(DaemonAdoptionStage.ACTIVATE)
         val staged = if (stop != null) {
             // No ON is used to reach OFF. Other negative requests remain durably inert/pending.
             check(stop.intent == intent && stop.command.kind == DaemonWire.MASTER_OFF)
@@ -283,13 +375,35 @@ internal object DaemonAppRuntime {
         val needsHandoff = stop == null && heartbeat?.let(HeartbeatSnapshotCodec::decode)?.configured == true &&
             io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatRuntime.migrationEndpointClosureAttested()
         if (stop == null) check(unsavedStop.current() == null && pointerStore!!.readStopIntent() == null)
+        adoptionJournal.progress(DaemonAdoptionStage.POINTER_COMMIT)
         applyStaged(intent, frozen.sha256, staged, frozen.sha256.takeIf { needsHandoff },
             heartbeat?.let(DaemonProtectionRootSnapshot::digest).takeIf { needsHandoff })
+        adoptionJournal.progress(DaemonAdoptionStage.REFRESH)
         refreshLocked()
+        adoptionJournal.adopted(System.currentTimeMillis())
     }
 
-    fun stop(context: Context) = launchCommand(context, DaemonWire.MASTER_OFF)
-    fun enableMaster(context: Context) = launchCommand(context, DaemonWire.MASTER_ON)
+    fun stop(context: Context) {
+        io.github.originosfcmguardian.pushactivation.PushActivationRuntime.cancelExplicit(context)
+        launchCommand(context, DaemonWire.MASTER_OFF)
+    }
+    fun enableMaster(context: Context) {
+        AutomaticProtectionRuntime.invalidateLegacyNotificationStop()
+        launchCommand(context, DaemonWire.MASTER_ON)
+    }
+
+    /** Prepare outside runtime/activation monitors. Admission below only changes the short command
+     * queue; its returned completion performs persistence and worker launch after those locks exit. */
+    internal fun prepareNotificationStop(context: Context): () -> (() -> Unit) {
+        initialize(context)
+        isRemoteOwned(context)
+        return {
+            val command = DaemonAppCommand(DaemonWire.MASTER_OFF)
+            val offer = admitCommand(command, null)
+            val finish: () -> Unit = { launchAdmittedCommand(command, offer, null) }
+            finish
+        }
+    }
     fun enableTarget(context: Context, identity: SelectedTargetIdentity) = launchCommand(context, DaemonWire.TARGET_ON, identity)
     fun disableTarget(context: Context, identity: SelectedTargetIdentity) = launchCommand(context, DaemonWire.TARGET_OFF, identity)
     fun enableFcm(context: Context): Deferred<DaemonFcmCommandResult> {
@@ -297,32 +411,43 @@ internal object DaemonAppRuntime {
         // This scope belongs to the App. Cancelling a screen's await never cancels remote work.
         completion.bound(scope)
         try { launchCommand(context, DaemonWire.FCM_ON, completion = completion) }
-        catch (_: Exception) { completion.finish(DaemonFcmCommandOutcome.FAILED, DaemonFcmCommandReason.PREPARATION) }
+        catch (_: Exception) { completion.notStaged(DaemonFcmPreparationFailure(DaemonFcmPreparationReason.PREPARATION_UNAVAILABLE),
+            DaemonFcmCommandReason.PREPARATION) }
         return completion.result
     }
-    fun disableFcm(context: Context) = launchCommand(context, DaemonWire.FCM_OFF)
+    fun disableFcm(context: Context) {
+        io.github.originosfcmguardian.pushactivation.PushActivationRuntime.cancelExplicit(context)
+        launchCommand(context, DaemonWire.FCM_OFF)
+    }
 
     private fun launchCommand(context: Context, command: Int, target: SelectedTargetIdentity? = null,
         completion: DaemonFcmCommandCompletion? = null) {
         initialize(context)
         if (!isRemoteOwned(context)) {
-            completion?.finish(DaemonFcmCommandOutcome.REJECTED, DaemonFcmCommandReason.NOT_REMOTE)
+            completion?.notStaged(DaemonFcmPreparationFailure(DaemonFcmPreparationReason.NOT_REMOTE), DaemonFcmCommandReason.NOT_REMOTE)
             return
         }
         if (completion?.result?.isCompleted == true) return
         val first = DaemonAppCommand(command, target)
         // Before waiting for the migration/control mutex, remember an OFF against its INTENT.
         // This is local durable negative intent only; it is never reported as a remote OFF ACK.
-        val offer = synchronized(commandAdmission) {
+        val offer = admitCommand(first, completion)
+        launchAdmittedCommand(first, offer, completion)
+    }
+
+    private fun admitCommand(first: DaemonAppCommand, completion: DaemonFcmCommandCompletion?) = synchronized(commandAdmission) {
             commandAdmission.offer(first).also { offered ->
                 if (offered == DaemonAppCommandAdmission.Offer.START && completion != null) fcmConfirmation = completion
                 if (first.disabling && offered != DaemonAppCommandAdmission.Offer.REJECTED)
                     fcmConfirmation?.finish(DaemonFcmCommandOutcome.REJECTED, DaemonFcmCommandReason.STOP_REQUESTED)
             }
         }
+
+    private fun launchAdmittedCommand(first: DaemonAppCommand, offer: DaemonAppCommandAdmission.Offer,
+        completion: DaemonFcmCommandCompletion?) {
         if (first.disabling && offer != DaemonAppCommandAdmission.Offer.REJECTED) retainMigrationStop(first)
         if (offer != DaemonAppCommandAdmission.Offer.START) {
-            completion?.finish(DaemonFcmCommandOutcome.REJECTED, DaemonFcmCommandReason.BUSY)
+            completion?.notStaged(DaemonFcmPreparationFailure(DaemonFcmPreparationReason.CLIENT_BUSY), DaemonFcmCommandReason.BUSY)
             return
         }
         publishBusy(true)
@@ -350,10 +475,16 @@ internal object DaemonAppRuntime {
         try {
             // Reserve time for one reconciliation of this exact request after a lost reply.
             withTimeout(65_000) { control.withLock { executeCommandLocked(request, completion) } }
+        } catch (failure: DaemonFcmNotStagedException) {
+            // The exact response proves THIS activation never reached positive proposal staging.
+            // Reopen only the existing committed owner; do not generate a replacement FCM request.
+            if (runCatching { withTimeout(20_000) { control.withLock { restoreLocked() } } }.isFailure) unavailable()
+            completion.notStaged(failure.failure)
         } catch (_: Exception) {
             if (!completion.hasExpectation()) {
                 unavailable()
-                completion.finish(DaemonFcmCommandOutcome.FAILED, DaemonFcmCommandReason.PREPARATION)
+                completion.notStaged(DaemonFcmPreparationFailure(DaemonFcmPreparationReason.PREPARATION_UNAVAILABLE),
+                    DaemonFcmCommandReason.PREPARATION)
             } else try {
                 withTimeout(20_000) { control.withLock {
                     restoreLocked()

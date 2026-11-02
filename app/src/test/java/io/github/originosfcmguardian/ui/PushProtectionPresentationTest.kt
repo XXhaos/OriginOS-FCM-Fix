@@ -1,12 +1,6 @@
 package io.github.originosfcmguardian.ui
 
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
-import io.github.originosfcmguardian.core.gms.GcmConnectionState
-import io.github.originosfcmguardian.core.gms.GcmServiceSource
-import io.github.originosfcmguardian.core.gms.GmsConnectionObservation
-import io.github.originosfcmguardian.core.gms.GmsUnknown
-import io.github.originosfcmguardian.core.gms.SocketSource
-import io.github.originosfcmguardian.core.gms.SourceCompleteness
 import io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState
 import io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState
 import io.github.originosfcmguardian.fcmprotection.FcmProtectionConfirmationFailure
@@ -17,76 +11,6 @@ class PushProtectionPresentationTest {
     private val ready = HomeUiState(recoveryFirmwareSupported = true,
         targetSelectionLoadState = HomeSourceLoadState.LOADED,
         stoppedRecovery = StoppedRecoveryUiState(loaded = true))
-
-    private fun sample(elapsed: Long = 1_000, sourceElapsed: Long = elapsed,
-        connection: GcmConnectionState = GcmConnectionState.REPORTED_CONNECTED, duration: Long? = 3_661_000) =
-        GmsConnectionObservation.Sample(requestId = 1, uid = 10208, versionCode = 1,
-            firstInstallTime = 1, lastUpdateTime = 1, signerSha256 = "a".repeat(64),
-            bootId = "11111111-2222-3333-4444-555555555555", observedAtMillis = 2_000,
-            elapsedRealtimeMillis = elapsed, tcp = SocketSource(SourceCompleteness.COMPLETE, true),
-            tcp6 = SocketSource(SourceCompleteness.COMPLETE, true), receiverInspectionComplete = false,
-            receivers = emptyList(), gcmService = GcmServiceSource(connection, SourceCompleteness.COMPLETE,
-                observedAtMillis = 2_000, elapsedRealtimeMillis = sourceElapsed, userId = 0,
-                connectedDurationMillis = duration.takeIf { connection == GcmConnectionState.REPORTED_CONNECTED }))
-
-    @Test fun freshConnectedClockAdvancesLocallyOnlyWithinSourceFreshness() {
-        val selection = FcmInlineSelection(sample(), busy = false)
-        assertEquals("01:01:01", pushConnectionClock(selection, 1_000).duration)
-        assertEquals("01:01:02", pushConnectionClock(selection, 2_000).duration)
-        assertEquals("01:01:31", pushConnectionClock(selection, 31_000).duration)
-        assertNull(pushConnectionClock(selection, 31_001).duration)
-        assertNull(pushConnectionClock(selection, 999).duration)
-        assertFalse(pushConnectionClock(selection, 31_001).message!!.contains("更新于"))
-    }
-
-    @Test fun neitherFreshOuterNorFreshServiceCanRescueItsStaleCounterpart() {
-        listOf(sample(elapsed = 31_001, sourceElapsed = 1_000),
-            sample(elapsed = 1_000, sourceElapsed = 31_001)).forEach {
-            assertNull(pushConnectionClock(FcmInlineSelection(it, busy = false), 31_001).duration)
-        }
-    }
-
-    @Test fun networkUncertaintyRemovesTheClockImmediately() {
-        val selection = FcmInlineSelection(sample(), busy = false)
-        listOf(selection.copy(networkInvalid = true),
-            selection.copy(networkTrackingUnavailable = true)).forEach {
-            assertNull(pushConnectionClock(it, 2_000).duration)
-        }
-    }
-
-    @Test fun pendingRefreshRetainsOnlyFreshNetworkValidCompletedEvidence() {
-        val direct = GmsConnectionUiState(readAttempted = true, busy = true, observation = sample(),
-            readCompletedAtElapsedMillis = 1_000, networkKey = "network", networkTrackingAvailable = true)
-        val selection = selectPushConnection(direct, null)
-        assertFalse(selection.busy)
-        assertEquals("01:01:02", pushConnectionClock(selection, 2_000).duration)
-        assertNull(pushConnectionClock(selection, 31_001).duration)
-        listOf(direct.copy(networkChanged = true), direct.copy(networkTrackingAvailable = false),
-            direct.copy(networkKey = "unknown")).forEach {
-            assertNull(pushConnectionClock(selectPushConnection(it, null), 2_000).duration)
-        }
-    }
-
-    @Test fun failedDirectReadCannotFallBackToOlderAutomaticClock() {
-        val failed = GmsConnectionObservation.Unknown(2, GmsUnknown.TIMED_OUT)
-        val direct = GmsConnectionUiState(readAttempted = true, observation = failed,
-            readCompletedAtElapsedMillis = 2_000, networkKey = "network", networkTrackingAvailable = true)
-        val clock = pushConnectionClock(selectPushConnection(direct, sample()), 2_000)
-        assertNull(clock.duration)
-        assertEquals("FCM 连接暂不可读取。", clock.message)
-    }
-
-    @Test fun incompleteDisconnectedAbsentOrUnknownDurationNeverInventsAClock() {
-        val connected = sample()
-        listOf(sample(connection = GcmConnectionState.REPORTED_DISCONNECTED),
-            sample(connection = GcmConnectionState.SERVICE_ABSENT), sample(duration = null),
-            connected.copy(gcmService = GcmServiceSource.unavailable()),
-            connected.copy(gcmService = GcmServiceSource(GcmConnectionState.UNKNOWN, SourceCompleteness.PARTIAL,
-                observedAtMillis = 2_000, elapsedRealtimeMillis = 1_000, userId = 0))).forEach {
-            assertNull(pushConnectionClock(FcmInlineSelection(it, busy = false), 2_000).duration)
-        }
-        assertNull(pushConnectionClock(FcmInlineSelection(sample(duration = Long.MAX_VALUE), busy = false), 2_000).duration)
-    }
 
     @Test fun offRemainsReachableDuringWaitFailureAndAnInFlightCombinedCommand() {
         val on = ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true))
@@ -107,7 +31,8 @@ class PushProtectionPresentationTest {
     @Test fun rejectedOrDuplicateOnNeverDispatchesOffOrAnotherOn() {
         val blocked = listOf(ready.copy(pushProtectionBusy = true),
             ready.copy(automaticProtection = AutomaticProtectionState(busy = true)),
-            ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true)),
+            ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true),
+                fcmProtection = FcmProtectionUiState(configured = true)),
             ready.copy(fcmProtection = FcmProtectionUiState(busy = true)),
             ready.copy(fcmProtection = FcmProtectionUiState(maintenance = FcmMaintenanceState.STOP_PENDING)))
         blocked.forEach { state ->
@@ -119,15 +44,19 @@ class PushProtectionPresentationTest {
         assertTrue(ready.automaticProtection.configuredIdentities.isEmpty())
     }
 
-    @Test fun completionActionIsOnlyForMissingFcmConsent() {
+    @Test fun unifiedSwitchRetainsPendingIntentAndAllowsOldIncompleteSetupToBeEnabled() {
         val on = ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true))
-        assertTrue(canCompletePushProtection(on))
-        assertFalse(canCompletePushProtection(on.copy(fcmProtection = FcmProtectionUiState(
-            configured = true, requiresConfirmation = true))))
-        assertFalse(canCompletePushProtection(ready))
-        assertFalse(canCompletePushProtection(on.copy(pushProtectionBusy = true)))
-        assertFalse(canCompletePushProtection(on.copy(fcmProtection = FcmProtectionUiState(storageBlocked = true))))
-        assertFalse(canCompletePushProtection(on.copy(fcmProtection = FcmProtectionUiState(
+        assertFalse(pushProtectionRequested(on))
+        var enabled = 0
+        dispatchPushProtectionToggle(on, true, { enabled++ }, { fail("ON must not dispatch OFF") })
+        assertEquals(1, enabled)
+        val pending = on.copy(pushActivation = io.github.originosfcmguardian.pushactivation.PushActivationUiState(pending = true))
+        assertTrue(pushProtectionRequested(pending))
+        dispatchPushProtectionToggle(pending, true, { fail("Pending intent is not another opt-in") }, { fail("ON must not dispatch OFF") })
+        var disabled = 0
+        dispatchPushProtectionToggle(pending, false, { fail("OFF must not dispatch ON") }, { disabled++ })
+        assertEquals(1, disabled)
+        assertTrue(pushProtectionRequested(on.copy(fcmProtection = FcmProtectionUiState(
             configured = true, maintenance = FcmMaintenanceState.WAITING_HOST))))
         assertEquals("等待 Shizuku", pushProtectionStatus(on.copy(
             automaticProtection = on.automaticProtection.copy(waitingForPrivilege = true))))
@@ -140,7 +69,7 @@ class PushProtectionPresentationTest {
             configured.copy(storageBlocked = true), configured.copy(maintenance = FcmMaintenanceState.RECONFIRM),
             configured.copy(confirmationFailure = FcmProtectionConfirmationFailure.READ_UNAVAILABLE)).forEach { fcm ->
             val state = on.copy(fcmProtection = fcm)
-            assertFalse(canCompletePushProtection(state))
+            assertTrue(pushProtectionRequested(state))
             assertEquals(PushProtectionEnableAction.NONE, pushProtectionEnableAction(state))
             assertEquals("FCM 保护暂不可用", pushProtectionStatus(state))
             assertFalse(fcmProtectionGuidance(fcm).contains("重新确认"))

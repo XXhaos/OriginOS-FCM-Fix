@@ -76,32 +76,18 @@ internal class SystemDaemonOwnerEnvironmentReadPort : DaemonOwnerEnvironmentRead
             val own = exit.processName == GUARDIAN_PACKAGE_NAME ||
                 exit.processName.startsWith("$GUARDIAN_PACKAGE_NAME:")
             check(own)
-            val main = exit.processName == GUARDIAN_PACKAGE_NAME
-            val reason = when {
-                exit.reason == ApplicationExitInfo.REASON_USER_REQUESTED -> StartupExitReason.USER_REQUESTED
-                exit.reason == ApplicationExitInfo.REASON_USER_STOPPED -> StartupExitReason.USER_STOPPED
-                main && exit.reason == ApplicationExitInfo.REASON_CRASH -> StartupExitReason.CRASH
-                main && exit.reason == ApplicationExitInfo.REASON_CRASH_NATIVE -> StartupExitReason.CRASH_NATIVE
-                main && exit.reason == ApplicationExitInfo.REASON_ANR -> StartupExitReason.ANR
-                main && exit.reason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> StartupExitReason.INITIALIZATION_FAILURE
-                else -> StartupExitReason.OTHER
+            daemonGuardianExit(exit.reason, exit.processName == GUARDIAN_PACKAGE_NAME, exit.timestamp) {
+                requestedExitDetail(exit)
             }
-            DaemonGuardianExit(reason, exit.timestamp, if (reason == StartupExitReason.USER_REQUESTED)
-                requestedExitDetail(exit) else DaemonRequestedExitDetail.UNKNOWN)
         }
     }
 
     private fun requestedExitDetail(exit: ApplicationExitInfo): DaemonRequestedExitDetail {
         // Symbolic platform values, not hardcoded OEM subreason numbers. Missing metadata is unknown.
         val subReason = runCatching { ApplicationExitInfo::class.java.getMethod("getSubReason")
-            .invoke(exit) as? Int }.getOrNull() ?: return DaemonRequestedExitDetail.UNKNOWN
-        fun matches(name: String) = runCatching {
-            ApplicationExitInfo::class.java.getField(name).getInt(null) == subReason
-        }.getOrDefault(false)
-        return when {
-            matches("SUBREASON_REMOVE_TASK") -> DaemonRequestedExitDetail.REMOVE_TASK
-            matches("SUBREASON_FORCE_STOP") || matches("SUBREASON_STOP_APP") -> DaemonRequestedExitDetail.EXPLICIT_STOP
-            else -> DaemonRequestedExitDetail.UNKNOWN
+            .invoke(exit) as? Int }.getOrNull()
+        return daemonRequestedExitDetail(subReason) { name ->
+            runCatching { ApplicationExitInfo::class.java.getField(name).getInt(null) }.getOrNull()
         }
     }
 
@@ -117,5 +103,32 @@ internal class SystemDaemonOwnerEnvironmentReadPort : DaemonOwnerEnvironmentRead
 
     internal companion object {
         const val SHIZUKU_RUNTIME_PERMISSION = "moe.shizuku.manager.permission.API_V23"
+    }
+}
+
+/** Pure classification after the system package/UID checks; descriptions never grant an exception. */
+internal fun daemonGuardianExit(rawReason: Int, mainProcess: Boolean, timestampMillis: Long,
+    requestedDetail: () -> DaemonRequestedExitDetail = { DaemonRequestedExitDetail.UNKNOWN }): DaemonGuardianExit {
+    val reason = when {
+        rawReason == ApplicationExitInfo.REASON_USER_REQUESTED -> StartupExitReason.USER_REQUESTED
+        rawReason == ApplicationExitInfo.REASON_USER_STOPPED -> StartupExitReason.USER_STOPPED
+        mainProcess && rawReason == ApplicationExitInfo.REASON_CRASH -> StartupExitReason.CRASH
+        mainProcess && rawReason == ApplicationExitInfo.REASON_CRASH_NATIVE -> StartupExitReason.CRASH_NATIVE
+        mainProcess && rawReason == ApplicationExitInfo.REASON_ANR -> StartupExitReason.ANR
+        mainProcess && rawReason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> StartupExitReason.INITIALIZATION_FAILURE
+        else -> StartupExitReason.OTHER
+    }
+    return DaemonGuardianExit(reason, timestampMillis, if (reason == StartupExitReason.USER_REQUESTED)
+        requestedDetail() else DaemonRequestedExitDetail.UNKNOWN)
+}
+
+internal fun daemonRequestedExitDetail(subReason: Int?, platformValue: (String) -> Int?): DaemonRequestedExitDetail {
+    if (subReason == null) return DaemonRequestedExitDetail.UNKNOWN
+    fun matches(name: String) = platformValue(name) == subReason
+    return when {
+        matches("SUBREASON_FORCE_STOP") || matches("SUBREASON_STOP_APP") -> DaemonRequestedExitDetail.EXPLICIT_STOP
+        matches("SUBREASON_REMOVE_TASK") -> DaemonRequestedExitDetail.REMOVE_TASK
+        matches("SUBREASON_KILL_BACKGROUND") -> DaemonRequestedExitDetail.KILL_BACKGROUND
+        else -> DaemonRequestedExitDetail.UNKNOWN
     }
 }

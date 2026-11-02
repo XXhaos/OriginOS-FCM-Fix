@@ -1,48 +1,15 @@
 package io.github.originosfcmguardian.ui
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
+import androidx.compose.ui.Modifier
 
-/** One compact export entry; opening or dismissing the format choice does not prepare a report. */
+/** A single JSON export; preparing it never changes protection state. */
 @Composable
-internal fun DiagnosticReportExportButton(busy: Boolean, onExport: (DiagnosticReportFormat) -> Unit) {
-    var choosingFormat by rememberSaveable { mutableStateOf(false) }
-    OutlinedButton(onClick = { choosingFormat = true }, enabled = !busy) {
-        Text(if (busy) "正在准备…" else "导出诊断报告")
-    }
-    if (choosingFormat) {
-        AlertDialog(
-            onDismissRequest = { choosingFormat = false },
-            title = { Text("选择报告格式") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("报告包含机型、所选应用及运行状态，分享前请检查并移除不希望公开的信息。")
-                    OutlinedButton(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.small, enabled = !busy, onClick = {
-                        choosingFormat = false
-                        onExport(DiagnosticReportFormat.JSON)
-                    }) { Text("JSON（结构化）") }
-                    OutlinedButton(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.small, enabled = !busy, onClick = {
-                        choosingFormat = false
-                        onExport(DiagnosticReportFormat.MARKDOWN)
-                    }) { Text("Markdown（便于阅读）") }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { choosingFormat = false }) { Text("取消") } },
-        )
+internal fun DiagnosticReportExportButton(busy: Boolean, modifier: Modifier = Modifier, onExport: () -> Unit) {
+    OutlinedButton(onClick = onExport, enabled = !busy, modifier = modifier, shape = MaterialTheme.shapes.small) {
+        Text(if (busy) "正在准备…" else "导出日志", style = MaterialTheme.typography.labelMedium)
     }
 }

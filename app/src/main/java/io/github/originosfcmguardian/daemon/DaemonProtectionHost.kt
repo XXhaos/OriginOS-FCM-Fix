@@ -205,24 +205,54 @@ internal class DaemonProtectionHost(
         qualifiedHistoricalCaller: GmsHeartbeatCallerIdentity): DaemonPointerChallenge? =
         stageInternal(caller, expected, requestId, null, qualifiedHistoricalCaller)
 
+    /** Null alone is not a no-stage proof: the root staging operation may already have committed. */
+    fun stageFcmOnDetailed(caller: DaemonCallerEvidence, expected: DaemonControlRecord, requestId: String,
+        qualifiedHistoricalCaller: GmsHeartbeatCallerIdentity): DaemonFcmStageAttempt {
+        var failure: DaemonFcmPreparationFailure? = null
+        val challenge = stageInternal(caller, expected, requestId, null, qualifiedHistoricalCaller) { failure = it }
+        return DaemonFcmStageAttempt(challenge, failure)
+    }
+
+    /** A duplicate/lost-reply request must not acquire a no-stage proof over an existing proposal. */
+    fun fcmNotStagedProof(caller: DaemonCallerEvidence, expected: DaemonControlRecord, requestId: String): Boolean {
+        requireCaller(caller)
+        return runCatching {
+            val current = root.snapshot()
+            current.control == expected && current.halt == null &&
+                current.bytes(DaemonDomainRole.CONTROL_PROPOSAL) == null &&
+                current.receipts.none { it.request.requestId == requestId }
+        }.getOrDefault(false)
+    }
+
     /** A null command is the fixed FCM-on request; all observation material comes from this host. */
     private fun stageInternal(caller: DaemonCallerEvidence, expected: DaemonControlRecord, requestId: String,
-        command: DaemonProtectionCommand?, qualifiedHistoricalCaller: GmsHeartbeatCallerIdentity?): DaemonPointerChallenge? {
+        command: DaemonProtectionCommand?, qualifiedHistoricalCaller: GmsHeartbeatCallerIdentity?,
+        declined: (DaemonFcmPreparationFailure) -> Unit = {}): DaemonPointerChallenge? {
         requireCaller(caller)
+        fun decline(reason: DaemonFcmPreparationReason, unknown: GmsUnknown? = null): DaemonPointerChallenge? {
+            if ((command == null || command is DaemonProtectionCommand.FcmOn) && fcmNotStagedProof(caller, expected, requestId))
+                declined(DaemonFcmPreparationFailure(reason, unknown))
+            return null
+        }
         val serializePrepared = expected.mode == DaemonControlMode.PREPARED
-        if (serializePrepared && !applyBusy.compareAndSet(false, true)) return null
+        if (serializePrepared && !applyBusy.compareAndSet(false, true)) return decline(DaemonFcmPreparationReason.CONTROL_BUSY)
         controlReads.incrementAndGet()
         try {
-            if (closing.get()) return null
+            if (closing.get()) return decline(DaemonFcmPreparationReason.CLOSING)
             val live = checkNotNull(runtime.get())
             val challengeVersion = invalidateMigrationChallenge(live.owner.snapshot())
             captureHistorical(caller, qualifiedHistoricalCaller)
-            if (!closeAdmission(live, caller, expected)) return null
+            if (!closeAdmission(live, caller, expected)) return decline(DaemonFcmPreparationReason.OWNER_NOT_READY)
             live.fcm.controlCommitted()
-            if ((command == null || command is DaemonProtectionCommand.FcmOn) && !live.fcm.isControlQuiescent()) return null
+            if ((command == null || command is DaemonProtectionCommand.FcmOn) && !live.fcm.isControlQuiescent())
+                return decline(DaemonFcmPreparationReason.FCM_BUSY)
             val snapshot = root.snapshot()
-            if (snapshot.control != expected) return null
-            val clock = readCommandClock()
+            if (snapshot.control != expected) return decline(DaemonFcmPreparationReason.REVISION_CHANGED)
+            val clock = try { readCommandClock() } catch (failure: Exception) {
+                if (command == null || command is DaemonProtectionCommand.FcmOn)
+                    return decline(DaemonFcmPreparationReason.CLOCK_UNAVAILABLE)
+                throw failure
+            }
             val enabling = command != DaemonProtectionCommand.MasterOff && command != DaemonProtectionCommand.FcmOff &&
                 command !is DaemonProtectionCommand.TargetOff
             if (enabling) {
@@ -230,26 +260,35 @@ internal class DaemonProtectionHost(
                 // Reconcile/resume and all other enabling commands keep the durable old epoch.
                 val enabledAt = if (command == DaemonProtectionCommand.MasterOn) clock.epoch
                     else DaemonHeartbeatDerivation.masterEnabledAt(snapshot) ?: clock.epoch
-                if (environment.read(guardian, bootId, enabledAt, closing::get) != DaemonOwnerEnvironmentStatus.READY) return null
+                if (environment.read(guardian, bootId, enabledAt, closing::get) != DaemonOwnerEnvironmentStatus.READY)
+                    return decline(DaemonFcmPreparationReason.ENVIRONMENT_NOT_READY)
             }
             val actualCommand = if (command == null || command is DaemonProtectionCommand.FcmOn) {
-                val historical = qualifiedHistoricalCaller ?: return null
-                val sample = fcmShell.read(ids.incrementAndGet(), closing::get) as? GmsConnectionObservation.Sample ?: return null
+                val historical = qualifiedHistoricalCaller ?: return decline(DaemonFcmPreparationReason.CALLER_UNAVAILABLE)
+                val observation = try { fcmShell.read(ids.incrementAndGet(), closing::get) } catch (_: Exception) {
+                    return decline(DaemonFcmPreparationReason.READ_UNAVAILABLE, GmsUnknown.BRIDGE_UNAVAILABLE)
+                }
+                val sample = observation as? GmsConnectionObservation.Sample ?: return decline(
+                    DaemonFcmPreparationReason.READ_UNAVAILABLE, (observation as? GmsConnectionObservation.Unknown)?.reason)
                 DaemonProtectionCommand.FcmOn(sample, historical)
             } else command
             val ready = if (actualCommand is DaemonProtectionCommand.FcmOn)
                 runCatching(recoveryReady).getOrDefault(false) else false
+            if (actualCommand is DaemonProtectionCommand.FcmOn && !ready) return decline(DaemonFcmPreparationReason.RECOVERY_UNAVAILABLE)
             val context = DaemonControlCommandContext(clock, fingerprint(), elapsed(), explicitConfirmation = true,
                 fcmRecoveryReady = ready, fcmHeartbeatClosure = if (actualCommand is DaemonProtectionCommand.FcmOn)
                     live.fcm.confirmationClosure(snapshot) else null)
             if (actualCommand == DaemonProtectionCommand.MasterOff && expected.mode == DaemonControlMode.PREPARED)
                 return stagePreparedMasterOff(caller, live, snapshot, requestId, context, challengeVersion)
-            val ordinary = planner.plan(snapshot, expected, requestId, actualCommand, context) ?: return null
+            if (actualCommand is DaemonProtectionCommand.FcmOn && !FcmRecoveryPolicy.qualified(actualCommand.sample, context.nowElapsed))
+                return decline(DaemonFcmPreparationReason.READ_UNQUALIFIED)
+            val ordinary = planner.plan(snapshot, expected, requestId, actualCommand, context)
+                ?: return decline(DaemonFcmPreparationReason.PLANNER_DECLINED)
             val grant = if (actualCommand == DaemonProtectionCommand.Activate || actualCommand is DaemonProtectionCommand.FcmOn)
                 historicalCaller.get()?.let { historical ->
                     DaemonHeartbeatDerivation.prepare(projectDaemonControl(snapshot, ordinary), ordinary.next, historical)
                 } else null
-            if (actualCommand is DaemonProtectionCommand.FcmOn && grant == null) return null
+            if (actualCommand is DaemonProtectionCommand.FcmOn && grant == null) return decline(DaemonFcmPreparationReason.DERIVATION_UNAVAILABLE)
             val plan = if (grant == null) ordinary else DaemonControlTransitionPlan(ordinary.requestId,
                 ordinary.expected, ordinary.next, ordinary.transition, ordinary.patch(), nativeHeartbeatDerivation = grant)
             issuedPlan.set(DaemonControlProposalCodec.encode(plan))
@@ -714,8 +753,8 @@ internal class DaemonProtectionHost(
                 if (enabledAt == null) Lifecycle.READY else when (environment.read(guardian, bootId, enabledAt, closing::get)) {
                     DaemonOwnerEnvironmentStatus.READY -> Lifecycle.READY
                     DaemonOwnerEnvironmentStatus.USER_STOPPED -> {
-                        // A currently usable principal may explicitly confirm ON again. Historical
-                        // stop must block automatic restore, but cannot permanently brick its host.
+                        // A newly observed stop must block this opportunity. A later fully
+                        // qualified, unstopped principal can resume its unchanged saved intent.
                         runtime.get()?.let { live ->
                             live.owner.snapshot()?.let { expected ->
                                 closeAdmission(live, DaemonCallerEvidence(guardian.identity.uid, guardian), expected)

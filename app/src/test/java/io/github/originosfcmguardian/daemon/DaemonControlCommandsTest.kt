@@ -197,6 +197,85 @@ class DaemonControlCommandsTest {
             kernelBootId = "aaaaaaaa-89ab-cdef-0123-456789abcdef")), context))
     }
 
+    @Test fun offBeforeFirstHeartbeatAllowsExplicitOnAndNativeChildInitialization() {
+        val firstOff = snapshot(extras = mapOf(
+            DaemonDomainRole.FCM_PROTECTION to FcmProtectionCodec.encode(FcmProtectionConsent()),
+            DaemonDomainRole.STOPPED_JOURNAL to null, DaemonDomainRole.FCM_EPISODES to null))
+        assertNull(firstOff.bytes(DaemonDomainRole.HEARTBEAT))
+        assertNull(firstOff.bytes(DaemonDomainRole.HEARTBEAT_INITIALIZED))
+        val offPlan = requireNotNull(planner().plan(firstOff, firstOff.control, "first-off",
+            DaemonProtectionCommand.FcmOff, context))
+        val off = projectDaemonControl(firstOff, offPlan)
+        assertArrayEquals(byteArrayOf(1), off.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+        assertNull(off.bytes(DaemonDomainRole.HEARTBEAT))
+        assertNull(off.bytes(DaemonDomainRole.HEARTBEAT_INITIALIZED))
+
+        val onPlan = requireNotNull(planner().plan(off, off.control, "explicit-on",
+            DaemonProtectionCommand.FcmOn(sample, historical), context))
+        assertTrue(onPlan.patch().containsKey(DaemonDomainRole.HEARTBEAT_HALT))
+        assertNull(onPlan.patch()[DaemonDomainRole.HEARTBEAT_HALT])
+        assertFalse(onPlan.patch().containsKey(DaemonDomainRole.HEARTBEAT))
+        assertFalse(onPlan.patch().containsKey(DaemonDomainRole.HEARTBEAT_INITIALIZED))
+        val on = projectDaemonControl(off, onPlan)
+        val grant = requireNotNull(DaemonHeartbeatDerivation.prepare(on, on.control, historical))
+        val permitted = DaemonProtectionRootSnapshot(on.control,
+            on.domains() + (DaemonDomainRole.HEARTBEAT_DERIVATION to grant), on.receipts, on.halt, on.dataRevision)
+        val child = requireNotNull(DaemonHeartbeatDerivation.materialize(permitted, permitted.control,
+            sample, boot, context.nowElapsed, context.nowElapsed, 1_000)).first
+        assertTrue(child.configured)
+        assertEquals(HeartbeatPause.WAITING_HOST, child.pause)
+        assertEquals(authority, nextAuthority(onPlan, off))
+    }
+
+    @Test fun absentChildHaltCannotHideInitializedPendingMalformedOrUnknownState() {
+        val offPlan = planned(DaemonProtectionCommand.FcmOff)
+        val off = projectDaemonControl(snapshot(), offPlan)
+        val command = DaemonProtectionCommand.FcmOn(sample, historical)
+        val uncertain = listOf(
+            mapOf(DaemonDomainRole.HEARTBEAT_INITIALIZED to byteArrayOf(1)),
+            mapOf(DaemonDomainRole.HEARTBEAT_PENDING to byteArrayOf(1)),
+            mapOf(DaemonDomainRole.HEARTBEAT_HALT to byteArrayOf(0)),
+            mapOf(DaemonDomainRole.HEARTBEAT_HALT to byteArrayOf()),
+            mapOf(DaemonDomainRole.HEARTBEAT to byteArrayOf(1, 2, 3)),
+            mapOf(DaemonDomainRole.HEARTBEAT to HeartbeatSnapshotCodec.encode(HeartbeatSnapshot(1, false,
+                pause = HeartbeatPause.OFF_PENDING)), DaemonDomainRole.HEARTBEAT_INITIALIZED to byteArrayOf(1)),
+            mapOf(DaemonDomainRole.HEARTBEAT to HeartbeatSnapshotCodec.encode(HeartbeatSnapshot(1, false,
+                lastStatus = GmsHeartbeatStatus.UNKNOWN, lastReason = GmsHeartbeatReason.BRIDGE_UNAVAILABLE)),
+                DaemonDomainRole.HEARTBEAT_INITIALIZED to byteArrayOf(1)),
+        )
+        uncertain.forEach { extra ->
+            val bad = DaemonProtectionRootSnapshot(off.control, off.domains() + extra)
+            assertNull(planner().plan(bad, bad.control, "must-stay-blocked", command, context))
+        }
+        // An oversized halt cannot enter a root snapshot; its structural fence precedes planning.
+        assertThrows(IllegalArgumentException::class.java) {
+            DaemonProtectionRootSnapshot(off.control,
+                off.domains() + (DaemonDomainRole.HEARTBEAT_HALT to byteArrayOf(1, 1)))
+        }
+        assertNull(planner().plan(off, off.control, "not-explicit", command, context.copy(explicitConfirmation = false)))
+        assertNull(planner().plan(off, off.control, "not-qualified", command, context.copy(fcmRecoveryReady = false)))
+    }
+
+    @Test fun settledExistingChildWithCanonicalOffHaltKeepsItsNativeReconfirmationPath() {
+        val old = HeartbeatSnapshot(3, false)
+        val base = snapshot(extras = mapOf(
+            DaemonDomainRole.HEARTBEAT to HeartbeatSnapshotCodec.encode(old),
+            DaemonDomainRole.HEARTBEAT_INITIALIZED to byteArrayOf(1),
+            DaemonDomainRole.HEARTBEAT_HALT to byteArrayOf(1),
+            DaemonDomainRole.STOPPED_JOURNAL to null, DaemonDomainRole.FCM_EPISODES to null))
+        val onPlan = planned(DaemonProtectionCommand.FcmOn(sample, historical), base)
+        assertFalse(onPlan.patch().containsKey(DaemonDomainRole.HEARTBEAT))
+        val on = projectDaemonControl(base, onPlan)
+        val grant = requireNotNull(DaemonHeartbeatDerivation.prepare(on, on.control, historical))
+        val permitted = DaemonProtectionRootSnapshot(on.control,
+            on.domains() + (DaemonDomainRole.HEARTBEAT_DERIVATION to grant), on.receipts, on.halt, on.dataRevision)
+        val materialized = requireNotNull(DaemonHeartbeatDerivation.materialize(permitted, permitted.control,
+            sample, boot, context.nowElapsed, context.nowElapsed, 1_000))
+        assertEquals(4L, materialized.first.generation)
+        assertTrue(materialized.first.configured)
+        assertNull(materialized.second.bytes(DaemonDomainRole.HEARTBEAT_HALT))
+    }
+
     @Test fun fcmOffRetainsPendingRuntimeEvidenceAndMasterAndAppChoices() {
         val heartbeat = HeartbeatSnapshot(8, true, pendingAttempt = epoch, bindingDigest = "b".repeat(64),
             remoteSessionId = epoch, schemaVersion = 3, durableConsent = HeartbeatDurableConsent(3, epoch, 0, "b".repeat(64)),

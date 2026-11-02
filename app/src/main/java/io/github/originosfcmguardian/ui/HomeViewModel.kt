@@ -41,10 +41,10 @@ import io.github.originosfcmguardian.daemon.DaemonFcmCommandReason
 import io.github.originosfcmguardian.daemon.DaemonUiSnapshot
 import io.github.originosfcmguardian.diagnostics.CombinedDiagnosticExportResult
 import io.github.originosfcmguardian.diagnostics.DiagnosticEnvironment
-import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
 import io.github.originosfcmguardian.diagnostics.PreparedCombinedDiagnosticExport
 import io.github.originosfcmguardian.diagnostics.buildCombinedDiagnosticReport
 import io.github.originosfcmguardian.diagnostics.encodeDiagnosticReport
+import io.github.originosfcmguardian.diagnostics.sanitizeDiagnosticReportForExport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -99,6 +99,7 @@ data class HomeUiState(
     val fcmProtection: io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(),
     val fcmProtectionConfirmation: Boolean = false,
     val pushProtectionBusy: Boolean = false,
+    val pushActivation: io.github.originosfcmguardian.pushactivation.PushActivationUiState = io.github.originosfcmguardian.pushactivation.PushActivationUiState(),
     val pushProtectionMessage: String? = null,
     val automaticProtectionFromDaemon: Boolean = false,
 )
@@ -218,44 +219,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
         val action = ++pushProtectionAction
         _uiState.update { it.copy(pushProtectionBusy = true, pushProtectionMessage = null) }
-        pushProtectionJob = viewModelScope.launch {
+        pushProtectionJob = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             try {
-                if (!_uiState.value.automaticProtection.masterEnabled) {
-                    if (!canEnableAutomaticProtection(_uiState.value)) {
-                        _uiState.update { it.copy(pushProtectionMessage = "暂时无法开启，请稍后重试。") }
-                        return@launch
-                    }
-                    requestAutomaticProtection()
-                }
-                // Both commands are asynchronous. Observe actual readiness instead of racing
-                // enableFcm against the command gate or treating a delay as an acknowledgement.
-                val host = awaitPushProtectionHost(uiState)
-                coroutineContext.ensureActive()
-                if (action != pushProtectionAction || !recoveryUiActive) return@launch
-                if (host == null || !pushProtectionHostReady(host)) {
-                    _uiState.update { it.copy(pushProtectionMessage = if (it.automaticProtection.configuredIdentities.isEmpty())
-                        "请先在应用页选择需要保护的应用。" else "等待 Shizuku 和保护服务就绪后，请完成开启。") }
-                    return@launch
-                }
-                if (host.fcmProtection.configured) return@launch
-                if (remoteOwned()) {
-                    val completed = DaemonAppRuntime.enableFcm(getApplication()).await()
-                    coroutineContext.ensureActive()
-                    if (action != pushProtectionAction || !recoveryUiActive) return@launch
-                    val message = if (_uiState.value.fcmProtection.configured && completed.outcome != DaemonFcmCommandOutcome.APPLIED)
-                        "FCM 保护暂不可用，请查看保护状态。" else when (completed.outcome) {
-                        DaemonFcmCommandOutcome.APPLIED -> null
-                        DaemonFcmCommandOutcome.REJECTED -> if (completed.reason == DaemonFcmCommandReason.STOP_REQUESTED)
-                            "已取消开启，请查看关闭结果。" else "此次开启未受理，请稍后重新确认。"
-                        DaemonFcmCommandOutcome.FAILED -> "此次开启未完成，请检查连接和保护状态后重新确认。"
-                        DaemonFcmCommandOutcome.UNKNOWN -> "此次开启结果暂无法确认，请刷新保护状态后再操作。"
-                    }
-                    _uiState.update { it.copy(pushProtectionMessage = message) }
-                } else {
-                    withContext(Dispatchers.IO) {
-                        io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.confirm(getApplication())
-                    }
-                }
+                // Only the explicit confirmation creates pending intent. Its owner is the
+                // process runtime, so a screen exit cannot abandon the actual activation.
+                val accepted = io.github.originosfcmguardian.pushactivation.PushActivationRuntime.confirmExplicit(getApplication())
+                if (action == pushProtectionAction && !accepted)
+                    _uiState.update { it.copy(pushProtectionMessage = "开启设置未能保存，请稍后重试。") }
             } finally {
                 if (action == pushProtectionAction) {
                     pushProtectionJob = null
@@ -294,19 +264,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         ensureGmsNetworkTracking()
         val generation = ++gmsConnectionGeneration
         val network = gmsNetworkContext(getApplication())
-        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true,
-            observation = it.gmsConnection.observation.takeIf { preserveObservation },
-            readAttempted = true, readCompletedAtElapsedMillis = it.gmsConnection.readCompletedAtElapsedMillis.takeIf { preserveObservation },
-            heartbeatBusy = false, heartbeatStatus = null,
-            networkBackground = network.summary,
-            networkKey = if (preserveObservation) it.gmsConnection.networkKey else network.key,
-            networkChanged = preserveObservation && (it.gmsConnection.networkChanged ||
-                it.gmsConnection.networkKey != null && it.gmsConnection.networkKey != network.key))) }
+        _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(busy = true)) }
+        fun admitted() {
+            if (generation == gmsConnectionGeneration) _uiState.update { it.copy(gmsConnection = it.gmsConnection.copy(
+                observation = it.gmsConnection.observation.takeIf { preserveObservation },
+                readAttempted = true, readCompletedAtElapsedMillis = it.gmsConnection.readCompletedAtElapsedMillis.takeIf { preserveObservation },
+                heartbeatBusy = false, heartbeatStatus = null,
+                networkBackground = network.summary,
+                networkKey = if (preserveObservation) it.gmsConnection.networkKey else network.key,
+                networkChanged = preserveObservation && (it.gmsConnection.networkChanged ||
+                    it.gmsConnection.networkKey != null && it.gmsConnection.networkKey != network.key))) }
+        }
         gmsConnectionJob = viewModelScope.launch {
             try {
-                val observation = if (remoteOwned()) DaemonAppRuntime.readGmsConnection(getApplication())
-                    else readDirectGmsConnection(generation) { shizukuRuntime.executor.readGmsConnection() }
+                val observation = if (remoteOwned()) {
+                    admitted(); DaemonAppRuntime.readGmsConnection(getApplication())
+                } else readDirectGmsConnection(generation) {
+                    admitted(); shizukuRuntime.executor.readGmsConnection()
+                }
                 coroutineContext.ensureActive()
+                if (observation == null) return@launch // A confirmation owns the interactive lane.
                 val changed = network.key == "unknown" || network.key != gmsNetworkContext(getApplication()).key
                 if (generation == gmsConnectionGeneration) _uiState.update {
                     it.copy(gmsConnection = it.gmsConnection.copy(observation = observation,
@@ -360,6 +337,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         if (!remoteOwned()) io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.initialize(application)
+        io.github.originosfcmguardian.pushactivation.PushActivationRuntime.initialize(application)
+        viewModelScope.launch {
+            io.github.originosfcmguardian.pushactivation.PushActivationRuntime.state.collectLatest { snapshot ->
+                _uiState.update { it.copy(pushActivation = snapshot) }
+            }
+        }
         viewModelScope.launch {
             io.github.originosfcmguardian.fcmprotection.FcmProtectionRuntime.state.collectLatest { snapshot ->
                 if (!remoteOwned()) _uiState.update { it.copy(fcmProtection = snapshot,
@@ -487,7 +470,6 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshShizuku() = shizukuRuntime.refresh()
 
     fun prepareCombinedDiagnosticReportExport(
-        format: DiagnosticReportFormat = DiagnosticReportFormat.JSON,
         openPicker: () -> Boolean,
     ) {
         if (_uiState.value.diagnosticReportExportBusy) return
@@ -503,7 +485,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 guardianVersionCode = BuildConfig.VERSION_CODE.toLong(),
             ),
             capturedAtEpochMillis = capturedAt,
-        )
+        ).copy(daemonAdoption = DaemonAppRuntime.adoptionDiagnostics())
         _uiState.update {
             it.copy(diagnosticReportExportBusy = true, diagnosticReportExportFeedback = null)
         }
@@ -520,8 +502,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     DaemonAppRuntime.diagnosticSnapshot(getApplication())
                 }
                 val bytes = withContext(Dispatchers.Default) {
-                    encodeDiagnosticReport(report.copy(protectionLifecycle = lifecycle, protectionResources = resources,
-                        daemonDiagnostics = daemonDiagnostics), format)
+                    encodeDiagnosticReport(sanitizeDiagnosticReportForExport(report.copy(
+                        protectionLifecycle = lifecycle, protectionResources = resources,
+                        daemonDiagnostics = daemonDiagnostics)))
                 }
                 diagnosticPreparedExport.prepare(bytes)
                 pickerOpened = openPicker()
@@ -936,6 +919,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onActivityResumed() {
         recoveryUiActive = true
+        DaemonAppRuntime.onForeground(getApplication())
+        io.github.originosfcmguardian.pushactivation.PushActivationRuntime.onForeground(getApplication())
         if (remoteOwned()) {
             shizukuRuntime.refresh()
             refreshVisibleApps(preserveRechecks = true)

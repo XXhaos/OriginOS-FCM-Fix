@@ -89,7 +89,7 @@ internal class FcmRecoveryStore(private val storage: FcmRecoveryStorage) {
         val newerMcs = sample.gcmService.observedAtMillis?.let { it > old.mcsConsumedAt } == true &&
             (sample.bootId != old.mcsConsumedBoot || (sample.gcmService.elapsedRealtimeMillis ?: 0) > old.mcsConsumedElapsed)
         if (!old.configured || old.binding != FcmRecoveryPolicy.binding(sample) ||
-            !usableNetwork || !FcmRecoveryPolicy.connected(sample, now)) return old
+            !usableNetwork || !FcmRecoveryPolicy.reportedConnected(sample, now)) return old
         val clearAbsence = old.consumed && newer
         val clearMcs = old.mcsConsumed && newerMcs && usableMcsNetwork
         if (!clearAbsence && !clearMcs) return old

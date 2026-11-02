@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
+import io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Rule
@@ -62,6 +63,7 @@ class GuardianVisualRefinementTest {
         }
         compose.onNodeWithText("destination:home").assertExists()
         compose.runOnIdle { destination.value = "apps" }
+        compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithText("destination:home").assertDoesNotExist()
         compose.onNodeWithText("destination:apps").assertExists()
         compose.runOnIdle {
@@ -69,6 +71,7 @@ class GuardianVisualRefinementTest {
             assertSame(tokens.first(), tokens.last())
             destination.value = "settings"
         }
+        compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithText("destination:apps").assertDoesNotExist()
         compose.onNodeWithText("destination:settings").assertExists()
         compose.runOnIdle { assertEquals(setOf("settings"), mounted); assertSame(tokens.first(), tokens.last()) }
@@ -77,15 +80,17 @@ class GuardianVisualRefinementTest {
 
     @Test fun persistentOnIntentAndOffCallbackRemainImmediateWhileWaitingForExecution() {
         var enabled = 0; var disabled = 0
-        val state = HomeUiState(automaticProtection = AutomaticProtectionState(masterEnabled = true))
-        compose.setContent { GuardianTheme { PushProtectionCard(state, { enabled++ }, { disabled++ }, {}) } }
+        val state = HomeUiState(automaticProtection = AutomaticProtectionState(masterEnabled = true),
+            fcmProtection = FcmProtectionUiState(configured = true))
+        compose.setContent { GuardianTheme { PushProtectionCard(state, { enabled++ }, { disabled++ }) } }
+        compose.onNodeWithText("FCM连接时长", substring = true).assertDoesNotExist()
         compose.onNodeWithContentDescription("FCM推送保护开关").assertIsOn()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "总开关已开启，等待保护恢复"))
             .performClick()
         compose.runOnIdle { assertEquals(0, enabled); assertEquals(1, disabled) }
     }
 
-    @Test fun largeFontClocksRetainBothLabelsAndCompleteValuesInCombinedSemantics() {
+    @Test fun largeFontUptimeRetainsItsLabelAndCompleteValueInCombinedSemantics() {
         val dark = mutableStateOf(false)
         compose.setContent {
             val density = LocalDensity.current
@@ -95,7 +100,6 @@ class GuardianVisualRefinementTest {
                         Box(Modifier.fillMaxSize().padding(24.dp)) {
                             Column(Modifier.width(220.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                                 PushProtectionClockLine("已开启时长", "123:45:56")
-                                PushProtectionClockLine("FCM连接时长", "--:--:--")
                             }
                         }
                     }
@@ -105,7 +109,7 @@ class GuardianVisualRefinementTest {
         for (mode in listOf(false, true)) {
             compose.runOnIdle { dark.value = mode }
             compose.onNodeWithText("已开启时长 123:45:56").assertExists()
-            compose.onNodeWithText("FCM连接时长 --:--:--").assertExists()
+            compose.onNodeWithText("FCM连接时长", substring = true).assertDoesNotExist()
             if (BuildConfig.APPLICATION_ID == "io.github.originosfcmguardian.phase5fixture") {
                 val context = InstrumentationRegistry.getInstrumentation().targetContext
                 check(context.packageName == BuildConfig.APPLICATION_ID)

@@ -6,12 +6,13 @@ import io.github.originosfcmguardian.autoprotection.AutomaticProtectionGrant
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionRuntime
 import io.github.originosfcmguardian.core.gms.*
 import io.github.originosfcmguardian.daemon.DaemonAppRuntime
+import io.github.originosfcmguardian.daemon.DaemonAdoptionStage
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryRuntime
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryEventAction
 import io.github.originosfcmguardian.fcmrecovery.FcmRecoveryPreparation
 import io.github.originosfcmguardian.gmsheartbeat.*
 import io.github.originosfcmguardian.privileged.ShizukuExecutor
-import io.github.originosfcmguardian.protection.ReadSessionCoordinator
+import io.github.originosfcmguardian.pushactivation.PushActivationRuntime
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -41,7 +42,8 @@ data class FcmProtectionUiState(val configured: Boolean = false, val busy: Boole
     val storageBlocked: Boolean = false, val requiresConfirmation: Boolean = false,
     val maintenance: FcmMaintenanceState = FcmMaintenanceState.OFF, val recoveryReady: Boolean = false,
     val detail: String = "尚未开启；旧的分开授权不会自动升级。", val latestObservation: GmsConnectionObservation? = null,
-    val confirmationFailure: FcmProtectionConfirmationFailure? = null)
+    val confirmationFailure: FcmProtectionConfirmationFailure? = null,
+    val initialReadFailure: FcmInitialReadFailure? = null)
 
 /** One bundled owner, existing host/polls only. Branch engines retain their original uncertainty barriers. */
 object FcmProtectionRuntime {
@@ -61,7 +63,9 @@ object FcmProtectionRuntime {
     private var initialized = false
     @Volatile private var migrationPrepared = false
 
-    @Synchronized internal fun publishDaemonState(value: FcmProtectionUiState) { mutable.value = value }
+    @Synchronized internal fun publishDaemonState(value: FcmProtectionUiState) {
+        mutable.update { value.copy(initialReadFailure = it.initialReadFailure) }
+    }
 
     @Synchronized internal fun prepareForDaemonMigration() {
         migrationPrepared = true
@@ -70,13 +74,17 @@ object FcmProtectionRuntime {
         GmsAutoHeartbeatRuntime.prepareForDaemonMigration()
     }
 
-    internal suspend fun awaitDaemonMigrationDrain(context: Context): Boolean {
+    internal suspend fun awaitDaemonMigrationDrain(context: Context,
+        stage: (DaemonAdoptionStage) -> Unit = {}) : Boolean {
         // Cancelled children are joined through their actual finally blocks before snapshot export.
         scope.coroutineContext[Job]?.children?.toList()?.forEach { it.cancel() }
         scope.coroutineContext[Job]?.children?.toList()?.forEach { it.join() }
         io.withLock { }
+        stage(DaemonAdoptionStage.DRAIN_FCM)
         if (!FcmRecoveryRuntime.awaitDaemonMigrationDrain(context)) return false
+        stage(DaemonAdoptionStage.DRAIN_ENDPOINTS)
         ShizukuExecutor.awaitDaemonMigrationClientDrain()
+        stage(DaemonAdoptionStage.DRAIN_HEARTBEAT)
         return GmsAutoHeartbeatRuntime.awaitDaemonMigrationDrain(context)
     }
 
@@ -96,7 +104,7 @@ object FcmProtectionRuntime {
         }
         scope.launch { FcmRecoveryRuntime.latestObservation.collect { observation ->
             if (observation != null) {
-                mutable.value = mutable.value.copy(latestObservation = observation)
+                mutable.update { it.copy(latestObservation = observation) }
                 refresh(); provisionIfConnected(observation)
             }
         } }
@@ -130,10 +138,10 @@ object FcmProtectionRuntime {
         }
         val confirmation = consent.configured && (!consent.recoveryPrepared || maintenance == FcmMaintenanceState.RECONFIRM ||
             sample != null && !consent.accepts(sample, true))
-        mutable.value = mutable.value.copy(configured = consent.configured, maintenance = maintenance,
+        mutable.update { current -> current.copy(configured = consent.configured, maintenance = maintenance,
             recoveryReady = recoveryReady, requiresConfirmation = confirmation, confirmationFailure = failure,
             detail = when {
-                mutable.value.storageBlocked -> "授权记录不可确认，FCM 保护已暂停。"
+                current.storageBlocked -> "授权记录不可确认，FCM 保护已暂停。"
                 failure != null -> failure.detail
                 !consent.configured -> "尚未开启；需要新的统一确认，旧授权不自动升级。"
                 maintenance == FcmMaintenanceState.STOP_PENDING -> "旧维护会话停止待确认，不能绕过或重发。"
@@ -142,14 +150,14 @@ object FcmProtectionRuntime {
                 !ready() -> "已保存统一授权；等待实际自动保护与外置 Shizuku 就绪。"
                 maintenance == FcmMaintenanceState.ACTIVE -> "保护已开启：完整连接时低频维护；精确服务缺失时每次只尝试一次。"
                 else -> "保护已开启；维护等待完整连接，缺失恢复按资格单次尝试。"
-            })
+            }) }
     }
     private fun blocked() {
         if (migrationPrepared) return
         live.set(false); revision.incrementAndGet()
         runCatching { store?.disable()?.let { consent = it } }
         app?.let { FcmRecoveryRuntime.disable(it); GmsAutoHeartbeatRuntime.disable(it) }
-        mutable.value = mutable.value.copy(storageBlocked = true, busy = false, detail = "统一授权无法安全保存，已暂停。")
+        mutable.update { it.copy(storageBlocked = true, busy = false, detail = "统一授权无法安全保存，已暂停。") }
     }
     @Synchronized internal fun attachHost(context: Context, grant: AutomaticProtectionGrant) {
         if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return
@@ -183,13 +191,14 @@ object FcmProtectionRuntime {
     @Synchronized internal fun securityLost(id: String) {
         privilegeLost(id); GmsAutoHeartbeatRuntime.securityLost(id)
     }
-    @Synchronized internal fun masterOff() {
-        if (migrationPrepared) return
+    @Synchronized internal fun masterOff(expectedHostId: String? = null) {
+        if (migrationPrepared || expectedHostId != null && host?.id != expectedHostId) return
         readiness.invalidate(); revision.incrementAndGet(); activation?.cancel()
         FcmRecoveryRuntime.masterOff(); host?.id?.let(GmsAutoHeartbeatRuntime::hostEnded)
         refresh()
     }
     fun disable(context: Context) {
+        PushActivationRuntime.cancelExplicit(context)
         if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) {
             DaemonAppRuntime.disableFcm(context)
             return
@@ -212,7 +221,7 @@ object FcmProtectionRuntime {
         runCatching { consent = checkNotNull(store).disable() }.onFailure { blocked() }
         FcmRecoveryRuntime.disable(context); GmsAutoHeartbeatRuntime.disable(context); refresh()
     }
-    suspend fun confirm(context: Context): Boolean = io.withLock {
+    suspend fun confirm(context: Context, beforeAuthorityWrite: () -> Unit = {}): Boolean = io.withLock {
         if (migrationPrepared || !AutomaticProtectionRuntime.localExecutionAllowed(context)) return@withLock false
         initialize(context)
         var parentCommitted = false
@@ -229,16 +238,19 @@ object FcmProtectionRuntime {
         if (!ready()) return@withLock decline(FcmProtectionConfirmationFailure.HOST_UNAVAILABLE)
         if (GmsAutoHeartbeatRuntime.state.value.stopPending) return@withLock decline(FcmProtectionConfirmationFailure.STOP_PENDING)
         if (mutable.value.busy || GmsAutoHeartbeatRuntime.state.value.busy) return@withLock decline(FcmProtectionConfirmationFailure.BUSY)
-        val captured = revision.get(); mutable.value = mutable.value.copy(busy = true)
+        val captured = revision.get(); mutable.update { it.copy(busy = true) }
         try {
-            val observation = ReadSessionCoordinator.withSession {
+            val observation = readInitialFcmConnection(SystemClock::elapsedRealtime,
+                failure = { failure -> mutable.update { it.copy(initialReadFailure = failure) } }) { stage ->
                 val remote = ShizukuExecutor(context.applicationContext); remote.openSession()
-                try { remote.readGmsConnection() } finally { remote.retireObservationSession() }
+                try { remote.readGmsConnection(stage) } finally { remote.retireObservationSession() }
             }
             val sample = observation as? GmsConnectionObservation.Sample ?: return@withLock decline(FcmProtectionConfirmationFailure.READ_UNAVAILABLE)
+            mutable.update { it.copy(initialReadFailure = null) }
             if (captured != revision.get() || !ready()) return@withLock decline(FcmProtectionConfirmationFailure.HOST_CHANGED)
             if (!FcmRecoveryPolicy.qualified(sample, SystemClock.elapsedRealtime()))
                 return@withLock decline(FcmProtectionConfirmationFailure.NOT_QUALIFIED)
+            beforeAuthorityWrite()
             writingAuthority = true
             val committed = revision.commit(captured, ::ready) {
                 live.set(false)
@@ -258,19 +270,19 @@ object FcmProtectionRuntime {
             }
             writingAuthority = false
             if (!prepared) return@withLock decline(FcmProtectionConfirmationFailure.HOST_CHANGED)
-            mutable.value = mutable.value.copy(latestObservation = sample, storageBlocked = false)
+            mutable.update { it.copy(latestObservation = sample, storageBlocked = false) }
             refresh(); provisionIfConnected(sample); true
         } catch (_: Throwable) {
             if (writingAuthority) { blocked(); false }
             else decline(if (captured != revision.get()) FcmProtectionConfirmationFailure.HOST_CHANGED
                 else FcmProtectionConfirmationFailure.READ_UNAVAILABLE)
         }
-        finally { mutable.value = mutable.value.copy(busy = false); refresh() }
+        finally { mutable.update { it.copy(busy = false) }; refresh() }
     }
     @Synchronized private fun provisionIfConnected(observation: GmsConnectionObservation) {
         if (migrationPrepared) return
         val sample = observation as? GmsConnectionObservation.Sample ?: return
-        if (!admission(sample, false) || !FcmRecoveryPolicy.connected(sample, SystemClock.elapsedRealtime()) ||
+        if (!admission(sample, false) || !FcmRecoveryPolicy.reportedConnected(sample, SystemClock.elapsedRealtime()) ||
             activation?.isCompleted == false || GmsAutoHeartbeatRuntime.state.value.busy) return
         val epoch = consent.epoch ?: return; val captured = revision.get()
         activation = scope.launch { io.withLock {

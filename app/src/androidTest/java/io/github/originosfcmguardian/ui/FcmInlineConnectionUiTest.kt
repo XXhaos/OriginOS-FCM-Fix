@@ -15,7 +15,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import io.github.originosfcmguardian.core.gms.*
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -54,11 +53,10 @@ class FcmInlineConnectionUiTest {
         compose.runOnIdle { assertEquals(0, reads) }
     }
 
-    @Test fun productionHomeRefreshesWhileVisibleWithoutManualControlOrLegacyModal() {
-        var reads = 0
-        compose.setContent { HomeFixture(HomeUiState(gmsConnection = GmsConnectionUiState(visible = true))) { reads++ } }
-        compose.runOnIdle { assertTrue("Visible Home requests a read without a tap", reads > 0) }
+    @Test fun productionHomeHasNoConnectionClockOrReadControlsOrLegacyModal() {
+        compose.setContent { HomeFixture(HomeUiState(gmsConnection = GmsConnectionUiState(visible = true))) }
         compose.onNodeWithText("FCM推送保护").assertExists()
+        compose.onNodeWithText("FCM连接时长", substring = true).assertDoesNotExist()
         compose.onNodeWithTag("fcm-inline-read").assertDoesNotExist()
         compose.onNodeWithText("刷新").assertDoesNotExist()
         compose.onNodeWithText("FCM 连接").assertDoesNotExist()
@@ -67,7 +65,7 @@ class FcmInlineConnectionUiTest {
     }
 
     @Test fun retiredInspectionHasNoHomeOrSettingsEntry() {
-        compose.setContent { HomeFixture(HomeUiState()) {} }
+        compose.setContent { HomeFixture(HomeUiState()) }
         compose.onNodeWithText("上次检查").assertDoesNotExist()
         compose.onNodeWithText("打开诊断信息").assertDoesNotExist()
         compose.onNodeWithText("问题摘要").assertDoesNotExist()
@@ -80,7 +78,7 @@ class FcmInlineConnectionUiTest {
         compose.onNodeWithText("高级排查").assertDoesNotExist()
     }
 
-    @Composable private fun HomeFixture(state: HomeUiState, onRead: () -> Unit) {
+    @Composable private fun HomeFixture(state: HomeUiState) {
         MaterialTheme { HomeScreen(state = state, onShizukuAction = {},
             onOpenAutostartSettings = {}, onShowTargetSelection = {}, onDismissTargetSelection = {},
             onSetTargetSelected = { _, _ -> }, onCheckTarget = {},
@@ -88,8 +86,7 @@ class FcmInlineConnectionUiTest {
             onRequestAutomaticProtection = { error("Navigation must not request protection") },
             onStopAutomaticProtection = { error("Navigation must not stop protection") },
             onRequestFcmProtection = { error("Reading must not request FCM consent") },
-            onDisableFcmProtection = { error("Reading must not revoke FCM consent") },
-            onReadGmsConnection = onRead) }
+            onDisableFcmProtection = { error("Reading must not revoke FCM consent") }) }
     }
 
     private fun sample(): GmsConnectionObservation.Sample {

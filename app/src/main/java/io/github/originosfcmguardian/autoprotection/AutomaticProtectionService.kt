@@ -52,6 +52,15 @@ internal class TargetRetirementForegroundHandoff {
     }
 }
 
+/** A service notification never carries an unscoped master OFF, including after migration. */
+internal fun dispatchAutomaticNotificationStop(sessionId: String?, activationToken: Long?,
+    stopSession: (String, Long) -> Unit) {
+    if (sessionId != null && activationToken != null) stopSession(sessionId, activationToken)
+}
+
+internal fun automaticNotificationStopToken(previous: Pair<String, Long>?, id: String,
+    currentToken: () -> Long): Pair<String, Long> = previous?.takeIf { it.first == id } ?: (id to currentToken())
+
 /** Explicit restart consent may restore the FGS; missing privilege has no periodic retries. */
 class AutomaticProtectionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -60,6 +69,7 @@ class AutomaticProtectionService : Service() {
     private var activeController: StoppedRecoveryController? = null
     private var latestStartId = 0
     private var stopPendingIntent: PendingIntent? = null
+    private var notificationStopToken: Pair<String, Long>? = null
     private var destroyed = false
     private var stopRequestRecorded = false
     private val targetRetirement = TargetRetirementForegroundHandoff()
@@ -80,7 +90,10 @@ class AutomaticProtectionService : Service() {
         if (!AutomaticProtectionRuntime.localExecutionAllowed(this)) {
             activeController?.cancel()
             activeJob?.cancel()
-            if (intent?.action == ACTION_STOP) DaemonAppRuntime.stop(applicationContext)
+            if (intent?.action == ACTION_STOP) dispatchAutomaticNotificationStop(intent.getStringExtra(EXTRA_SESSION),
+                intent.takeIf { it.hasExtra(EXTRA_ACTIVATION_TOKEN) }?.getLongExtra(EXTRA_ACTIVATION_TOKEN, -1)) { id, token ->
+                AutomaticProtectionRuntime.stopSession(this, id, token)
+            }
             else DaemonAppRuntime.restore(applicationContext)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf(startId)
@@ -90,8 +103,9 @@ class AutomaticProtectionService : Service() {
         stopRequestRecorded = false
         latestStartId = startId
         if (intent?.action == ACTION_STOP) {
-            intent.getStringExtra(EXTRA_SESSION)?.let { id ->
-                AutomaticProtectionRuntime.stopSession(this, id)
+            dispatchAutomaticNotificationStop(intent.getStringExtra(EXTRA_SESSION),
+                intent.takeIf { it.hasExtra(EXTRA_ACTIVATION_TOKEN) }?.getLongExtra(EXTRA_ACTIVATION_TOKEN, -1)) { id, token ->
+                AutomaticProtectionRuntime.stopSession(this, id, token)
                 if (activeId == id && !AutomaticProtectionRuntime.hasSession()) retire(id)
             }
             if (activeId == null && targetRetirement.mayStopService(AutomaticProtectionRuntime.hasSession())) stopServiceLifetime(startId)
@@ -784,8 +798,13 @@ class AutomaticProtectionService : Service() {
     }
 
     private fun notification(id: String, detail: String): Notification {
+        // Repeated presentation updates cannot reauthorize an old session's queued STOP intent.
+        val stopToken = automaticNotificationStopToken(notificationStopToken, id) {
+            io.github.originosfcmguardian.pushactivation.PushActivationRuntime.cancellationToken(this)
+        }.also { notificationStopToken = it }
         val stop = PendingIntent.getService(this, 0, Intent(this, AutomaticProtectionService::class.java)
-            .setAction(ACTION_STOP).setData(Uri.parse("guardian-auto-stop:$id")).putExtra(EXTRA_SESSION, id),
+            .setAction(ACTION_STOP).setData(Uri.parse("guardian-auto-stop:$id")).putExtra(EXTRA_SESSION, id)
+            .putExtra(EXTRA_ACTIVATION_TOKEN, stopToken.second),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         stopPendingIntent = stop
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -849,6 +868,7 @@ class AutomaticProtectionService : Service() {
         internal const val ACTION_RESTORE = "io.github.originosfcmguardian.autoprotection.RESTORE"
         internal const val ACTION_STOP = "io.github.originosfcmguardian.autoprotection.STOP"
         internal const val EXTRA_SESSION = "automatic_protection_session"
+        internal const val EXTRA_ACTIVATION_TOKEN = "automatic_protection_activation_token"
         private const val NOTIFICATION_ID = 41_734
         private const val POLL_MILLIS = 30_000L
     }

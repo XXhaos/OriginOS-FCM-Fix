@@ -26,6 +26,8 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
 
         section("阅读导航")
         append("[环境](#环境) · [Shizuku](#shizuku) · [目标应用](#目标应用) · ")
+        append("[FCM 读取](#fcm-连接读取快照) · ")
+        append("[低频心跳](#低频心跳内存快照) · ")
         append("[FCM 事件](#fcm-恢复事件) · [FCM 片段](#fcm-断连与恢复片段) · ")
         append("[App 资源](#后台资源与中断分析) · [独立核心](#独立保护核心运行记录) · [进程记录](#保护停止与进程记录)\n\n")
         append("[恢复摘要](#停止标志恢复摘要) · [自动保护快照](#自动保护应用内快照) · ")
@@ -43,6 +45,33 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
         section("Shizuku")
         statusRow("Shizuku 状态", report.shizukuStatus)
 
+        section("后台核心初始化")
+        row("统一开启请求待接续", report.pushActivation.pending)
+        row("统一开启请求处理中", report.pushActivation.busy)
+        row("统一开启请求待核对", report.pushActivation.blocked)
+        row("统一开启记录不可用", report.pushActivation.storageFailed)
+        row("统一开启请求原因", report.pushActivation.reason.name)
+        row("开启票据本进程来源", report.pushActivation.origin.name)
+        row("原确认时间（Epoch ms）", report.pushActivation.confirmedAtEpochMillis)
+        row("原确认版本代码", report.pushActivation.confirmedVersionCode)
+        row("本进程开启派发次数", report.pushActivation.dispatchesThisProcess)
+        row("记录的开启派发准入次数（非写入次数）", report.pushActivation.recordedDispatches)
+        row("最近开启派发结果", report.pushActivation.lastDispatch?.name)
+        row("最近远端开启结果", report.pushActivation.lastAttempt?.remoteOutcome)
+        row("最近远端开启原因", report.pushActivation.lastAttempt?.remoteReason)
+        row("最近远端准备原因", report.pushActivation.lastAttempt?.preparationReason)
+        row("最近远端读取原因", report.pushActivation.lastAttempt?.readUnknown)
+        append("旧开启记录未保存的派发次数与结果保持未知，不从当前关闭状态推定未执行。\n\n")
+        append("仅记录当前 App 进程的首次接管尝试；没有尝试记录不代表核心从未运行，也不包含已有核心的恢复历史。\n\n")
+        with(report.daemonAdoption) {
+            row("状态", status.name)
+            row("阶段", stage.name)
+            row("原因", reason.name)
+            row("本进程尝试次数", attemptCount)
+            row("最近尝试时间（Epoch ms）", lastAttemptAtEpochMillis)
+            row("最近结果时间（Epoch ms）", lastOutcomeAtEpochMillis)
+        }
+
         section("目标应用")
         when (val targets = report.targets) {
             null -> row("目标应用", null)
@@ -56,6 +85,37 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
             }
         }
 
+        section("FCM 连接读取快照")
+        append("仅复制当前主页内存中的前台读取与自动观察；两者独立，不代表本次导出重新读取，也不代表 FCM 保护已开启或持续连接。无观察（NONE）不等于断连；已连接但时长为空表示时长未知。网络标志属于前台读取，不导出网络标识。\n\n")
+        with(report.fcmConnectionRead) {
+            row("前台读取已尝试", attempted)
+            row("前台读取处理中", busy)
+            row("前台读取完成时间（elapsed ms）", readCompletedAtElapsedMillis)
+            row("前台读取后网络已变化", networkChanged)
+            row("前台网络跟踪可用", networkTrackingAvailable)
+            row("前台取样网络已知", networkKnown)
+            append("\n### 前台读取观察\n\n")
+            fcmObservationRows(foreground)
+            append("\n### 自动保护观察\n\n")
+            fcmObservationRows(automatic)
+        }
+
+        section("低频心跳内存快照")
+        row("证据范围", DIAGNOSTIC_HEARTBEAT_SCOPE)
+        append("仅复制当前主页已持有的内存标志，不重新读取或检查授权；不含请求次数和结果时间，不证明持续维护。最近请求状态可能来自历史请求，REQUESTED 不代表消息送达。\n\n")
+        with(report.gmsAutoHeartbeat) {
+            row("心跳已配置", configured)
+            row("心跳活动标志", active)
+            row("心跳暂停标志", paused)
+            row("心跳关闭待确认", stopPending)
+            row("心跳持久授权标志", durableConsent)
+            row("心跳恢复授权标志", resumeAuthorized)
+            row("心跳等待宿主", waitingForHost)
+            row("心跳恢复阻断", resumeBlocked)
+            row("心跳需重新确认", requiresConfirmation)
+            row("心跳最近请求状态", lastStatus?.name)
+        }
+
         section("FCM 恢复事件")
         append("### 授权与分支快照\n\n")
         row("统一 FCM 保护授权", report.fcmProtection.configured)
@@ -64,6 +124,10 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
         row("恢复分支当前资格", report.fcmProtection.recoveryReady)
         row("统一授权需重新确认", report.fcmProtection.requiresConfirmation)
         row("本次统一确认未通过原因", report.fcmProtection.confirmationFailure?.name)
+        row("最近一次初始读取失败阶段（App 确认）", report.fcmProtection.initialReadFailure?.stage?.name)
+        row("最近一次初始读取失败原因", report.fcmProtection.initialReadFailure?.reason?.name)
+        row("初始读取失败时间（Epoch ms）", report.fcmProtection.initialReadFailure?.atEpochMillis)
+        row("初始读取失败时间（elapsed ms）", report.fcmProtection.initialReadFailure?.elapsedMillis)
         row("恢复配置", report.fcmRecoveryTrial.configured)
         row("记录存储阻断", report.fcmRecoveryTrial.storageBlocked)
         append("\n### 留存状态变化与请求结果\n")
@@ -198,6 +262,19 @@ fun encodeCombinedDiagnosticMarkdown(report: CombinedDiagnosticReport): ByteArra
 
 private fun StringBuilder.section(title: String) {
     append("\n## ").append(title).append("\n\n")
+}
+
+private fun StringBuilder.fcmObservationRows(value: DiagnosticFcmObservation) {
+    row("观察类型", value.kind.name)
+    row("读取未知原因", value.unknownReason?.name)
+    row("GMS 版本代码", value.gmsVersionCode)
+    row("整体取样时间（Epoch ms）", value.sampleObservedAtEpochMillis)
+    row("整体取样时间（elapsed ms）", value.sampleElapsedRealtimeMillis)
+    row("服务报告状态", value.serviceState?.name)
+    row("服务来源完整性", value.serviceCompleteness?.name)
+    row("服务取样时间（Epoch ms）", value.serviceObservedAtEpochMillis)
+    row("服务取样时间（elapsed ms）", value.serviceElapsedRealtimeMillis)
+    row("GMS 报告的连接时长（ms）", value.connectedDurationMillis)
 }
 
 private fun StringBuilder.row(label: String, value: Any?) {

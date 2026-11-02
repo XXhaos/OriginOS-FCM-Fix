@@ -51,7 +51,7 @@ internal class FcmRecoveryCycle(private val access: FcmRecoveryCycleAccess) {
             saved.mcsConsumed && access.disconnectedNetwork())
         val operation = when {
             FcmRecoveryPolicy.absent(sample, access.elapsedMillis()) -> FcmRecoveryOperation.SERVICE_ABSENT_SEND
-            FcmRecoveryPolicy.disconnected(sample, access.elapsedMillis()) && access.disconnectedNetwork() -> FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS
+            FcmRecoveryPolicy.mcsRequestEligible(sample, access.elapsedMillis()) && access.disconnectedNetwork() -> FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS
             else -> return
         }
         if (saved.consumed(operation) || !access.authorized() ||
@@ -96,7 +96,7 @@ internal class FcmRecoveryCycle(private val access: FcmRecoveryCycleAccess) {
         if (after != null && access.authorized()) access.store.rearm(after, access.elapsedMillis(), access.usableNetwork(),
             access.store.read().mcsConsumed && access.disconnectedNetwork())
         access.finished(access.store.read(), result,
-            after != null && access.current() && access.authorized() && FcmRecoveryPolicy.connected(after, access.elapsedMillis()))
+            after != null && access.current() && access.authorized() && FcmRecoveryPolicy.reportedConnected(after, access.elapsedMillis()))
     }
 
     private fun evidence(action: FcmRecoveryEventAction, sample: GmsConnectionObservation.Sample, result: FcmRecoveryResult? = null,

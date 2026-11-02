@@ -2,6 +2,7 @@
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -406,9 +407,15 @@ class ReleaseAutomationTests(unittest.TestCase):
             (directory / 'private.key').unlink()
             name = next(iter(files))
             (directory / name).unlink()
-            (directory / name).symlink_to(directory / 'artifact-manifest.json')
-            with self.assertRaisesRegex(syncer.SyncError, 'Invalid local'):
-                automation.read_bundle(directory, source['tag_name'])
+            with self.subTest(artifact='symbolic link'):
+                try:
+                    (directory / name).symlink_to(directory / 'artifact-manifest.json')
+                except OSError as error:
+                    if os.name == 'nt' and getattr(error, 'winerror', None) == 1314:
+                        self.skipTest('Windows lacks symbolic-link creation privilege')
+                    raise
+                with self.assertRaisesRegex(syncer.SyncError, 'Invalid local'):
+                    automation.read_bundle(directory, source['tag_name'])
 
     def test_plan_output_contains_only_safe_metadata_and_lowercase_booleans(self):
         source, _ = fixture()

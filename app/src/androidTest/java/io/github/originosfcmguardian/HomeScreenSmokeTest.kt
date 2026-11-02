@@ -16,7 +16,7 @@ class HomeScreenSmokeTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun homeShowsUnifiedProtectionAndDirectReportWithoutPlaceholderWrites() {
+    fun homeShowsUnifiedProtectionAndAboutWithoutExportOrPlaceholderWrites() {
         composeRule.onNodeWithText("Guardian").assertIsDisplayed()
         composeRule.onNodeWithText("Shizuku").assertIsDisplayed()
         composeRule.onNodeWithText("FCM Diagnostics").assertIsDisplayed()
@@ -30,7 +30,11 @@ class HomeScreenSmokeTest {
         composeRule.onNodeWithText("原始状态记录").assertDoesNotExist()
         composeRule.onNodeWithText("查看工具入口").assertDoesNotExist()
         composeRule.onNodeWithText("定期巡检").assertDoesNotExist()
-        composeRule.onNodeWithText("导出报告").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("导出诊断报告").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("导出报告").assertDoesNotExist()
+        composeRule.onNodeWithText("导出日志").assertDoesNotExist()
+        composeRule.onNodeWithText("导出脱敏日志").assertDoesNotExist()
+        composeRule.onNodeWithText("关于").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(BuildConfig.VERSION_NAME).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("检查更新").performScrollTo().assertIsDisplayed()
     }
 }

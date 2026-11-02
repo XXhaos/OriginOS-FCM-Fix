@@ -240,7 +240,7 @@ internal object DaemonHeartbeatDerivation {
         if (before.control != expected || expected.mode != DaemonControlMode.ACTIVE ||
             observedAtElapsed < 0 || nowElapsed < observedAtElapsed || nowElapsed - observedAtElapsed > maximumAgeMillis ||
             !sample.isFresh(nowElapsed) || sample.bootId != bootId ||
-            !FcmRecoveryPolicy.connected(sample, nowElapsed) || GmsHeartbeatPolicy.rejection(sample, nowElapsed) != null ||
+            !FcmRecoveryPolicy.reportedConnected(sample, nowElapsed) || GmsHeartbeatPolicy.rejection(sample, nowElapsed) != null ||
             !uninterrupted(before)) return null
         val permit = before.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION)?.let(DaemonHeartbeatDerivationPermitCodec::decode) ?: return null
         if (permit.used || permit.record != expected || permit.historicalCaller.kernelBootId != bootId ||

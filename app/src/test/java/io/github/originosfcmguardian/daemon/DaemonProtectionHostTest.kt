@@ -49,7 +49,13 @@ class DaemonProtectionHostTest {
         var freshHeartbeatEndpoint = false
         var beforeHeartbeatRevoke: (() -> Unit)? = null
         var connection = GcmConnectionState.SERVICE_ABSENT
+        var socketsAvailable = true
+        var allowHeartbeatDispatch = false
+        var heartbeatWrites = 0
+        var recoverToConnected = false
         var beforeFcmRead: (() -> Unit)? = null
+        var readFailure: GmsUnknown? = null
+        var recoveryAllowed = true
         var gmsVersion = 263737035L
         var gmsUpdatedAt = 2_000L
         var released = 0
@@ -66,8 +72,10 @@ class DaemonProtectionHostTest {
         val child = Child()
         fun wall() = 1_000_000L + now.get()
         fun sample() = GmsConnectionObservation.Sample(1, 10208, gmsVersion, 1_000, gmsUpdatedAt,
-            FcmRecoveryPolicy.SIGNER, boot, wall(), now.get(), SocketSource(SourceCompleteness.COMPLETE, false),
-            SocketSource(SourceCompleteness.COMPLETE, connection == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
+            FcmRecoveryPolicy.SIGNER, boot, wall(), now.get(),
+            SocketSource(if (socketsAvailable) SourceCompleteness.COMPLETE else SourceCompleteness.UNAVAILABLE, false),
+            SocketSource(if (socketsAvailable) SourceCompleteness.COMPLETE else SourceCompleteness.UNAVAILABLE,
+                socketsAvailable && connection == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
             GcmServiceSource(connection, SourceCompleteness.COMPLETE, wall(), now.get(), 0))
         val authority = ProtectionAuthoritySnapshot(1, ProtectionConsentMode.ACTIVE, null, null,
             // Same wall/elapsed offset as wall(): explicit master ON rightly rejects clock jumps.
@@ -98,6 +106,7 @@ class DaemonProtectionHostTest {
             override fun read(id: Long, cancelled: () -> Boolean): GmsConnectionObservation {
                 reads++
                 beforeFcmRead?.also { beforeFcmRead = null }?.invoke()
+                readFailure?.let { return GmsConnectionObservation.Unknown(id, it) }
                 return sample().copy(requestId = id)
             }
             override fun usableNetwork() = true
@@ -109,6 +118,10 @@ class DaemonProtectionHostTest {
                 assertTrue(authorize()); assertTrue(fence.prepare())
                 assertNotNull(fence.start { writes++; child })
                 if (settle) fence.workerSettled(PrivilegedExecutionSettlement.PROCESS_EXIT_CONFIRMED)
+                if (settle && recoverToConnected) {
+                    now.incrementAndGet() // A genuinely later readback, not the consumed observation.
+                    connection = GcmConnectionState.REPORTED_CONNECTED
+                }
                 return FcmRecoveryResult(id, if (settle) FcmRecoveryStatus.REQUESTED else FcmRecoveryStatus.UNKNOWN,
                     if (settle) FcmRecoveryReason.COMMAND_ACCEPTED else FcmRecoveryReason.TIMED_OUT, operation)
             }
@@ -119,7 +132,13 @@ class DaemonProtectionHostTest {
                     GmsAutoArmReason.ARMED)
             }
             override fun heartbeat(id: Long, uid: Int, session: GmsAutoSession, attempt: String,
-                cancelled: () -> Boolean, fence: PrivilegedExecutionFence): GmsHeartbeatResult = error("No heartbeat")
+                cancelled: () -> Boolean, fence: PrivilegedExecutionFence): GmsHeartbeatResult {
+                check(allowHeartbeatDispatch) { "No heartbeat expected" }
+                assertFalse(cancelled()); assertTrue(fence.prepare())
+                assertNotNull(fence.start { heartbeatWrites++; child })
+                fence.workerSettled(PrivilegedExecutionSettlement.PROCESS_EXIT_CONFIRMED)
+                return GmsHeartbeatResult(id, GmsHeartbeatStatus.REQUESTED, GmsHeartbeatReason.COMMAND_ACCEPTED)
+            }
             override fun revoke(uid: Int, session: GmsAutoSession): Boolean {
                 beforeHeartbeatRevoke?.also { beforeHeartbeatRevoke = null }?.invoke()
                 return revokeAcknowledged
@@ -150,7 +169,7 @@ class DaemonProtectionHostTest {
                 override fun wallMillis() = wall()
             }, stoppedShell = stopped, fcmShell = fcm, elapsed = now::get, wall = ::wall,
             processId = 555, fingerprint = { VERIFIED_AUTOSTART_FINGERPRINT },
-            commandClock = { BudgetClock(1, now.get(), wall()) }, recoveryReady = { true }, startScheduler = false,
+            commandClock = { BudgetClock(1, now.get(), wall()) }, recoveryReady = { recoveryAllowed }, startScheduler = false,
             diagnostics = diagnosticRuntime)
         fun reconcile() {
             val challenge = requireNotNull(host.currentPointerChallenge(caller))
@@ -500,29 +519,125 @@ class DaemonProtectionHostTest {
         }
     }
 
-    @Test fun removeTaskKeepsActualOwnerButHistoricalStopBlocksUntilExplicitNewMasterOn() = runBlocking {
+    @Test fun precisePastBackgroundKillResumesPollingWithoutNewMasterOn() = runBlocking {
         Fixture().use { f ->
             f.reconcile()
+            val before = f.root.snapshot()
+            val authority = before.bytes(DaemonDomainRole.AUTHORITY)
+            f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000))
+            f.poll()
+            assertEquals(0, f.reads)
+            assertEquals(0, f.writes)
+            assertNull(f.host.status(caller).sessionStartedElapsed)
+            // A fresh classification of the same retained record restores this opportunity.
+            // No new ON, pointer reconciliation, cleared history or replacement consent is used.
+            f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000,
+                DaemonRequestedExitDetail.KILL_BACKGROUND))
+            f.poll()
+            val reads = f.reads
+            assertTrue(reads > 0)
+            assertEquals(1, f.writes)
+            assertNotNull(f.host.status(caller).sessionStartedElapsed)
+            assertFalse(f.host.status(caller).needsReconciliation)
+            f.poll()
+            assertTrue(f.reads > reads)
+            assertNotNull(f.host.status(caller).sessionStartedElapsed)
+            assertEquals(0, f.released)
+            assertEquals(before.control, f.root.snapshot().control)
+            assertArrayEquals(authority, f.root.snapshot().bytes(DaemonDomainRole.AUTHORITY))
+        }
+    }
+
+    @Test fun removeTaskAndKnownHistoricalStopRetainTheAlreadyUnstoppedOwnerWithoutNewMasterOn() = runBlocking {
+        Fixture().use { f ->
+            f.reconcile()
+            val before = f.root.snapshot()
             f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000,
                 DaemonRequestedExitDetail.REMOVE_TASK))
             f.poll(); assertEquals(1, f.writes); assertEquals(0, f.released)
             f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_001,
                 DaemonRequestedExitDetail.EXPLICIT_STOP))
             f.poll(); assertEquals(1, f.writes); assertEquals(0, f.released)
-            assertTrue(f.host.status(caller).needsReconciliation)
-            assertNull(f.host.status(caller).sessionStartedElapsed)
-            f.reconcile(); f.poll() // Pointer reconciliation cannot supersede a user stop.
-            assertEquals(1, f.writes); assertNull(f.host.status(caller).sessionStartedElapsed)
-            val old = f.root.snapshot().control
-            val confirmedAt = f.wall()
-            val challenge = requireNotNull(f.host.stage(caller, old, "explicit-new-on", DaemonProtectionCommand.MasterOn))
-            assertTrue(f.host.attest(caller, DaemonAppPointerAttestation(challenge, challenge.pointer)))
-            assertTrue(f.host.apply(caller, requireNotNull(f.host.requestForChallenge(caller, challenge))) is DaemonControlReply.Acknowledged)
-            assertEquals(confirmedAt, ProtectionAuthorityCodec.decode(f.root.snapshot().bytes(DaemonDomainRole.AUTHORITY)!!).masterEnabledAtMillis)
-            f.connection = GcmConnectionState.REPORTED_CONNECTED
-            f.poll()
             assertNotNull(f.host.status(caller).sessionStartedElapsed)
             assertFalse(f.host.status(caller).needsReconciliation)
+            assertEquals(before.control, f.root.snapshot().control)
+            assertArrayEquals(before.bytes(DaemonDomainRole.AUTHORITY), f.root.snapshot().bytes(DaemonDomainRole.AUTHORITY))
+        }
+    }
+
+    @Test fun knownHistoricalForceStopWithCurrentUnstoppedRunsBothEnginesAndActualFcmWithoutChangingConsent() = runBlocking {
+        for (reason in listOf(StartupExitReason.USER_REQUESTED, StartupExitReason.USER_STOPPED)) {
+            Fixture(activeHeartbeat = true, collectDiagnostics = true).use { f ->
+                val runtime = requireNotNull(f.diagnosticRuntime)
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+                while (runtime.snapshot().sessions.isEmpty() && System.nanoTime() < deadline) Thread.yield()
+                f.oldAppGone = true; f.recoverToConnected = true
+                f.exits = listOf(DaemonGuardianExit(reason, 1_001_000, DaemonRequestedExitDetail.EXPLICIT_STOP))
+                f.reconcile()
+                val before = f.root.snapshot()
+                f.poll()
+                val metrics = requireNotNull(runtime.snapshot().sessions.single().cycleMetrics)
+                assertEquals(1, metrics.stopped.completedCount)
+                assertEquals(1, metrics.fcm.completedCount)
+                assertEquals(1, metrics.fcm.outcomes.checked)
+                assertTrue(f.reads > 0); assertEquals(1, f.writes); assertEquals(1, f.arms)
+                val origin = requireNotNull(f.host.status(caller).sessionStartedElapsed)
+                assertFalse(f.host.status(caller).needsReconciliation)
+                f.poll()
+                assertEquals(origin, f.host.status(caller).sessionStartedElapsed)
+                assertEquals(2, runtime.snapshot().sessions.single().cycleMetrics!!.stopped.completedCount)
+                assertEquals(2, runtime.snapshot().sessions.single().cycleMetrics!!.fcm.completedCount)
+                assertEquals(1, f.writes); assertEquals(1, f.arms)
+                val after = f.root.snapshot()
+                assertEquals(before.control, after.control)
+                for (role in listOf(DaemonDomainRole.AUTHORITY, DaemonDomainRole.SELECTION, DaemonDomainRole.FCM_PROTECTION))
+                    assertArrayEquals(before.bytes(role), after.bytes(role))
+                assertEquals(f.authority.masterEnabledAtMillis,
+                    ProtectionAuthorityCodec.decode(requireNotNull(after.bytes(DaemonDomainRole.AUTHORITY))).masterEnabledAtMillis)
+            }
+        }
+    }
+
+    @Test fun reopeningAfterHistoricalForceStopNeverOverridesCommittedHomeOff() = runBlocking {
+        Fixture().use { f ->
+            f.reconcile(); assertTrue(f.off() is DaemonControlReply.Acknowledged)
+            val before = DaemonProtectionRootCodec.encode(f.root.snapshot())
+            f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000,
+                DaemonRequestedExitDetail.EXPLICIT_STOP))
+            repeat(3) { f.poll() }
+            assertEquals(0, f.reads); assertEquals(0, f.writes); assertEquals(0, f.arms)
+            assertEquals(DaemonControlMode.OFF, f.root.snapshot().control.mode)
+            assertNull(f.host.status(caller).sessionStartedElapsed)
+            assertArrayEquals(before, DaemonProtectionRootCodec.encode(f.root.snapshot()))
+        }
+    }
+
+    @Test fun currentStopAndUnknownHistoryOrCrashLoopCannotStartEitherEngine() = runBlocking {
+        for (mode in 0..4) Fixture(collectDiagnostics = true).use { f ->
+            val runtime = requireNotNull(f.diagnosticRuntime)
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+            while (runtime.snapshot().sessions.isEmpty() && System.nanoTime() < deadline) Thread.yield()
+            f.reconcile()
+            val before = f.root.snapshot().bytes(DaemonDomainRole.AUTHORITY)
+            when (mode) {
+                0 -> {
+                    f.principal = f.principal!!.copy(stopped = true)
+                    f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000,
+                        DaemonRequestedExitDetail.EXPLICIT_STOP))
+                }
+                1 -> f.exits = null
+                2 -> f.exits = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000))
+                3 -> f.exits = listOf(DaemonGuardianExit(StartupExitReason.CRASH, 1_001_000),
+                    DaemonGuardianExit(StartupExitReason.ANR, 1_001_001))
+                4 -> f.exits = List(64) { DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 1_001_000,
+                    DaemonRequestedExitDetail.EXPLICIT_STOP) }
+            }
+            f.poll()
+            val metrics = requireNotNull(runtime.snapshot().sessions.single().cycleMetrics)
+            assertEquals(0, metrics.stopped.completedCount); assertEquals(0, metrics.fcm.completedCount)
+            assertEquals(0, f.reads); assertEquals(0, f.writes); assertEquals(0, f.arms)
+            assertArrayEquals(before, f.root.snapshot().bytes(DaemonDomainRole.AUTHORITY))
+            if (mode != 0) assertNull(f.host.status(caller).sessionStartedElapsed)
         }
     }
 
@@ -935,6 +1050,137 @@ class DaemonProtectionHostTest {
         for (role in listOf(DaemonDomainRole.AUTHORITY, DaemonDomainRole.SELECTION, DaemonDomainRole.RECOVERY_COUNTS,
             DaemonDomainRole.HEARTBEAT_DERIVATION, DaemonDomainRole.FCM_CONSUMED, DaemonDomainRole.FCM_MCS_CONSUMED))
             assertArrayEquals(role.name, before.bytes(role), f.root.bytes(role))
+    }
+
+    @Test fun detailedFcmPreparationRetainsUnknownReadWithoutStagingNewPositiveAuthority() {
+        Fixture().use { f ->
+            f.reconcile()
+            val before = f.root.snapshot()
+            f.readFailure = GmsUnknown.TIMED_OUT
+            val declined = f.host.stageFcmOnDetailed(caller, before.control, "read-not-staged", historicalCaller)
+            assertNull(declined.challenge)
+            assertEquals(DaemonFcmPreparationReason.READ_UNAVAILABLE, declined.notStaged?.reason)
+            assertEquals(GmsUnknown.TIMED_OUT, declined.notStaged?.readUnknown)
+            assertNull(f.root.bytes(DaemonDomainRole.CONTROL_PROPOSAL))
+            assertEquals(before.control, f.root.snapshot().control)
+            assertArrayEquals(before.bytes(DaemonDomainRole.FCM_PROTECTION), f.root.bytes(DaemonDomainRole.FCM_PROTECTION))
+            assertEquals(0, f.writes); assertEquals(0, f.arms)
+            f.readFailure = null
+            f.reconcile()
+            val prepared = f.host.stageFcmOnDetailed(caller, before.control, "fresh-preparation", historicalCaller)
+            assertNotNull(prepared.challenge); assertNull(prepared.notStaged)
+            assertNotNull(f.root.bytes(DaemonDomainRole.CONTROL_PROPOSAL))
+            // A staged proposal alone is still not applied consent or a dispatched heartbeat.
+            assertEquals(before.control, f.root.snapshot().control)
+            assertEquals(0, f.writes); assertEquals(0, f.arms)
+            val proposal = f.root.bytes(DaemonDomainRole.CONTROL_PROPOSAL)
+            f.readFailure = GmsUnknown.TIMED_OUT
+            val duplicate = f.host.stageFcmOnDetailed(caller, before.control, "fresh-preparation", historicalCaller)
+            assertNull(duplicate.challenge); assertNull(duplicate.notStaged)
+            assertFalse(f.host.fcmNotStagedProof(caller, before.control, "fresh-preparation"))
+            assertArrayEquals(proposal, f.root.bytes(DaemonDomainRole.CONTROL_PROPOSAL))
+        }
+    }
+
+    @Test fun serviceAuthorityWithoutAttributableSocketsCompletesActivationMaintenanceAndAbsentRecovery() = runBlocking {
+        Fixture().use { f ->
+            f.socketsAvailable = false
+            f.connection = GcmConnectionState.REPORTED_CONNECTED
+            f.allowHeartbeatDispatch = true
+            f.reconcile()
+            // Start with a real FCM_OFF plan, not a fabricated configured flag.
+            val off = requireNotNull(f.host.stage(caller, f.root.snapshot().control,
+                "service-only-off", DaemonProtectionCommand.FcmOff))
+            f.applyActivation(off)
+            assertFalse(FcmProtectionCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_PROTECTION))).configured)
+            val on = f.host.stageFcmOnDetailed(caller, f.root.snapshot().control,
+                "service-only-confirmed-on", historicalCaller)
+            assertNull(on.notStaged)
+            f.applyActivation(requireNotNull(on.challenge))
+            f.poll()
+            val parent = FcmProtectionCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_PROTECTION)))
+            val child = HeartbeatSnapshotCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.HEARTBEAT)))
+            assertTrue(parent.configured); assertTrue(child.configured)
+            assertNotNull(child.remoteSessionId); assertNull(child.pause)
+            assertEquals(1, f.arms)
+            assertEquals(SocketObservation.UNKNOWN, f.sample().observation)
+            assertFalse(FcmRecoveryPolicy.connected(f.sample(), f.now.get()))
+            f.now.addAndGet(15 * 60_000L)
+            f.poll()
+            assertEquals(1, f.heartbeatWrites)
+            f.recoverToConnected = true
+            f.connection = GcmConnectionState.SERVICE_ABSENT
+            f.poll()
+            assertEquals(1, f.writes)
+            assertEquals(GcmConnectionState.REPORTED_CONNECTED, f.connection)
+            assertFalse(FcmRecoveryStoreCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_RECOVERY))).consumed)
+            // Another separate absence may recover after the authoritative connected readback.
+            f.connection = GcmConnectionState.SERVICE_ABSENT
+            f.poll()
+            assertEquals(2, f.writes)
+            assertEquals(SocketObservation.UNKNOWN, f.sample().observation)
+            assertTrue(f.off() is DaemonControlReply.Acknowledged)
+            f.poll()
+            assertEquals(DaemonControlMode.OFF, f.root.snapshot().control.mode)
+            assertEquals(2, f.writes); assertEquals(1, f.heartbeatWrites)
+        }
+    }
+
+    @Test fun exactDisconnectedServiceWithUnknownSocketsUsesOnlyOneMcsRequestUntilConnectedReadback() = runBlocking {
+        Fixture().use { f ->
+            f.socketsAvailable = false
+            f.connection = GcmConnectionState.REPORTED_DISCONNECTED
+            f.reconcile(); f.poll()
+            assertEquals(1, f.writes)
+            val consumed = FcmRecoveryStoreCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_RECOVERY)))
+            assertTrue(consumed.mcsConsumed); assertFalse(consumed.consumed)
+            assertEquals(SocketObservation.UNKNOWN, f.sample().observation)
+            assertFalse(FcmRecoveryPolicy.disconnected(f.sample(), f.now.get()))
+            repeat(3) { f.poll() }
+            assertEquals(1, f.writes)
+            assertTrue(f.off() is DaemonControlReply.Acknowledged)
+            f.poll(); assertEquals(1, f.writes)
+            val on = requireNotNull(f.host.stage(caller, f.root.snapshot().control,
+                "retained-mcs-master-on", DaemonProtectionCommand.MasterOn))
+            f.applyActivation(on); f.poll()
+            assertEquals(1, f.writes) // Switching master OFF/ON cannot reset consumption.
+            f.connection = GcmConnectionState.REPORTED_CONNECTED
+            f.poll()
+            assertFalse(FcmRecoveryStoreCodec.decode(requireNotNull(f.root.bytes(DaemonDomainRole.FCM_RECOVERY))).mcsConsumed)
+            f.connection = GcmConnectionState.REPORTED_DISCONNECTED
+            f.poll(); assertEquals(2, f.writes)
+        }
+    }
+
+    @Test fun detailedFcmPreparationDistinguishesBusyUnqualifiedAndUnavailableRecovery() {
+        for (reason in listOf(DaemonFcmPreparationReason.FCM_BUSY, DaemonFcmPreparationReason.READ_UNQUALIFIED,
+            DaemonFcmPreparationReason.RECOVERY_UNAVAILABLE)) Fixture().use { f ->
+            f.reconcile()
+            when (reason) {
+                DaemonFcmPreparationReason.FCM_BUSY -> f.idle = false
+                DaemonFcmPreparationReason.READ_UNQUALIFIED -> f.connection = GcmConnectionState.UNKNOWN
+                DaemonFcmPreparationReason.RECOVERY_UNAVAILABLE -> f.recoveryAllowed = false
+                else -> error("Unexpected fixture")
+            }
+            val attempt = f.host.stageFcmOnDetailed(caller, f.root.snapshot().control, "not-staged-${reason.name}", historicalCaller)
+            assertNull(attempt.challenge); assertEquals(reason, attempt.notStaged?.reason)
+            assertNull(f.root.bytes(DaemonDomainRole.CONTROL_PROPOSAL))
+            assertEquals(0, f.writes); assertEquals(0, f.arms)
+        }
+    }
+
+    @Test fun nullAfterEnteringRootStagingCarriesNoNoStageProof() {
+        Fixture().use { f ->
+            f.reconcile()
+            val before = f.root.snapshot()
+            f.beforeFcmRead = { f.root.controlTransaction(f.root.snapshot().dataRevision) { change ->
+                change.control = change.control.copy(revision = change.control.revision + 1)
+            } }
+            val attempt = f.host.stageFcmOnDetailed(caller, before.control, "staging-raced", historicalCaller)
+            assertNull(attempt.challenge); assertNull(attempt.notStaged)
+            assertNotEquals(before.control, f.root.snapshot().control)
+            assertEquals(0, f.writes); assertEquals(0, f.arms)
+        }
     }
 
     @Test fun bootContinuationUnblocksExistingRecoveryBeforeConnectionWithoutArmingHeartbeat() = runBlocking {

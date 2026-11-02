@@ -30,16 +30,20 @@ internal data class DaemonGuardianPackage(
 internal data class DaemonOwnerEnvironment(val shellUid: Int, val currentUser: Int,
     val bootId: String, val userUnlocked: Boolean)
 
-internal enum class DaemonRequestedExitDetail { REMOVE_TASK, EXPLICIT_STOP, UNKNOWN }
+internal enum class DaemonRequestedExitDetail { REMOVE_TASK, EXPLICIT_STOP, UNKNOWN, KILL_BACKGROUND }
 internal data class DaemonGuardianExit(val reason: StartupExitReason, val timestampMillis: Long,
     val requestedDetail: DaemonRequestedExitDetail = DaemonRequestedExitDetail.UNKNOWN)
 
-/** REMOVE TASK is ordinary UI departure, not consent revocation; ambiguous requests stay unknown. */
-internal fun daemonStartupExitRecords(records: List<DaemonGuardianExit>?, masterEnabledAtMillis: Long): List<StartupExitRecord>? =
+/** Historical stops retain saved ON only after the current principal is proved usable again.
+ * The default cannot dismiss a stop; ambiguous requested exits remain unknown in either mode. */
+internal fun daemonStartupExitRecords(records: List<DaemonGuardianExit>?, masterEnabledAtMillis: Long,
+    currentPackageUnstopped: Boolean = false): List<StartupExitRecord>? =
     records?.map { exit ->
-        val reason = if (exit.reason != StartupExitReason.USER_REQUESTED) exit.reason else when (exit.requestedDetail) {
-            DaemonRequestedExitDetail.REMOVE_TASK -> StartupExitReason.OTHER
-            DaemonRequestedExitDetail.EXPLICIT_STOP -> StartupExitReason.USER_REQUESTED
+        val reason = if (currentPackageUnstopped && exit.reason == StartupExitReason.USER_STOPPED)
+            StartupExitReason.OTHER else if (exit.reason != StartupExitReason.USER_REQUESTED) exit.reason else when (exit.requestedDetail) {
+            DaemonRequestedExitDetail.REMOVE_TASK, DaemonRequestedExitDetail.KILL_BACKGROUND -> StartupExitReason.OTHER
+            DaemonRequestedExitDetail.EXPLICIT_STOP -> if (currentPackageUnstopped)
+                StartupExitReason.OTHER else StartupExitReason.USER_REQUESTED
             DaemonRequestedExitDetail.UNKNOWN -> if (exit.timestampMillis < masterEnabledAtMillis)
                 StartupExitReason.OTHER else return null
         }
@@ -65,7 +69,8 @@ internal enum class DaemonOwnerEnvironmentStatus {
 /**
  * Fresh pre-dispatch evidence for independent execution. Never grants consent or caches a grant.
  * A runtime permission is necessary even if an app-side Shizuku flag/cached check once succeeded.
- * Caller death/LOW_MEMORY alone does not revoke protection; explicit stops retain existing policy.
+ * Caller death/LOW_MEMORY retain consent. A current stop denies execution; a known historical stop
+ * cannot permanently override saved ON after the exact current package is unstopped and authorized.
  */
 internal class DaemonOwnerEnvironmentProbe(private val port: DaemonOwnerEnvironmentReadPort) {
     fun read(expected: DaemonGuardianInstallation, expectedBoot: String, masterEnabledAtMillis: Long,
@@ -91,14 +96,7 @@ internal class DaemonOwnerEnvironmentProbe(private val port: DaemonOwnerEnvironm
             if (stopped()) return DaemonOwnerEnvironmentStatus.UNKNOWN
             if (port.shizukuRuntimePermission(uid) != true)
                 return DaemonOwnerEnvironmentStatus.PERMISSION_UNAVAILABLE
-            val history = startupExitHistoryDecision(masterEnabledAtMillis, port.wallMillis(),
-                daemonStartupExitRecords(port.guardianExitHistory(uid), masterEnabledAtMillis))
-            when (history) {
-                StartupExitHistoryStatus.USER_STOPPED -> return DaemonOwnerEnvironmentStatus.USER_STOPPED
-                StartupExitHistoryStatus.CRASH_LOOP -> return DaemonOwnerEnvironmentStatus.CRASH_LOOP
-                StartupExitHistoryStatus.UNKNOWN -> return DaemonOwnerEnvironmentStatus.EXIT_HISTORY_UNAVAILABLE
-                StartupExitHistoryStatus.CLEAR -> Unit
-            }
+            val records = port.guardianExitHistory(uid)
             // Recheck the principal and permission after cross-service IO; unknown never authorizes.
             if (stopped()) return DaemonOwnerEnvironmentStatus.UNKNOWN
             packageStatus(port.guardianPackage())?.let { return it }
@@ -107,7 +105,16 @@ internal class DaemonOwnerEnvironmentProbe(private val port: DaemonOwnerEnvironm
             if (port.shizukuRuntimePermission(uid) != true)
                 return DaemonOwnerEnvironmentStatus.PERMISSION_UNAVAILABLE
             if (port.environment() != before) return DaemonOwnerEnvironmentStatus.ENVIRONMENT_CHANGED
-            if (stopped()) DaemonOwnerEnvironmentStatus.UNKNOWN else DaemonOwnerEnvironmentStatus.READY
+            if (stopped()) return DaemonOwnerEnvironmentStatus.UNKNOWN
+            // Only the double-checked current package/UID/permission evidence above supplies this
+            // narrow proof. No consent, master timestamp, history record or persistent OFF changes.
+            when (startupExitHistoryDecision(masterEnabledAtMillis, port.wallMillis(),
+                daemonStartupExitRecords(records, masterEnabledAtMillis, currentPackageUnstopped = true))) {
+                StartupExitHistoryStatus.USER_STOPPED -> DaemonOwnerEnvironmentStatus.USER_STOPPED
+                StartupExitHistoryStatus.CRASH_LOOP -> DaemonOwnerEnvironmentStatus.CRASH_LOOP
+                StartupExitHistoryStatus.UNKNOWN -> DaemonOwnerEnvironmentStatus.EXIT_HISTORY_UNAVAILABLE
+                StartupExitHistoryStatus.CLEAR -> DaemonOwnerEnvironmentStatus.READY
+            }
         } catch (_: Exception) {
             DaemonOwnerEnvironmentStatus.UNKNOWN
         }

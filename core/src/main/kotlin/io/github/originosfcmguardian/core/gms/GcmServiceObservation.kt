@@ -14,9 +14,10 @@ object GcmServiceParser {
     const val MAX_LINE_BYTES = 8192
     private val header = Regex("[ \\t]*SERVICE com\\.google\\.android\\.gms/\\.gcm\\.GcmService [a-fA-F0-9]+ pid=[1-9][0-9]* user=0[ \\t]*")
     private val connected = Regex("[ \\t]+Is client connected: (true|false)[ \\t]*")
-    // Pinned GMS263635035: left is the same current-session clock as Diagnostics Time connected.
-    // Right is the previous duration. Non-ASCII/localized or unfamiliar output stays unknown.
-    private val connectionTime = Regex("[ \\t]+connectTime=([0-9]{1,16}:[0-9]{2}(?::[0-9]{2})?)/([0-9]{1,16}:[0-9]{2}(?::[0-9]{2})?)[ \\t]*")
+    // GMS reports DateUtils elapsed clocks: current session / previous session. The previous
+    // value cannot invalidate the current one; only its bounded numeric/sentinel shape matters.
+    // Unknown suffixes and non-ASCII/localized formats remain unknown, without changing state.
+    private val connectionTime = Regex("[ \\t]+connectTime=([0-9]{1,16}:[0-9]{2}(?::[0-9]{2})?)/(?:[0-9]{1,16}(?::[0-9]{2}){0,2}|-|--:--(?::--)?)[ \\t]*")
     private val failure = Regex("(?i)(permission denial|permission denied|securityexception|remoteexception|error dumping|timed out|timeout while|exception while)")
     private val failureBanner = Regex("(?i)^[ \\t]*(?:\\*{3}[ \\t]*)?(?:(?:SERVICE[ \\t]+)?DUMP[ \\t]+TIMEOUT\\b|ERROR\\b|FAILURE[ \\t]+DUMPING\\b)")
     fun unknown(status: SourceCompleteness) = GcmServiceSource(GcmConnectionState.UNKNOWN, status)
@@ -63,7 +64,7 @@ object GcmServiceParser {
             if (line.startsWith("connectTime=", start)) {
                 durationFields++
                 val match = connectionTime.matchEntire(line)
-                durationMillis = if (headers == 1 && match != null && parseElapsedDuration(match.groupValues[2]) != null)
+                durationMillis = if (headers == 1 && match != null)
                     parseElapsedDuration(match.groupValues[1]) else null
             }
         }
@@ -100,8 +101,10 @@ object GcmServiceParser {
         require(parts.size in 2..3)
         val seconds = parts.last().toLong(); require(seconds in 0..59)
         val minutes = parts[parts.size - 2].toLong()
-        require(parts[parts.size - 2].length == 2 && minutes in 0..59)
-        val hours = if (parts.size == 3) parts[0].toLong().also { require(it > 0) } else 0L
+        // Two fields are total minutes and seconds. Three fields are hours, minutes, seconds.
+        if (parts.size == 3) require(parts[1].length == 2 && minutes in 0..59)
+        else require(minutes >= 0)
+        val hours = if (parts.size == 3) parts[0].toLong().also { require(it >= 0) } else 0L
         Math.multiplyExact(Math.addExact(Math.addExact(Math.multiplyExact(hours, 3600),
             Math.multiplyExact(minutes, 60)), seconds), 1000)
     }.getOrNull()

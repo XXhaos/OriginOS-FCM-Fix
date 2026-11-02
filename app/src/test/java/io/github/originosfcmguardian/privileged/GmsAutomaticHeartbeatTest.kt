@@ -14,7 +14,7 @@ import org.junit.Test
 
 class GmsAutomaticHeartbeatTest {
     private val caller = 10333
-    private val sample = GmsConnectionObservation.Sample(1, 10208, 99, 100, 200, "a".repeat(64),
+    private val sample = GmsConnectionObservation.Sample(1, 10208, 99, 100, 200, FcmRecoveryPolicy.SIGNER,
         "11111111-2222-3333-4444-555555555555", 1000, 900,
         SocketSource(SourceCompleteness.UNAVAILABLE, false), SocketSource(SourceCompleteness.UNAVAILABLE, false), false, emptyList(),
         GcmServiceSource(GcmConnectionState.REPORTED_CONNECTED, SourceCompleteness.COMPLETE, 1000, 900, 0))
@@ -31,12 +31,19 @@ class GmsAutomaticHeartbeatTest {
         var callerOwners = listOf("io.github.originosfcmguardian")
         var versionOffset = 0L
         var serviceState = sample.gcmService
+        var signer = sample.signerSha256
+        var gmsOwners = listOf(GMS_OBSERVATION_PACKAGE)
+        var members = emptyMap<String, GmsPackageIdentity>()
+        var memberReads = 0
+        var duringMember: () -> Unit = {}
+        var duringService: () -> Unit = {}
         override fun environment() = GmsProbeEnvironment(0, 2000, sample.bootId)
         override fun gmsPackage() = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-            sample.uid, sample.versionCode + versionOffset, sample.firstInstallTime, sample.lastUpdateTime, sample.signerSha256)
-        override fun packagesForUid(uid: Int) = if (uid == sample.uid) listOf(GMS_OBSERVATION_PACKAGE) else callerOwners
+            sample.uid, sample.versionCode + versionOffset, sample.firstInstallTime, sample.lastUpdateTime, signer)
+        override fun packageIdentity(packageName: String): GmsPackageIdentity? { memberReads++; duringMember(); return members[packageName] }
+        override fun packagesForUid(uid: Int) = if (uid == sample.uid) gmsOwners else callerOwners
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) = SocketSource(SourceCompleteness.UNAVAILABLE, false)
-        override fun gcmService(interrupted: () -> Boolean) = serviceState
+        override fun gcmService(interrupted: () -> Boolean): GcmServiceSource { duringService(); return serviceState }
         override fun reconnectReceivers() = GmsReceiverInspection(false, emptyList())
         override fun elapsedRealtime() = 900L
     }
@@ -53,6 +60,39 @@ class GmsAutomaticHeartbeatTest {
         override fun waitFor(timeout: Long, unit: TimeUnit): Boolean { if (alive) Thread.sleep(unit.toMillis(timeout)); return !alive }
         override fun destroy() { destroyed = true; destruction.countDown() }
         override fun destroyForcibly(): Process { alive = false; return this }
+    }
+    @Test fun officialSharedUidWithUnknownPeerCanArmAndDispatchButGuardianCallerRemainsExclusive() {
+        val peerName = "org.example.googlemember"
+        val port = Port().apply {
+            signer = FcmRecoveryPolicy.SIGNER
+            gmsOwners = listOf(GMS_OBSERVATION_PACKAGE, peerName)
+            members = emptyMap()
+        }
+        val observed = observeGmsConnection(1, port) as GmsConnectionObservation.Sample
+        assertEquals(SocketObservation.UNKNOWN, observed.observation)
+        var time = 0L; var launches = 0
+        val workerThread = AtomicReference<Thread>()
+        val runner = GmsHeartbeatRunner({ workerThread.set(Thread.currentThread()); port },
+            { launches++; Child(accepted) }, clock = { time })
+        val executorField = GmsHeartbeatRunner::class.java.getDeclaredField("worker").apply { isAccessible = true }
+        (executorField.get(runner) as ThreadPoolExecutor).setKeepAliveTime(1, TimeUnit.MILLISECONDS)
+        try {
+            val armed = runner.armAutomatic(1, caller, 1, gmsHeartbeatBindingDigest(observed), Lifetime()) { false }
+            assertEquals(GmsAutoArmReason.ARMED, armed.reason)
+            val session = checkNotNull(armed.session)
+            val original = checkNotNull(workerThread.get()); original.join(5000); assertFalse(original.isAlive)
+            time = GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
+            assertEquals(GmsHeartbeatStatus.REQUESTED, runner.requestAutomatic(2, caller,
+                session, UUID.randomUUID().toString()) { false }.status)
+            assertEquals(1, launches)
+            val dispatched = checkNotNull(workerThread.get()); dispatched.join(5000); assertFalse(dispatched.isAlive)
+            port.duringService = { port.callerOwners = port.callerOwners + "org.example.othercaller" }
+            time += GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
+            val denied = runner.requestAutomatic(3, caller, session, UUID.randomUUID().toString()) { false }
+            assertEquals(GmsHeartbeatStatus.NOT_SENT, denied.status)
+            assertEquals(GmsHeartbeatReason.CALLER_UNAVAILABLE, denied.reason)
+            assertEquals(1, launches)
+        } finally { runner.close() }
     }
     @Test fun guardedHeartbeatRechecksConnectionAndIdentityAfterOwnershipReads() {
         val changes: List<(Port) -> Unit> = listOf({ it.versionOffset++ },

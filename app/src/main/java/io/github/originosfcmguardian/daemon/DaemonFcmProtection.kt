@@ -415,7 +415,7 @@ internal class DaemonFcmProtection(
             val sample = observation as? GmsConnectionObservation.Sample ?: return null
             if (!authorized(pinned) || !bundled.admits(sample, false) ||
                 GmsHeartbeatPolicy.rejection(sample, elapsed()) != null ||
-                !FcmRecoveryPolicy.connected(sample, elapsed())) return null
+                !FcmRecoveryPolicy.reportedConnected(sample, elapsed())) return null
             derived = bundledHeartbeat.derive(pinned, sample)
             val child = derived ?: return null
             if (!authorized(pinned) || heartbeat.read() != child) return null

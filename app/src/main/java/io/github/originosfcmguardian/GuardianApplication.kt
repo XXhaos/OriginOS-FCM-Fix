@@ -8,6 +8,7 @@ class GuardianApplication : Application() {
         super.onCreate()
         if (getProcessName() == packageName) {
             io.github.originosfcmguardian.daemon.DaemonAppRuntime.onAppCreated(this)
+            io.github.originosfcmguardian.pushactivation.PushActivationRuntime.initialize(this)
             io.github.originosfcmguardian.protection.LegacyInspectionCleanup.cancel(this)
             ProtectionLifecycleDiagnostics.initialize(this)
         }

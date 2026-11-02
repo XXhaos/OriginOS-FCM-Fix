@@ -21,6 +21,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MarkdownDiagnosticReportTest {
+    @Test fun initialReadFailureKeepsStageReasonAndBothClocksWithoutRecoveryEvents() {
+        val report = base().copy(fcmProtection = FcmProtectionUiState(initialReadFailure =
+            io.github.originosfcmguardian.fcmprotection.FcmInitialReadFailure(
+                io.github.originosfcmguardian.privileged.GmsConnectionReadStage.INTERACTIVE_ADMISSION,
+                GmsUnknown.TIMED_OUT, 8123, 456)))
+        val markdown = render(report)
+        assertTrue(markdown.contains("最近一次初始读取失败阶段（App 确认）：INTERACTIVE\\_ADMISSION"))
+        assertTrue(markdown.contains("最近一次初始读取失败原因：TIMED\\_OUT"))
+        assertTrue(markdown.contains("初始读取失败时间（Epoch ms）：8123"))
+        assertTrue(markdown.contains("初始读取失败时间（elapsed ms）：456"))
+        assertTrue(report.fcmRecoveryTrial.events.isEmpty())
+        assertFalse(markdown.contains("exception")); assertFalse(markdown.contains("signerSha256"))
+        val empty = render(base())
+        assertTrue(empty.contains("最近一次初始读取失败原因：未知或不可用（null）"))
+    }
+
     @Test
     fun populatedReportRetainsEveryRepresentedSectionAndValue() {
         val report = base().copy(
@@ -381,6 +397,18 @@ class MarkdownDiagnosticReportTest {
             "请求接受不等于恢复成功", "不证明唯一原因或通知送达").forEach { assertTrue(it, markdown.contains(it)) }
         assertFalse(markdown.contains(correlation))
         assertFalse(markdown.contains("requestCorrelationId"))
+    }
+
+    @Test
+    fun coldStartFailureIsVisibleWithoutInventingDaemonSessionHistory() {
+        val markdown = render(base().copy(daemonAdoption = io.github.originosfcmguardian.daemon.DaemonAdoptionDiagnostics(
+            status = io.github.originosfcmguardian.daemon.DaemonAdoptionStatus.FAILED,
+            stage = io.github.originosfcmguardian.daemon.DaemonAdoptionStage.AUTHENTICATION,
+            reason = io.github.originosfcmguardian.daemon.DaemonAdoptionReason.PERMISSION_UNAVAILABLE,
+            attemptCount = 2, lastAttemptAtEpochMillis = 8_000, lastOutcomeAtEpochMillis = 8_500)))
+        listOf("## 后台核心初始化", "状态：FAILED", "阶段：AUTHENTICATION", "原因：PERMISSION\\_UNAVAILABLE",
+            "本进程尝试次数：2", "最近尝试时间（Epoch ms）：8000", "最近结果时间（Epoch ms）：8500",
+            "仅记录当前 App 进程的首次接管尝试").forEach { assertTrue(it, markdown.contains(it)) }
     }
 
     private fun base(): CombinedDiagnosticReport = buildCombinedDiagnosticReport(HomeUiState(), environment(), 9000)

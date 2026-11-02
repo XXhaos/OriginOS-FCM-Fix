@@ -124,6 +124,11 @@ internal class DaemonControlCommandPlanner(private val targets: DaemonControlTar
                     if (context.fcmHeartbeatClosure?.matches(snapshot) != true) return null
                     patch[DaemonDomainRole.HEARTBEAT] = HeartbeatSnapshotCodec.encode(previous.retiredForExplicitConfirmation())
                     patch[DaemonDomainRole.HEARTBEAT_HALT] = null
+                } else if (snapshot.bytes(DaemonDomainRole.HEARTBEAT) == null &&
+                    snapshot.bytes(DaemonDomainRole.HEARTBEAT_HALT) != null) {
+                    // Explicit OFF can precede the first child. Its canonical halt carries no
+                    // endpoint or unsettled result; this new confirmation may initialize one.
+                    patch[DaemonDomainRole.HEARTBEAT_HALT] = null
                 }
                 val parentStorage = ScratchParent(snapshot)
                 val parent = FcmProtectionStore(parentStorage)
@@ -174,9 +179,10 @@ internal class DaemonControlCommandPlanner(private val targets: DaemonControlTar
 
     private fun cleanHeartbeat(snapshot: DaemonProtectionRootSnapshot): Boolean {
         if (snapshot.bytes(DaemonDomainRole.HEARTBEAT_PENDING) != null) return false
+        val halt = snapshot.bytes(DaemonDomainRole.HEARTBEAT_HALT)
+        if (halt != null && !halt.contentEquals(byteArrayOf(1))) return false
         val raw = snapshot.bytes(DaemonDomainRole.HEARTBEAT)
-        if (raw == null) return snapshot.bytes(DaemonDomainRole.HEARTBEAT_INITIALIZED) == null &&
-            snapshot.bytes(DaemonDomainRole.HEARTBEAT_HALT) == null
+        if (raw == null) return snapshot.bytes(DaemonDomainRole.HEARTBEAT_INITIALIZED) == null
         if (snapshot.bytes(DaemonDomainRole.HEARTBEAT_INITIALIZED)?.contentEquals(byteArrayOf(1)) != true) return false
         val old = HeartbeatSnapshotCodec.decode(raw)
         return !old.configured && old.pause == null && old.remoteSessionId == null && old.durableConsent == null &&

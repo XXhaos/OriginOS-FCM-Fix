@@ -8,6 +8,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
@@ -16,6 +18,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.printToLog
 import androidx.compose.ui.test.performClick
@@ -46,11 +49,10 @@ class HomeAppsNavigationTest {
         var starts = 0
         var stops = 0
         var checks = 0
-        var connectionReads = 0
         val state = mutableStateOf(HomeUiState(shizuku = ShizukuStatusSnapshot(ShizukuStatus.READY_SHELL, "ready")))
         compose.setContent { Fixture(state.value, shizukuAction = { actions++ },
-            startProtection = { starts++ }, stop = { stops++ }, check = { checks++ },
-            readConnection = { connectionReads++ }) }
+            startProtection = { starts++ }, stop = { stops++ }, check = { checks++ }) }
+        compose.onNodeWithText("FCM连接时长", substring = true).assertDoesNotExist()
         listOf(ShizukuStatus.READY_SHELL, ShizukuStatus.NOT_RUNNING).forEach { status ->
             compose.runOnIdle { state.value = state.value.copy(shizuku = ShizukuStatusSnapshot(status, "fixture")) }
             // No scroll: the shortcut belongs to the first card, not a separate bottom card.
@@ -60,7 +62,6 @@ class HomeAppsNavigationTest {
             compose.onNodeWithContentDescription("连接与后台设置").assertIsDisplayed()
         }
         compose.runOnIdle {
-            assertTrue("Visible Home refreshes connection evidence", connectionReads > 0)
             assertEquals(0, actions); assertEquals(0, starts); assertEquals(0, stops); assertEquals(0, checks)
         }
     }
@@ -132,17 +133,22 @@ class HomeAppsNavigationTest {
         compose.runOnIdle { assertEquals(0, actions) }
     }
 
-    @Test fun settingsShowsGeneratedBuildVersionWithoutAddingPrimaryPageContentOrStoppingProtection() {
+    @Test fun homeShowsGeneratedBuildVersionAndSettingsEndsWithExportWithoutStoppingProtection() {
         var stops = 0
         val version = BuildConfig.VERSION_NAME
         compose.setContent { Fixture(HomeUiState(), stop = { stops++ }) }
-        compose.onNodeWithText("关于").assertDoesNotExist()
+        compose.onNodeWithText("关于").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("OriginOS FCM Guardian").assertExists()
+        compose.onNodeWithText(version).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("检查更新").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("导出日志").assertDoesNotExist()
         compose.onNodeWithContentDescription("应用标签").performClick()
         compose.onNodeWithText(version).assertDoesNotExist()
+        compose.onNodeWithText("关于").assertDoesNotExist()
         openSettings()
-        compose.onNodeWithText("关于").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("OriginOS FCM Guardian").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText(version).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("关于").assertDoesNotExist()
+        compose.onNodeWithText(version).assertDoesNotExist()
+        compose.onNodeWithText("检查更新").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, stops) }
         compose.onNodeWithText("后台设置").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("通知显示设置").assertExists()
@@ -151,9 +157,14 @@ class HomeAppsNavigationTest {
         compose.onNodeWithText("后台与通知").assertDoesNotExist()
         compose.onNodeWithText("自启动设置").assertDoesNotExist()
         compose.onNodeWithText("诊断").assertDoesNotExist()
+        compose.onNodeWithText("导出日志").performScrollTo().assertIsDisplayed().assertHasClickAction()
+        compose.onAllNodesWithText("导出日志").assertCountEquals(1)
+        compose.onNodeWithText("包含软件信息").assertDoesNotExist()
+        compose.onNodeWithText("导出脱敏日志").assertDoesNotExist()
         compose.onNodeWithText("返回").performClick()
-        compose.onNodeWithText("关于").assertDoesNotExist()
-        compose.onNodeWithText(version).assertDoesNotExist()
+        compose.onNodeWithText("关于").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(version).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("导出日志").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, stops) }
     }
 
@@ -219,7 +230,8 @@ class HomeAppsNavigationTest {
 
     @Test fun homeMasterOffRetainsAppChoicesAndNavigationDoesNotStopAgain() {
         var stops = 0
-        val state = mutableStateOf(HomeUiState(selectedTargets = listOf(telegram), automaticProtection =
+        val state = mutableStateOf(HomeUiState(selectedTargets = listOf(telegram),
+            fcmProtection = io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState(configured = true), automaticProtection =
             AutomaticProtectionState(masterEnabled = true, savedAuthorization = true, targets = listOf(
                 AutomaticProtectionTargetState(telegram.identity, savedAuthorization = true)))))
         compose.setContent { Fixture(state.value, stop = {
@@ -246,8 +258,7 @@ class HomeAppsNavigationTest {
     }
 
     @Composable private fun Fixture(state: HomeUiState, stop: () -> Unit = {}, stopMonitor: () -> Unit = {},
-        shizukuAction: () -> Unit = {}, check: () -> Unit = {}, startProtection: () -> Unit = {},
-        readConnection: () -> Unit = {}) {
+        shizukuAction: () -> Unit = {}, check: () -> Unit = {}, startProtection: () -> Unit = {}) {
         val visibleState = state.copy(visibleApps = state.selectedTargets.map {
             VisibleProtectionApp(it.identity.packageName, it.label, it.identity, supported = true)
         }, visibleAppsLoadState = HomeSourceLoadState.LOADED)
@@ -258,6 +269,6 @@ class HomeAppsNavigationTest {
 
              onStopAutomaticProtection = stop,
             onRequestAutomaticProtection = startProtection, onConfirmAutomaticProtection = startProtection,
-            onRequestAppAutomaticProtection = { startProtection() }, onReadGmsConnection = readConnection) }
+            onRequestAppAutomaticProtection = { startProtection() }) }
     }
 }

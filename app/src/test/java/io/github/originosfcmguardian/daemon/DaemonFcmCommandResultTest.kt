@@ -2,6 +2,7 @@ package io.github.originosfcmguardian.daemon
 
 import io.github.originosfcmguardian.autoprotection.AutomaticProtectionState
 import io.github.originosfcmguardian.fcmprotection.FcmProtectionUiState
+import io.github.originosfcmguardian.core.gms.GmsUnknown
 import io.github.originosfcmguardian.recovery.RecoveryCountsUiState
 import kotlinx.coroutines.*
 import org.junit.Assert.*
@@ -38,6 +39,45 @@ class DaemonFcmCommandResultTest {
         assertTrue(completion.observed(root, status(root), ui()))
         assertEquals(DaemonFcmCommandOutcome.APPLIED, completion.result.await().outcome)
         assertEquals(request.requestId, completion.result.await().requestId)
+    }
+
+    @Test fun exactNoStageProofMaySettleExpectationOnlyWithoutErasingItsReadFailure() = runBlocking {
+        val completion = DaemonFcmCommandCompletion(request.requestId)
+        assertTrue(completion.expect(before)) // This must remain before the remote STAGE call.
+        val failure = DaemonFcmPreparationFailure(DaemonFcmPreparationReason.READ_UNAVAILABLE, GmsUnknown.TIMED_OUT)
+        assertTrue(completion.notStaged(failure))
+        val result = completion.result.await()
+        assertEquals(DaemonFcmCommandOutcome.SAFE_RETRY, result.outcome)
+        assertEquals(DaemonFcmCommandReason.NOT_STAGED, result.reason)
+        assertEquals(failure.reason, result.preparationReason); assertEquals(failure.readUnknown, result.readUnknown)
+        assertFalse(completion.observed(root(), status(root()), ui()))
+        assertEquals(result, completion.result.await())
+    }
+
+    @Test fun notDispatchedAdmissionRetainsBusyNotRemoteAndPreparationReasons() = runBlocking {
+        for ((reason, detail) in listOf(DaemonFcmCommandReason.BUSY to DaemonFcmPreparationReason.CLIENT_BUSY,
+            DaemonFcmCommandReason.NOT_REMOTE to DaemonFcmPreparationReason.NOT_REMOTE,
+            DaemonFcmCommandReason.PREPARATION to DaemonFcmPreparationReason.PREPARATION_UNAVAILABLE)) {
+            val completion = DaemonFcmCommandCompletion(request.requestId)
+            assertTrue(completion.notStaged(DaemonFcmPreparationFailure(detail), reason))
+            assertEquals(DaemonFcmCommandOutcome.SAFE_RETRY, completion.result.await().outcome)
+            assertEquals(reason, completion.result.await().reason)
+        }
+    }
+
+    @Test fun stagedPlanDeadlineAndOffCannotBeReclassifiedAsSafeRetry() = runBlocking {
+        val failure = DaemonFcmPreparationFailure(DaemonFcmPreparationReason.FCM_BUSY)
+        val staged = pending()
+        assertFalse(staged.notStaged(failure)); assertFalse(staged.result.isCompleted)
+        staged.finish(DaemonFcmCommandOutcome.UNKNOWN, DaemonFcmCommandReason.ACKNOWLEDGEMENT)
+        assertEquals(DaemonFcmCommandOutcome.UNKNOWN, staged.result.await().outcome)
+        for ((outcome, reason) in listOf(DaemonFcmCommandOutcome.UNKNOWN to DaemonFcmCommandReason.TIMEOUT,
+            DaemonFcmCommandOutcome.REJECTED to DaemonFcmCommandReason.STOP_REQUESTED)) {
+            val completed = DaemonFcmCommandCompletion(request.requestId)
+            completed.finish(outcome, reason)
+            assertFalse(completed.notStaged(failure))
+            assertEquals(outcome, completed.result.await().outcome); assertEquals(reason, completed.result.await().reason)
+        }
     }
 
     @Test fun lostStageReplyNeedsTheSameProposalBeforeAReceiptCanAcknowledgeIt() = runBlocking {

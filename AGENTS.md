@@ -15,6 +15,18 @@ README.md, CONTRIBUTING.md and docs/BUILDING.md before changing behavior.
 
 ## Protection invariants
 
+- Core functionality is the first acceptance criterion for every update and fix.
+  Preserve actual app wake recovery, FCM observation/maintenance/recovery and
+  automatic continuation while honoring the user's saved ON/OFF intent. UI polish,
+  diagnostics, resource savings and release automation must not obstruct them.
+- Treat unnecessary compatibility gates, startup dead ends, competing reads and
+  extra manual completion steps as functional defects. Prefer verified runtime
+  capabilities and safe compatible paths; preserve real identity, permission and
+  unknown-result checks rather than removing them to make a switch look enabled.
+- Verify affected execution and continuation paths before delivery. A green build,
+  successful command or enabled UI is not proof of working protection. Fix or
+  roll back a demonstrated functional regression before accepting an optimization;
+  clearly identify device behavior that has not yet been verified.
 - Preserve explicit user ON/OFF, selected applications and durable state.
 - Temporary process, network or Shizuku loss is not an instruction to turn OFF.
 - Keep fresh identity/permission checks, unknown-result fences, bounded reads

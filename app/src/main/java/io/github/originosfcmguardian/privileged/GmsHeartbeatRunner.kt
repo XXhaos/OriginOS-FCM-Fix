@@ -180,13 +180,14 @@ internal class GmsHeartbeatRunner(
             try {
                 interruption()?.let { return@submit gate.failure(requestId, it) }
                 val port = portFactory()
+                var ownership: GmsPackageOwnership? = null
                 val observation = observeGmsConnection(requestId, port, {
                     when (interruption()) {
                         GmsHeartbeatReason.TIMED_OUT -> GmsUnknown.TIMED_OUT
                         null -> null
                         else -> GmsUnknown.CANCELLED
                     }
-                })
+                }, ownershipObserved = { ownership = it })
                 interruption()?.let { return@submit gate.failure(requestId, it) }
                 GmsHeartbeatPolicy.rejection(observation, port.elapsedRealtime())?.let {
                     return@submit gate.failure(requestId, it)
@@ -201,7 +202,7 @@ internal class GmsHeartbeatRunner(
                     }
                     val fresh = observeGmsConnection(requestId, port, {
                         if (interruption() == null) null else GmsUnknown.CANCELLED
-                    })
+                    }, ownershipObserved = { ownership = it })
                     interruption()?.let { return@submit gate.failure(requestId, it) }
                     GmsHeartbeatPolicy.rejection(fresh, port.elapsedRealtime())?.let {
                         return@submit gate.failure(requestId, it)
@@ -213,13 +214,15 @@ internal class GmsHeartbeatRunner(
                 }
                 // Repeat exact installation/owner/boot/user guards immediately before opening dispatch.
                 val identity = port.gmsPackage()
-                val owners = port.packagesForUid(sample.uid)
+                val owners = readGmsPackageOwnership(port, identity) { interruption() != null }
                 val environment = port.environment()
                 if (!gmsIdentityMatchesSample(identity, sample) ||
-                    owners != listOf(GMS_OBSERVATION_PACKAGE) || environment.currentUser != 0 ||
+                    owners == null || owners != ownership || environment.currentUser != 0 ||
                     environment.serviceUid != 2000 || environment.bootId != sample.bootId) {
                     return@submit gate.failure(requestId, GmsHeartbeatReason.IDENTITY_CHANGED)
                 }
+                if (cap != null && !guardianCaller(port, cap.callerUid))
+                    return@submit gate.failure(requestId, GmsHeartbeatReason.CALLER_UNAVAILABLE)
                 GmsHeartbeatPolicy.rejection(sample, port.elapsedRealtime())?.let { return@submit gate.failure(requestId, it) }
                 // Never run fresh Binder/PM IO inside automatic.launch's capability monitor.
                 val (process, rejected) = automatic.launch(cap, sample, gate::begin) {

@@ -56,14 +56,13 @@ class FcmRecoveryStoreTest {
             status = FcmRecoveryStatus.UNKNOWN, reason = FcmRecoveryReason.TIMED_OUT))
         assertNull(recreated.consume(sample(at = 2000, elapsed = 200)))
     }
-    @Test fun `only newer full connected owner socket with usable network rearms`() {
+    @Test fun `only newer full official connected service with usable network rearms`() {
         val storage = Storage(); val store = FcmRecoveryStore(storage); val missing = sample()
         store.confirm(FcmRecoveryPolicy.binding(missing)); store.consume(missing)
         val connected = sample(GcmConnectionState.REPORTED_CONNECTED, 2000, 200)
         listOf(sample(GcmConnectionState.REPORTED_DISCONNECTED, 2000, 200),
             sample(GcmConnectionState.UNKNOWN, 2000, 200, SourceCompleteness.MALFORMED),
             sample(GcmConnectionState.REPORTED_CONNECTED),
-            sample(GcmConnectionState.REPORTED_CONNECTED, 2000, 200, socket = false),
             connected.copy(versionCode = FcmRecoveryPolicy.VERSION + 1)).forEach {
             assertTrue(store.rearm(it, 200, true).consumed)
         }
@@ -120,11 +119,32 @@ class FcmRecoveryStoreTest {
             tcp = SocketSource(SourceCompleteness.COMPLETE, true),
             gcmService = GcmServiceSource(GcmConnectionState.REPORTED_CONNECTED, SourceCompleteness.COMPLETE, 2000, 200, 0))
         assertTrue(resumed.rearm(connected, 200, false).mcsConsumed)
-        assertTrue(resumed.rearm(connected.copy(tcp = SocketSource(SourceCompleteness.COMPLETE, false)), 200, true).mcsConsumed)
         assertTrue(resumed.rearm(connected, 200, true, false).mcsConsumed)
         assertFalse(resumed.rearm(connected, 200, true, true).mcsConsumed)
         assertNull(storage.mcsMarker)
         assertNotNull(resumed.consume(dis.copy(gcmService = dis.gcmService.copy(observedAtMillis = 3000, elapsedRealtimeMillis = 300)), operation))
+    }
+
+    @Test fun `service connected can rearm without socket proof but unknown OFF and identity changes cannot`() {
+        val storage = Storage(); val store = FcmRecoveryStore(storage); val missing = sample()
+        store.confirm(FcmRecoveryPolicy.binding(missing)); store.consume(missing)
+        val connected = sample(GcmConnectionState.REPORTED_CONNECTED, 2000, 200).copy(
+            tcp = SocketSource(SourceCompleteness.UNAVAILABLE, false),
+            tcp6 = SocketSource(SourceCompleteness.UNAVAILABLE, false))
+        for (unsafe in listOf(connected.copy(signerSha256 = "a".repeat(64)),
+            connected.copy(versionCode = connected.versionCode + 1),
+            connected.copy(bootId = "aaaaaaaa-1234-1234-1234-123456789abc"),
+            connected.copy(gcmService = connected.gcmService.copy(state = GcmConnectionState.UNKNOWN,
+                completeness = SourceCompleteness.UNAVAILABLE)))) {
+            assertTrue(store.rearm(unsafe, 200, true).consumed)
+        }
+        assertTrue(store.rearm(connected, 30_201, true).consumed)
+        assertFalse(FcmRecoveryPolicy.connected(connected, 200))
+        assertFalse(store.rearm(connected, 200, true).consumed)
+        assertNotNull(store.consume(sample(at = 3000, elapsed = 300)))
+        store.disable()
+        assertTrue(store.rearm(connected.copy(observedAtMillis = 4000, elapsedRealtimeMillis = 400,
+            gcmService = connected.gcmService.copy(observedAtMillis = 4000, elapsedRealtimeMillis = 400)), 400, true).consumed)
     }
     @Test fun `legacy version two stores absence and power unchanged with no fabricated MCS operation`() {
         val event = FcmRecoveryEvent(1000, 100, FcmRecoveryEventAction.REQUEST_RESULT,

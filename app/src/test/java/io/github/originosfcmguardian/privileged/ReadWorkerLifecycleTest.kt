@@ -39,7 +39,7 @@ class ReadWorkerLifecycleTest {
     private val gmsPort = object : GmsConnectionReadPort {
         override fun environment() = GmsProbeEnvironment(0, 2000, "12345678-1234-1234-1234-123456789abc")
         override fun gmsPackage() = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-            10234, 99, 123, 456, "a".repeat(64))
+            10234, 99, 123, 456, FcmRecoveryPolicy.SIGNER)
         override fun packagesForUid(uid: Int) = listOf(GMS_OBSERVATION_PACKAGE)
         override fun sockets(ipv6: Boolean, uid: Int, interrupted: () -> Boolean) =
             SocketSource(SourceCompleteness.COMPLETE, !ipv6)

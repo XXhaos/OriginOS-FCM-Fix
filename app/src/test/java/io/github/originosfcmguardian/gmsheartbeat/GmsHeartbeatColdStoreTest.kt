@@ -17,6 +17,7 @@ internal class ColdHeartbeatStorage : HeartbeatStorage {
     var pendingValue: HeartbeatPending? = null
     var damagedPending = false
     var interruptedAtomic = false
+    var malformedHalt = false
     var failAt: String? = null
     private fun boundary(name: String) { events += name; check(failAt != name) }
     override fun <T> exclusive(action: () -> T): T = action()
@@ -29,6 +30,8 @@ internal class ColdHeartbeatStorage : HeartbeatStorage {
         else -> null
     }
     override fun unsettledPending() = pendingValue != null || damagedPending
+    override fun cleanOffHaltForDaemonMigration() = haltPresent && !malformedHalt &&
+        !unsettledPending() && !interruptedAtomic
     override fun halt() { haltPresent = true; boundary("halt-fsync"); boundary("halt-dirsync") }
     override fun pending(value: HeartbeatPending) {
         check(!unsettledPending()); pendingValue = value
@@ -49,6 +52,52 @@ class GmsHeartbeatColdStoreTest {
     private val oldOwner = GmsHeartbeatCallerIdentity(10123, 4001, 123L, "12345678-1234-1234-1234-123456789abc")
     private val newOwner = oldOwner.copy(pid = 4002, startTicks = 124L)
     private fun id() = UUID.randomUUID().toString()
+    @Test fun firstUseDisabledHeartbeatExportsItsExactOffRootWithoutReleasingHalt() {
+        val storage = ColdHeartbeatStorage()
+        val store = GmsAutoHeartbeatStore(storage)
+        val off = store.off(false)
+        val before = storage.memory.bytes!!.copyOf()
+        val events = storage.events.toList()
+        assertTrue(storage.haltPresent)
+        assertEquals(off, store.readForDaemonMigration())
+        assertArrayEquals(before, storage.memory.bytes)
+        assertEquals(events, storage.events)
+        assertTrue(storage.haltPresent)
+        assertNull(off.durableConsent)
+        assertFalse(off.configured)
+    }
+
+    @Test fun offHaltCannotHidePendingInterruptedAtomicOrMalformedHaltDuringMigration() {
+        for (barrier in 0..2) {
+            val storage = ColdHeartbeatStorage()
+            val store = GmsAutoHeartbeatStore(storage)
+            store.off(false)
+            storage.interruptedAtomic = barrier == 0
+            storage.damagedPending = barrier == 1
+            storage.malformedHalt = barrier == 2
+            val before = storage.memory.bytes!!.copyOf()
+            val events = storage.events.toList()
+            assertThrows(Exception::class.java) { store.readForDaemonMigration() }
+            assertArrayEquals(before, storage.memory.bytes)
+            assertEquals(events, storage.events)
+            assertTrue(storage.haltPresent)
+        }
+    }
+
+    @Test fun offHaltNeverAdmitsUnknownPendingRemoteOrBlockedHeartbeatRoots() {
+        val storage = ColdHeartbeatStorage()
+        val store = GmsAutoHeartbeatStore(storage)
+        val off = store.off(false)
+        for (saved in listOf(off.copy(pause = HeartbeatPause.OFF_PENDING),
+            off.copy(remoteSessionId = id()), off.copy(schemaVersion = 3, pendingArm = id()),
+            off.copy(schemaVersion = 2, resumeBlock = HeartbeatResumeBlock.UNKNOWN_RESULT),
+            off.copy(lastStatus = GmsHeartbeatStatus.UNKNOWN, lastReason = GmsHeartbeatReason.TIMED_OUT))) {
+            storage.write(saved)
+            assertThrows(Exception::class.java) { store.readForDaemonMigration() }
+            assertEquals(saved, storage.read())
+        }
+    }
+
     private fun consent(storage: ColdHeartbeatStorage): Pair<GmsAutoHeartbeatStore, HeartbeatSnapshot> {
         val store = GmsAutoHeartbeatStore(storage)
         return store to requireNotNull(store.prepareConfirmation(null, digest, true, oldOwner))

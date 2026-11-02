@@ -38,7 +38,7 @@ internal class FcmRecoveryRunner(
         val stateReason = if (operation == FcmRecoveryOperation.SERVICE_ABSENT_SEND) FcmRecoveryReason.NOT_ABSENT else FcmRecoveryReason.NOT_DISCONNECTED
         fun qualified(sample: GmsConnectionObservation.Sample, port: GmsConnectionReadPort) = when (operation) {
             FcmRecoveryOperation.SERVICE_ABSENT_SEND -> FcmRecoveryPolicy.absent(sample, port.elapsedRealtime())
-            FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS -> FcmRecoveryPolicy.disconnected(sample, port.elapsedRealtime()) && port.usableInternet()
+            FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS -> FcmRecoveryPolicy.mcsRequestEligible(sample, port.elapsedRealtime()) && port.usableInternet()
         }
         fun target(port: GmsConnectionReadPort) = if (operation == FcmRecoveryOperation.SERVICE_ABSENT_SEND)
             port.recoverySenderQualified() else port.disconnectedMcsAttemptAllowed()
@@ -70,12 +70,22 @@ internal class FcmRecoveryRunner(
                 if (operation == FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS && !target(port))
                     return@submit result(FcmRecoveryReason.TARGET_UNQUALIFIED)
                 // Repeat qualified absence and identity after component inspection, just before dispatch.
-                val fresh = observeGmsConnection(requestId, port, { if (interrupted()) GmsUnknown.CANCELLED else null })
+                var ownership: GmsPackageOwnership? = null
+                val fresh = observeGmsConnection(requestId, port, { if (interrupted()) GmsUnknown.CANCELLED else null },
+                    ownershipObserved = { ownership = it })
                     as? GmsConnectionObservation.Sample ?: return@submit result(stateReason)
                 if (!qualified(fresh, port)) return@submit result(stateReason)
                 if (FcmRecoveryPolicy.binding(fresh) != expected) return@submit result(FcmRecoveryReason.IDENTITY_CHANGED)
                 if (operation == FcmRecoveryOperation.SERVICE_ABSENT_SEND && !target(port) ||
                     port.packagesForUid(callerUid) != listOf("io.github.originosfcmguardian"))
+                    return@submit result(FcmRecoveryReason.TARGET_UNQUALIFIED)
+                val identity = port.gmsPackage()
+                val finalOwnership = readGmsPackageOwnership(port, identity, ::interrupted)
+                val environment = port.environment()
+                if (!gmsIdentityMatchesSample(identity, fresh) || finalOwnership == null || finalOwnership != ownership ||
+                    environment.currentUser != 0 || environment.serviceUid != 2000 || environment.bootId != fresh.bootId)
+                    return@submit result(FcmRecoveryReason.IDENTITY_CHANGED)
+                if (port.packagesForUid(callerUid) != listOf("io.github.originosfcmguardian"))
                     return@submit result(FcmRecoveryReason.TARGET_UNQUALIFIED)
                 if (!qualified(fresh, port)) return@submit result(stateReason)
                 val fixedLaunch = if (operation == FcmRecoveryOperation.SERVICE_ABSENT_SEND) launch else mcsLaunch

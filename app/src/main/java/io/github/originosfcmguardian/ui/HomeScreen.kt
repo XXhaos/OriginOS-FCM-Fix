@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -56,6 +58,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,7 +67,6 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import io.github.originosfcmguardian.BuildConfig
 import io.github.originosfcmguardian.R
-import io.github.originosfcmguardian.diagnostics.DiagnosticReportFormat
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import io.github.originosfcmguardian.autostart.TargetAutostartStatus
 import io.github.originosfcmguardian.autostart.SelectedTargetIdentity
@@ -81,7 +83,7 @@ fun HomeScreen(
     onSetTargetSelected: (String, Boolean) -> Unit,
     onCheckTarget: (String) -> Unit,
     onClearCorruptTargetSelection: () -> Unit,
-    onExportCombinedDiagnosticReport: (DiagnosticReportFormat) -> Unit = {},
+    onExportCombinedDiagnosticReport: () -> Unit = {},
     onRequestStoppedRecovery: (SelectedTargetIdentity) -> Unit = {},
     onConfirmStoppedRecovery: () -> Unit = {},
     onDismissStoppedRecovery: () -> Unit = {},
@@ -99,7 +101,6 @@ fun HomeScreen(
     onRefreshShizuku: () -> Unit = {},
     onOpenShizuku: () -> Unit = {},
     onOpenFcmDiagnostics: () -> Boolean = { false },
-    onReadGmsConnection: () -> Unit = {},
     onRequestFcmProtection: () -> Unit = {},
     onConfirmFcmProtection: () -> Unit = {},
     onDismissFcmProtection: () -> Unit = {},
@@ -216,10 +217,10 @@ fun HomeScreen(
                 io.github.originosfcmguardian.fcm.GMS_DIAGNOSTICS_UNAVAILABLE,
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (destination == "home") {
-                HomeOverview(state, onReadGmsConnection,
+                HomeOverview(state,
                     { secondaryDestination = "settings" }, onShizukuAction = onShizukuAction,
                     onEnableMaster = onRequestAutomaticProtection, onDisableMaster = onStopAutomaticProtection,
-                    onExport = onExportCombinedDiagnosticReport, onReconcile = onReconcileStoppedRecovery)
+                    onReconcile = onReconcileStoppedRecovery)
             }
 
             if (destination == "settings") {
@@ -234,10 +235,7 @@ fun HomeScreen(
                 showProtectionControls = false, notificationVisibility = state.protectionNotificationVisibility,
                 onOpenAutostartSettings = onOpenAutostartSettings,
                 autostartSettingsMessage = state.autostartSettingsMessage)
-            StatusCard("关于") {
-                Text("OriginOS FCM Guardian", style = MaterialTheme.typography.bodyMedium)
-                StatusRow("版本", BuildConfig.VERSION_NAME)
-            }
+            DiagnosticExportEntry(state, onExportCombinedDiagnosticReport)
             }
 
             if (destination == "apps") {
@@ -394,16 +392,45 @@ internal fun SelectedTargetDetails(
 }
 
 @Composable
-private fun HomeOverview(state: HomeUiState, onGms: () -> Unit,
+private fun HomeOverview(state: HomeUiState,
     onSettings: () -> Unit, onShizukuAction: () -> Unit,
     onEnableMaster: () -> Unit, onDisableMaster: () -> Unit,
-    onExport: (DiagnosticReportFormat) -> Unit, onReconcile: () -> Unit) {
+    onReconcile: () -> Unit) {
     ShizukuHomeCard(state.shizuku, onSettings, onShizukuAction)
-    PushProtectionCard(state, onEnableMaster, onDisableMaster, onGms, onReconcile)
+    PushProtectionCard(state, onEnableMaster, onDisableMaster, onReconcile)
     RecoveryCountsCard(state)
-    StatusCard("导出报告") {
-        Text("报告含设备与应用信息，请私下分享。", style = MaterialTheme.typography.bodySmall)
-        DiagnosticReportExportButton(state.diagnosticReportExportBusy, onExport)
+    StatusCard("关于") {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth < 280.dp || LocalDensity.current.fontScale > 1.3f) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    AboutVersion()
+                    AppUpdateControls()
+                }
+            } else {
+                val actionWidth = maxWidth * 0.55f
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) { AboutVersion() }
+                    Box(Modifier.widthIn(max = actionWidth)) { AppUpdateControls() }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutVersion() {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("OriginOS FCM Guardian", style = MaterialTheme.typography.bodyMedium)
+        Text(BuildConfig.VERSION_NAME, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DiagnosticExportEntry(state: HomeUiState, onExport: () -> Unit) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        DiagnosticReportExportButton(state.diagnosticReportExportBusy, modifier = Modifier.fillMaxWidth(), onExport = onExport)
         state.diagnosticReportExportFeedback?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
@@ -508,14 +535,6 @@ private fun StatusCard(title: String, attention: Boolean = false, emphasis: Bool
                 color = if (attention) colors.onErrorContainer else if (emphasis) colors.primary else colors.onSurface)
             content()
         }
-    }
-}
-
-@Composable
-private fun StatusRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, modifier = Modifier.weight(0.42f), style = MaterialTheme.typography.bodyMedium)
-        Text(value, modifier = Modifier.weight(0.58f), style = MaterialTheme.typography.bodyMedium)
     }
 }
 

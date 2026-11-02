@@ -57,6 +57,7 @@ class FcmRecoveryCycleTest {
         var afterState = GcmConnectionState.REPORTED_CONNECTED
         var unknownFirst = false
         var unknownAfter = false
+        var socketsUnavailable = false
         var optionalThrows = false
         var bindingChanged = false
         var sends = 0
@@ -80,8 +81,9 @@ class FcmRecoveryCycleTest {
         override fun disconnectedNetwork() = network && mcsNetwork
         fun sample(state: GcmConnectionState) = GmsConnectionObservation.Sample(1, 10208, 263737035,
             1000, 2000, FcmRecoveryPolicy.SIGNER, "01234567-89ab-cdef-0123-456789abcdef",
-            wallMillis(), elapsed, SocketSource(SourceCompleteness.COMPLETE, false),
-            SocketSource(SourceCompleteness.COMPLETE, state == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
+            wallMillis(), elapsed, SocketSource(if (socketsUnavailable) SourceCompleteness.UNAVAILABLE else SourceCompleteness.COMPLETE, false),
+            SocketSource(if (socketsUnavailable) SourceCompleteness.UNAVAILABLE else SourceCompleteness.COMPLETE,
+                !socketsUnavailable && state == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
             GcmServiceSource(state, SourceCompleteness.COMPLETE, wallMillis(), elapsed, 0))
         override suspend fun read(): GmsConnectionObservation {
             elapsed += 20; reads++
@@ -152,6 +154,21 @@ class FcmRecoveryCycleTest {
         FcmRecoveryCycle(access).run(); FcmRecoveryCycle(access).run()
         assertEquals(1, access.sends); assertTrue(access.store.read().consumed)
         assertEquals(FcmRecoveryEpisodeOutcome.OBSERVING, access.journal.snapshot().episodes.single().outcome)
+    }
+
+    @Test fun completeServiceReadbackRearmsWithoutInventingJointSocketRecoveryEvidence() = runBlocking {
+        val access = Access().also { it.socketsUnavailable = true }
+        FcmRecoveryCycle(access).run()
+        assertEquals(1, access.sends)
+        assertEquals(true, access.finishedConnected)
+        assertFalse(access.store.read().consumed)
+        assertNotEquals(FcmRecoveryEpisodeOutcome.CONNECTION_AFTER_REQUEST,
+            access.journal.snapshot().episodes.single().outcome)
+        // The following distinct service-absence opportunity can consume once again.
+        access.reads = 0; access.afterState = GcmConnectionState.SERVICE_ABSENT
+        FcmRecoveryCycle(access).run(); FcmRecoveryCycle(access).run()
+        assertEquals(2, access.sends)
+        assertTrue(access.store.read().consumed)
     }
 
     @Test fun unknownOrInadmissibleSourceNeverDispatchesMissingCandidate() = runBlocking {
@@ -239,6 +256,42 @@ class FcmRecoveryCycleTest {
         assertEquals(FcmRecoveryEpisodeOutcome.OBSERVING, access.journal.snapshot().episodes.single().outcome)
         FcmRecoveryCycle(access).run(); assertEquals(1, access.sends)
         assertEquals(FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS, access.journal.snapshot().episodes.single().requestOperation)
+    }
+
+    @Test fun exactDisconnectedWithUnknownSocketsConsumesMcsOnceAcrossRepeatedPollAndStoreRecreation() = runBlocking {
+        val access = Access().also {
+            it.firstState = GcmConnectionState.REPORTED_DISCONNECTED
+            it.afterState = it.firstState
+            it.socketsUnavailable = true
+        }
+        val original = access.sample(access.firstState)
+        assertEquals(SocketObservation.UNKNOWN, original.observation)
+        assertFalse(FcmRecoveryPolicy.disconnected(original, access.elapsed))
+        FcmRecoveryCycle(access).run(); FcmRecoveryCycle(access).run()
+        assertEquals(listOf(FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS), access.operations)
+        assertEquals(1, access.sends)
+        val recreated = FcmRecoveryStore(access.authority)
+        assertTrue(recreated.read().mcsConsumed)
+        recreated.disable(); recreated.confirm(FcmRecoveryPolicy.binding(original))
+        assertNull(recreated.consume(access.sample(access.firstState), FcmRecoveryOperation.PRESENT_DISCONNECTED_MCS))
+        assertFalse(recreated.read().consumed)
+    }
+
+    @Test fun unknownMcsResultWithUnknownSocketsCannotReplayWithoutNewCompleteConnectedReadback() = runBlocking {
+        val access = Access().also {
+            it.firstState = GcmConnectionState.REPORTED_DISCONNECTED
+            it.afterState = it.firstState
+            it.socketsUnavailable = true
+            it.result = FcmRecoveryResult(1, FcmRecoveryStatus.UNKNOWN, FcmRecoveryReason.TIMED_OUT)
+        }
+        FcmRecoveryCycle(access).run(); FcmRecoveryCycle(access).run()
+        assertEquals(1, access.sends)
+        assertTrue(access.store.read().mcsConsumed)
+        assertEquals(false, access.finishedConnected)
+        access.reads = 0; access.unknownFirst = true
+        FcmRecoveryCycle(access).run()
+        assertEquals(1, access.sends)
+        assertTrue(access.store.read().mcsConsumed)
     }
 
     @Test fun mcsCommandFailureAndUnknownReadbackCannotClaimConnectionOrReplayAttempt() = runBlocking {

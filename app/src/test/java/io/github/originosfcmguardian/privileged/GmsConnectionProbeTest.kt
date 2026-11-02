@@ -8,7 +8,7 @@ import java.util.concurrent.TimeUnit
 
 class GmsConnectionProbeTest {
     private val identity = GmsPackageIdentity(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE,
-        10234, 99, 123, 456, "a".repeat(64))
+        10234, 99, 123, 456, FcmRecoveryPolicy.SIGNER)
     private val environment = GmsProbeEnvironment(0, 2000, "12345678-1234-1234-1234-123456789abc")
     private inner class Port : GmsConnectionReadPort {
         var currentIdentity = identity
@@ -80,16 +80,16 @@ class GmsConnectionProbeTest {
         assertEquals(GmsUnknown.IDENTITY_CHANGED, reason(observe(historyDrift)))
     }
 
-    @Test fun unanchoredAndMultisignerHistoriesDoNotAcquireGoogleAuthority() {
+    @Test fun unanchoredAndMultisignerGmsAreIdentityFailuresBeforeServiceOrSockets() {
         val anchor = FcmRecoveryPolicy.SIGNER
         val rotated = identity.copy(signerSha256 = "b".repeat(64))
         listOf(rotated, rotated.copy(signingCertificateHistorySha256 = listOf("c".repeat(64), rotated.signerSha256)),
             rotated.copy(signingCertificateHistorySha256 = listOf(anchor)),
             rotated.copy(signingCertificateHistorySha256 = listOf(anchor, rotated.signerSha256), hasMultipleSigners = true)
         ).forEach { current ->
-            val sample = observe(Port().apply { currentIdentity = current }) as GmsConnectionObservation.Sample
-            assertEquals(current.signerSha256, sample.signerSha256)
-            assertFalse(FcmRecoveryPolicy.qualified(sample, 900))
+            val port = Port().apply { currentIdentity = current }
+            assertEquals(GmsUnknown.IDENTITY_UNKNOWN, reason(observe(port)))
+            assertEquals(0, port.socketCalls)
         }
     }
     @Test fun bootUserAndShellDriftDiscardsPositiveSockets() {
@@ -100,13 +100,32 @@ class GmsConnectionProbeTest {
         }
     }
     @Test fun ambiguousOwnershipBeforeOrAfterSamplingCannotProducePositive() {
-        listOf(null, emptyList(), listOf(GMS_OBSERVATION_PACKAGE, "other.pkg"), listOf("other.pkg"),
+        listOf(null, emptyList(), listOf("other.pkg"),
             listOf(GMS_OBSERVATION_PACKAGE, GMS_OBSERVATION_PACKAGE)).forEach { owners ->
             val before = Port(); before.owners = owners
             assertEquals(GmsUnknown.SHARED_UID, reason(observe(before))); assertEquals(0, before.socketCalls)
             val after = Port(); after.afterSockets = { after.owners = owners }
             assertEquals(GmsUnknown.SHARED_UID, reason(observe(after)))
         }
+    }
+    @Test fun unreadableSharedPeerCannotEraseTheExactCompleteGmsServiceReportOrBecomeSocketEvidence() {
+        val port = Port().apply {
+            owners = listOf(GMS_OBSERVATION_PACKAGE, "other.pkg")
+            selfReport = GcmServiceSource(GcmConnectionState.REPORTED_CONNECTED, SourceCompleteness.COMPLETE,
+                connectedDurationMillis = 123_000)
+        }
+        val sample = observe(port) as GmsConnectionObservation.Sample
+        assertEquals(GcmConnectionState.REPORTED_CONNECTED, sample.gcmService.state)
+        assertEquals(SourceCompleteness.COMPLETE, sample.gcmService.completeness)
+        assertEquals(123_000L, sample.gcmService.connectedDurationMillis)
+        assertTrue(FcmRecoveryPolicy.qualified(sample, 900))
+        assertEquals(SocketObservation.UNKNOWN, sample.observation)
+        assertEquals(SocketSource(SourceCompleteness.UNAVAILABLE, false), sample.tcp)
+        assertEquals(SocketSource(SourceCompleteness.UNAVAILABLE, false), sample.tcp6)
+        assertEquals(0, port.socketCalls)
+        assertEquals(sample, GmsObservationCodec.decode(GmsObservationCodec.encode(sample), 1))
+        port.afterSelfReport = { port.owners = listOf(GMS_OBSERVATION_PACKAGE) }
+        assertEquals(GmsUnknown.IDENTITY_CHANGED, reason(observe(port)))
     }
     @Test fun wrongPackageUserAndShellFailBeforeSources() {
         val wrongPackage = Port(); wrongPackage.currentIdentity = identity.copy(packageName = "other.pkg")

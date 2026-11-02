@@ -58,11 +58,14 @@ class DaemonFcmProtectionTest {
         var exerciseCancellation = false
         var readUnknown = false
         var readFailure = false
+        var socketsUnavailable = false
         var deriveChild: ((DaemonControlRecord, GmsConnectionObservation.Sample) -> HeartbeatSnapshot?)? = null
         fun wall() = 1_000_000L + now.get()
         fun sample() = GmsConnectionObservation.Sample(1, 10208, 263737035, 1_000, 2_000,
-            FcmRecoveryPolicy.SIGNER, boot, wall(), now.get(), SocketSource(SourceCompleteness.COMPLETE, false),
-            SocketSource(SourceCompleteness.COMPLETE, state == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
+            FcmRecoveryPolicy.SIGNER, boot, wall(), now.get(),
+            SocketSource(if (socketsUnavailable) SourceCompleteness.UNAVAILABLE else SourceCompleteness.COMPLETE, false),
+            SocketSource(if (socketsUnavailable) SourceCompleteness.UNAVAILABLE else SourceCompleteness.COMPLETE,
+                !socketsUnavailable && state == GcmConnectionState.REPORTED_CONNECTED), true, emptyList(),
             GcmServiceSource(state, SourceCompleteness.COMPLETE, wall(), now.get(), 0))
         val authority = ProtectionAuthoritySnapshot(1, ProtectionConsentMode.ACTIVE, null, null,
             BudgetSnapshot(BudgetClock(1, 100, 1_000), emptyList(), null), schemaVersion = 3,
@@ -442,6 +445,24 @@ class DaemonFcmProtectionTest {
             f.poll()
             assertEquals(1, f.derivations)
             assertEquals(0, f.arms)
+        }
+    }
+
+    @Test fun completeServiceWithUnknownSocketsRequestsNativeDerivationAndCanArmExistingExactChild() = runBlocking {
+        Fixture().use { f ->
+            f.socketsUnavailable = true
+            f.state = GcmConnectionState.REPORTED_CONNECTED
+            assertFalse(FcmRecoveryPolicy.connected(f.sample(), f.now.get()))
+            f.poll()
+            assertEquals(1, f.derivations)
+            assertEquals(0, f.arms) // A null native derivation response still grants no authority.
+        }
+        Fixture(child = true).use { f ->
+            f.socketsUnavailable = true
+            f.state = GcmConnectionState.REPORTED_CONNECTED
+            f.poll()
+            assertEquals(1, f.arms)
+            assertEquals(0, f.pulses)
         }
     }
 

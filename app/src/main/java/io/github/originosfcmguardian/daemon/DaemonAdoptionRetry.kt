@@ -21,6 +21,15 @@ internal class DaemonAdoptionRetry {
         if (identity == null) pending = false
     }
 
+    /** A real foreground/permission action opens one bounded batch on the same live server.
+     * Poll/state collectors must use offer(), never this method. An existing worker remains the
+     * sole owner, and an already-started attempt counts against the new batch as well. */
+    @Synchronized fun rearm(identity: Any?) {
+        if (identity == null) return
+        readiness(identity)
+        attempts = if (active?.started == true && active?.epoch == epoch) 1 else 0
+    }
+
     @Synchronized fun offer(identity: Any?, eligible: Boolean, local: Boolean): Ticket? {
         // An unread/temporarily unavailable sample is not evidence of a new ready epoch.
         // Only an explicit dead/denied event calls readiness(null).
@@ -44,6 +53,12 @@ internal class DaemonAdoptionRetry {
     @Synchronized fun current(ticket: Ticket): Boolean =
         active === ticket && ticket.epoch == epoch && readyIdentity != null && ticket.started
 
+    /** A transient read-only failure may use the one remaining slot of this trigger's batch.
+     * This never creates a timer, replenishes attempts or permits a post-marker migration replay. */
+    @Synchronized fun retryReadOnlyFailure(ticket: Ticket, reason: DaemonAdoptionReason) {
+        if (current(ticket) && attempts < MAX_ATTEMPTS && reason in TRANSIENT_FAILURES) pending = true
+    }
+
     /** A dispatched preflight always counts, including cancellation/timeout; queued work never counts. */
     @Synchronized fun finish(ticket: Ticket): Boolean {
         if (active !== ticket) return false
@@ -53,5 +68,12 @@ internal class DaemonAdoptionRetry {
         return retry
     }
 
-    private companion object { const val MAX_ATTEMPTS = 2 }
+    private companion object {
+        const val MAX_ATTEMPTS = 2
+        val TRANSIENT_FAILURES = setOf(DaemonAdoptionReason.BIND_TIMEOUT, DaemonAdoptionReason.BIND_DISCONNECTED,
+            DaemonAdoptionReason.BIND_FAILED, DaemonAdoptionReason.DEAD_BINDER, DaemonAdoptionReason.BUSY,
+            DaemonAdoptionReason.TIMED_OUT, DaemonAdoptionReason.SECURITY_ERROR, DaemonAdoptionReason.REMOTE_UNAVAILABLE,
+            DaemonAdoptionReason.ENVIRONMENT_UNAVAILABLE, DaemonAdoptionReason.PRINCIPAL_UNAVAILABLE,
+            DaemonAdoptionReason.PERMISSION_UNAVAILABLE, DaemonAdoptionReason.EXIT_HISTORY_UNAVAILABLE)
+    }
 }

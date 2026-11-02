@@ -66,6 +66,9 @@ internal interface HeartbeatStorage {
     fun write(value: HeartbeatSnapshot)
     /** Must be checked before AtomicFile is allowed to recover a backup. */
     fun coldBarrier(): HeartbeatResumeBlock? = null
+    /** Read-only proof of one canonical OFF halt with no pending or AtomicFile artifacts.
+     * This permits inert byte-preserving export only, never halt removal or heartbeat resume. */
+    fun cleanOffHaltForDaemonMigration(): Boolean = false
     fun halt() {}
     fun pending(value: HeartbeatPending) {}
     fun clearPending(value: HeartbeatPending) {}
@@ -105,8 +108,14 @@ internal class GmsAutoHeartbeatStore(private val storage: HeartbeatStorage) {
     fun read(): HeartbeatSnapshot? = storage.exclusive { storage.read() }
     /** Inspection only: migration must not let AtomicFile repair an interrupted old owner. */
     fun readForDaemonMigration(): HeartbeatSnapshot? = storage.exclusive {
-        check(storage.coldBarrier() == null && !storage.unsettledPending())
-        storage.read().also { check(it?.pendingArm == null && it?.pendingAttempt == null) }
+        val barrier = storage.coldBarrier()
+        val retainedOffHalt = barrier == HeartbeatResumeBlock.COLD_RECONSTRUCTION && storage.cleanOffHaltForDaemonMigration()
+        check((barrier == null || retainedOffHalt) && !storage.unsettledPending())
+        storage.read().also {
+            check(it?.pendingArm == null && it?.pendingAttempt == null)
+            if (retainedOffHalt) check(cleanOffHeartbeatDaemonMigrationRoot(it) &&
+                storage.coldBarrier() == HeartbeatResumeBlock.COLD_RECONSTRUCTION && storage.cleanOffHaltForDaemonMigration())
+        }
     }
     fun unsettledOperation(): Boolean = storage.exclusive {
         storage.unsettledPending() || storage.read()?.let { it.pendingAttempt != null || it.pendingArm != null } == true
@@ -270,6 +279,12 @@ internal class GmsAutoHeartbeatStore(private val storage: HeartbeatStorage) {
         next
     }
 }
+
+/** A disabled, settled root carries no child consent or endpoint. Its OFF halt remains exported. */
+internal fun cleanOffHeartbeatDaemonMigrationRoot(saved: HeartbeatSnapshot?): Boolean = saved != null &&
+    !saved.configured && saved.pause == null && saved.remoteSessionId == null && saved.durableConsent == null &&
+    saved.pendingArm == null && saved.pendingAttempt == null && saved.resumeBlock == null &&
+    saved.lastStatus != GmsHeartbeatStatus.UNKNOWN
 
 internal object HeartbeatSnapshotCodec {
     const val MAX_BYTES = 1024

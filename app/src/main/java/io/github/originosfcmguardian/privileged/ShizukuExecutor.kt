@@ -292,10 +292,11 @@ class ShizukuExecutor private constructor(
         }
     }
 
-    internal suspend fun readGmsConnection(): io.github.originosfcmguardian.core.gms.GmsConnectionObservation {
+    internal suspend fun readGmsConnection(onStage: (GmsConnectionReadStage) -> Unit = {}): io.github.originosfcmguardian.core.gms.GmsConnectionObservation {
         val requestId = nextRequestId()
         fun unknown(reason: io.github.originosfcmguardian.core.gms.GmsUnknown) =
             io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Unknown(requestId, reason)
+        onStage(GmsConnectionReadStage.AVAILABILITY)
         if (!operationMutex.tryLock()) return unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.BUSY)
         var beganCall = false
         return try {
@@ -306,13 +307,19 @@ class ShizukuExecutor private constructor(
                         Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
                 }
                 if (!available) return@withTimeout unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.SHELL_UNAVAILABLE)
+                onStage(GmsConnectionReadStage.BIND)
                 val bound = ensureBound(gmsBounded = true)
                 val service = bound.remote
                 if (!session.beginCall(bound, requestId)) return@withTimeout unknown(io.github.originosfcmguardian.core.gms.GmsUnknown.BRIDGE_UNAVAILABLE)
                 beganCall = true
+                onStage(GmsConnectionReadStage.SERVICE_IDENTITY)
                 val observation = gmsObservationRpc.read(requestId, { service.serviceUid }, {
+                    onStage(GmsConnectionReadStage.OBSERVATION)
                     service.readGmsConnection(requestId).getString(io.github.originosfcmguardian.core.gms.GmsObservationCodec.BUNDLE_KEY)
                 })
+                if (observation is io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Unknown &&
+                    observation.reason == io.github.originosfcmguardian.core.gms.GmsUnknown.MALFORMED_RESPONSE)
+                    onStage(GmsConnectionReadStage.RESPONSE)
                 if (observation is io.github.originosfcmguardian.core.gms.GmsConnectionObservation.Unknown && observation.reason in setOf(
                     io.github.originosfcmguardian.core.gms.GmsUnknown.CANCELLED,
                     io.github.originosfcmguardian.core.gms.GmsUnknown.TIMED_OUT,

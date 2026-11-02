@@ -20,13 +20,13 @@ class FcmProtectionControlsTest {
         val ready = HomeUiState(recoveryFirmwareSupported = true,
             targetSelectionLoadState = HomeSourceLoadState.LOADED,
             stoppedRecovery = StoppedRecoveryUiState(loaded = true))
-        compose.setContent { MaterialTheme { PushProtectionCard(ready, { requests++ }, {}, {}) } }
+        compose.setContent { MaterialTheme { PushProtectionCard(ready, { requests++ }, {}) } }
         compose.onNodeWithText("FCM推送保护").assertExists()
         compose.onAllNodesWithContentDescription("FCM推送保护开关").assertCountEquals(1)
         compose.onNodeWithContentDescription("自动保护总开关").assertDoesNotExist()
         compose.onNodeWithContentDescription("FCM 保护开关").assertDoesNotExist()
         compose.onNodeWithText("已开启时长 --:--:--").assertExists()
-        compose.onNodeWithText("FCM连接时长 --:--:--").assertExists()
+        compose.onNodeWithText("FCM连接时长", substring = true).assertDoesNotExist()
         compose.onNodeWithText("FCM 保护（试用）").assertDoesNotExist()
         compose.onNodeWithText("低频心跳").assertDoesNotExist()
         compose.onNodeWithText("FCM 恢复").assertDoesNotExist()

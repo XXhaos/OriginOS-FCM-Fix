@@ -6,15 +6,30 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
-/** Compare representation changes against the frozen pre-optimization parser.
+/** Compare safety/legacy duration behavior against the frozen pre-optimization parser.
+ * Compatibility may recover a previously unknown optional duration; no other difference is allowed.
  * Raw device input is optional, local-only and never included in assertion messages. */
 class GcmServiceParserDifferentialTest {
     private val header = "SERVICE com.google.android.gms/.gcm.GcmService a12 pid=123 user=0\n"
     private val connected = header + "  Client:\n    Is client connected: true\n"
 
-    private fun compare(bytes: ByteArray, label: String) = assertEquals(
-        LegacyGcmServiceParser.parse(bytes), GcmServiceParser.parse(bytes), label,
-    )
+    private fun compare(bytes: ByteArray, label: String) {
+        val legacy = LegacyGcmServiceParser.parse(bytes)
+        val current = GcmServiceParser.parse(bytes)
+        val recoveredDuration = legacy.connectedDurationMillis == null && current.connectedDurationMillis != null
+        assertEquals(legacy, if (recoveredDuration) current.copy(connectedDurationMillis = null) else current, label)
+    }
+
+    @Test fun `elapsed compatibility changes only previously unknown optional duration`() {
+        for ((clock, duration) in listOf("0:05/00:00" to 5_000L, "60:00/00:00" to 3_600_000L,
+            "00:10:20/00:00" to 620_000L, "54:47/-" to 3_287_000L,
+            "54:47/99:99" to 3_287_000L, "54:47/--:--" to 3_287_000L)) {
+            val bytes = (connected + "    connectTime=$clock\n").toByteArray()
+            assertEquals(null, LegacyGcmServiceParser.parse(bytes).connectedDurationMillis)
+            assertEquals(duration, GcmServiceParser.parse(bytes).connectedDurationMillis)
+            compare(bytes, "elapsed compatibility")
+        }
+    }
 
     @Test fun `service marker containing only trailing whitespace retains legacy behavior`() {
         val markers = listOf("  SERVICE ", "  SERVICE \t", "\tSERVICE \u00a0\u2003", "  SERVICE \t\u2028")

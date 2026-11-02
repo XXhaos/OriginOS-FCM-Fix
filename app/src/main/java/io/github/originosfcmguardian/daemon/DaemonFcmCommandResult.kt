@@ -5,14 +5,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import io.github.originosfcmguardian.core.gms.GmsUnknown
 
 /** Bounded, request-correlated UI receipt; these values carry no execution authority. */
-internal enum class DaemonFcmCommandOutcome { APPLIED, REJECTED, FAILED, UNKNOWN }
+internal enum class DaemonFcmCommandOutcome { APPLIED, REJECTED, FAILED, UNKNOWN, SAFE_RETRY }
 internal enum class DaemonFcmCommandReason {
-    NONE, NOT_REMOTE, BUSY, STOP_REQUESTED, PREPARATION, ACKNOWLEDGEMENT, CONFIRMATION, UNAVAILABLE, TIMEOUT,
+    NONE, NOT_REMOTE, BUSY, STOP_REQUESTED, PREPARATION, ACKNOWLEDGEMENT, CONFIRMATION, UNAVAILABLE, TIMEOUT, NOT_STAGED,
 }
 internal data class DaemonFcmCommandResult(val requestId: String, val outcome: DaemonFcmCommandOutcome,
-    val reason: DaemonFcmCommandReason)
+    val reason: DaemonFcmCommandReason, val preparationReason: DaemonFcmPreparationReason? = null,
+    val readUnknown: GmsUnknown? = null)
 
 /** One result, even when OFF, the deadline and a late RPC completion race. */
 internal class DaemonFcmCommandCompletion(val requestId: String) {
@@ -42,6 +44,15 @@ internal class DaemonFcmCommandCompletion(val requestId: String) {
 
     @Synchronized fun finish(outcome: DaemonFcmCommandOutcome, reason: DaemonFcmCommandReason): Boolean =
         completion.complete(DaemonFcmCommandResult(requestId, outcome, reason))
+
+    /** A trusted no-positive-stage proof may settle expectation-only preparation, never a staged plan.
+     * An earlier OFF/deadline completion still wins. No unknown result is cleared by this method. */
+    @Synchronized fun notStaged(failure: DaemonFcmPreparationFailure,
+        reason: DaemonFcmCommandReason = DaemonFcmCommandReason.NOT_STAGED): Boolean {
+        if (stagedRequest != null || stagedRecord != null) return false
+        return completion.complete(DaemonFcmCommandResult(requestId, DaemonFcmCommandOutcome.SAFE_RETRY,
+            reason, failure.reason, failure.readUnknown))
+    }
 
     /** Also called when reconciliation resumes the same trusted proposal after a lost STAGE reply. */
     @Synchronized fun staged(request: DaemonControlRequest, record: DaemonControlRecord, patchDigest: String) {

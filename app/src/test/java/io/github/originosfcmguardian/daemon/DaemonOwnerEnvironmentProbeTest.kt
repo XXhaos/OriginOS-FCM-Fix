@@ -61,12 +61,44 @@ class DaemonOwnerEnvironmentProbeTest {
             assertEquals(expected, read(port))
         }
     }
-    @Test fun explicitStopsAfterMasterOnBlockButOldStopsDoNot() {
+    @Test fun knownHistoricalStopsDoNotOverrideFreshCurrentUnstoppedPrincipal() {
         for (reason in listOf(StartupExitReason.USER_REQUESTED, StartupExitReason.USER_STOPPED)) {
-            assertEquals(DaemonOwnerEnvironmentStatus.USER_STOPPED,
+            assertEquals(DaemonOwnerEnvironmentStatus.READY,
                 read(Port().apply { history = listOf(DaemonGuardianExit(reason, 501, DaemonRequestedExitDetail.EXPLICIT_STOP)) }))
             assertEquals(DaemonOwnerEnvironmentStatus.READY,
                 read(Port().apply { history = listOf(DaemonGuardianExit(reason, 499, DaemonRequestedExitDetail.EXPLICIT_STOP)) }))
+        }
+    }
+
+    @Test fun historyHelperCannotDismissExplicitStopsWithoutCurrentUnstoppedProof() {
+        for (reason in listOf(StartupExitReason.USER_REQUESTED, StartupExitReason.USER_STOPPED)) {
+            val records = listOf(DaemonGuardianExit(reason, 800, DaemonRequestedExitDetail.EXPLICIT_STOP))
+            assertEquals(reason, daemonStartupExitRecords(records, 500)!!.single().reason)
+            assertEquals(StartupExitReason.OTHER,
+                daemonStartupExitRecords(records, 500, currentPackageUnstopped = true)!!.single().reason)
+        }
+        assertNull(daemonStartupExitRecords(listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 800)),
+            500, currentPackageUnstopped = true))
+    }
+
+    @Test fun historicalStopExceptionRequiresBothCurrentPrincipalAndPermissionChecks() {
+        val historicalStop = DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 800,
+            DaemonRequestedExitDetail.EXPLICIT_STOP)
+        val changes: List<Pair<(Port) -> Unit, DaemonOwnerEnvironmentStatus>> = listOf(
+            ({ p: Port -> p.pkg = p.pkg!!.copy(stopped = true) }) to DaemonOwnerEnvironmentStatus.USER_STOPPED,
+            ({ p: Port -> p.pkg = null }) to DaemonOwnerEnvironmentStatus.INSTALLATION_CHANGED,
+            ({ p: Port -> p.pkg = p.pkg!!.copy(installation = installation.copy(versionCode = 80)) }) to DaemonOwnerEnvironmentStatus.INSTALLATION_CHANGED,
+            ({ p: Port -> p.permission = null }) to DaemonOwnerEnvironmentStatus.PERMISSION_UNAVAILABLE,
+            ({ p: Port -> p.permission = false }) to DaemonOwnerEnvironmentStatus.PERMISSION_UNAVAILABLE,
+            ({ p: Port -> p.owners = null }) to DaemonOwnerEnvironmentStatus.INSTALLATION_CHANGED,
+            ({ p: Port -> p.owners = listOf(GUARDIAN_PACKAGE_NAME, "other.app") }) to DaemonOwnerEnvironmentStatus.INSTALLATION_CHANGED,
+        )
+        changes.forEach { (change, expected) ->
+            val before = Port().apply { history = listOf(historicalStop) }
+            change(before)
+            assertEquals(expected, read(before))
+            val during = Port().apply { history = listOf(historicalStop); afterHistory = { change(this) } }
+            assertEquals(expected, read(during))
         }
     }
     @Test fun ordinaryRemoveTaskIsNotOffAndUnclassifiedUserRequestIsNotPretendOff() {
@@ -83,6 +115,22 @@ class DaemonOwnerEnvironmentProbeTest {
             pkg = pkg!!.copy(stopped = true)
             history = listOf(DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 800, DaemonRequestedExitDetail.REMOVE_TASK))
         }))
+    }
+    @Test fun backgroundProcessKillHistoryDoesNotRevokeButCannotOverrideCurrentStopOrPermission() {
+        val killed = DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 800, DaemonRequestedExitDetail.KILL_BACKGROUND)
+        val port = Port().apply { history = listOf(killed) }
+        repeat(3) { assertEquals(DaemonOwnerEnvironmentStatus.READY, read(port)) }
+        port.pkg = port.pkg!!.copy(stopped = true)
+        assertEquals(DaemonOwnerEnvironmentStatus.USER_STOPPED, read(port))
+        port.pkg = port.pkg!!.copy(stopped = false)
+        port.permission = false
+        assertEquals(DaemonOwnerEnvironmentStatus.PERMISSION_UNAVAILABLE, read(port))
+        port.permission = true
+        port.history = listOf(killed, DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 900,
+            DaemonRequestedExitDetail.EXPLICIT_STOP))
+        assertEquals(DaemonOwnerEnvironmentStatus.READY, read(port))
+        port.history = listOf(killed, DaemonGuardianExit(StartupExitReason.USER_REQUESTED, 900))
+        assertEquals(DaemonOwnerEnvironmentStatus.EXIT_HISTORY_UNAVAILABLE, read(port))
     }
     @Test fun unavailableSaturatedFutureOrRepeatedCrashHistoryDoesNotAuthorize() {
         for (history in listOf(null, List(64) { DaemonGuardianExit(StartupExitReason.OTHER, 600) },

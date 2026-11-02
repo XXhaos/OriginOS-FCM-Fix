@@ -13,6 +13,7 @@ import android.system.Os
 import android.net.Network
 import android.net.NetworkCapabilities
 import io.github.originosfcmguardian.core.gms.*
+import io.github.originosfcmguardian.core.isSafeAndroidPackageName
 import io.github.originosfcmguardian.autostart.effectiveRecoveryComponentEnabled
 import java.io.FileInputStream
 import java.io.FileNotFoundException
@@ -38,9 +39,11 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         check(boot.matches(Regex("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")))
         return GmsProbeEnvironment(user, Os.getuid(), boot)
     }
-    override fun gmsPackage(): GmsPackageIdentity? {
+    override fun gmsPackage(): GmsPackageIdentity? = packageIdentity(GMS_OBSERVATION_PACKAGE)
+    override fun packageIdentity(packageName: String): GmsPackageIdentity? {
+        if (!isSafeAndroidPackageName(packageName)) return null
         val info = invokePackageFlagsRead(api, remote, "getPackageInfo", arrayOf(String::class.java),
-            arrayOf(GMS_OBSERVATION_PACKAGE), PackageManager.GET_SIGNING_CERTIFICATES.toLong(), 0) as? PackageInfo ?: return null
+            arrayOf(packageName), PackageManager.GET_SIGNING_CERTIFICATES.toLong(), 0) as? PackageInfo ?: return null
         val app = info.applicationInfo ?: return null
         val signing = info.signingInfo ?: return null
         val signers = signing.apkContentsSigners ?: return null
@@ -124,7 +127,7 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
         // Prefer current receiver metadata. A complete exact filter with omitted export metadata
         // permits only the existing bounded attempt; command/readback must still show its result.
         if (!qualifiedGmsMcsIdentity(identity, Os.getuid(), environment().currentUser,
-                packagesForUid(identity.uid))) return false
+                readGmsPackageOwnership(this, identity))) return false
         val protected = api.getMethod("isProtectedBroadcast", String::class.java)
             .invoke(remote, FcmRecoveryPolicy.MCS_ACTION) as? Boolean
         if (protected != false || !FcmPackageStateReader.read()) return false
@@ -138,6 +141,8 @@ internal class SystemGmsConnectionReadPort : GmsConnectionReadPort {
             arrayOf(component), PackageManager.MATCH_DISABLED_COMPONENTS.toLong(), 0) as? ActivityInfo ?: return false
         val app = receiver.applicationInfo ?: return false
         val identity = gmsPackage() ?: return false
+        if (environment().currentUser != 0 || gmsGoogleTrustAnchor(identity) != FcmRecoveryPolicy.SIGNER ||
+            readGmsPackageOwnership(this, identity) == null) return false
         val componentState = api.getMethod("getComponentEnabledSetting", ComponentName::class.java,
             Int::class.javaPrimitiveType).invoke(remote, component, 0) as? Int ?: return false
         val applicationState = api.getMethod("getApplicationEnabledSetting", String::class.java,
