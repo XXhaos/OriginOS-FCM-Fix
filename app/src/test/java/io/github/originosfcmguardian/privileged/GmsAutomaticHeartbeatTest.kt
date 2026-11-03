@@ -215,10 +215,23 @@ class GmsAutomaticHeartbeatTest {
             lifetime.die(); time += GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
             assertEquals(GmsHeartbeatReason.SESSION_REVOKED, runner.requestAutomatic(2, caller, session, UUID.randomUUID().toString()) { false }.reason)
         } finally { runner.close() }
-        val uncertain = GmsHeartbeatRunner({ Port() }, { Child("torn") }, clock = { time })
+        val uncertainThread = AtomicReference<Thread>()
+        var manualLaunches = 0
+        val uncertain = GmsHeartbeatRunner({ uncertainThread.set(Thread.currentThread()); Port() },
+            { manualLaunches++; Child("torn") }, clock = { time })
+        val workerField = GmsHeartbeatRunner::class.java.getDeclaredField("worker").apply { isAccessible = true }
+        (workerField.get(uncertain) as ThreadPoolExecutor).setKeepAliveTime(1, TimeUnit.MILLISECONDS)
         try {
             val session = uncertain.armAutomatic(1, caller, 1, gmsHeartbeatBindingDigest(sample), Lifetime()) { false }.session!!
-            assertEquals(GmsHeartbeatStatus.UNKNOWN, uncertain.request(2) { false }.status)
+            // A completed arm Future does not prove the no-queue worker can accept a new task.
+            // Drain this fixture's arm worker before the one-shot manual request; never retry it.
+            val armWorker = checkNotNull(uncertainThread.get())
+            armWorker.join(5_000)
+            assertFalse("Arm fixture worker must exit before the manual request", armWorker.isAlive)
+            val manual = uncertain.request(2) { false }
+            assertEquals(GmsHeartbeatStatus.UNKNOWN, manual.status)
+            assertEquals(GmsHeartbeatReason.OUTPUT_INCOMPLETE, manual.reason)
+            assertEquals(1, manualLaunches)
             time += GMS_AUTO_HEARTBEAT_INTERVAL_MILLIS
             assertEquals(GmsHeartbeatReason.SESSION_REVOKED, uncertain.requestAutomatic(3, caller, session, UUID.randomUUID().toString()) { false }.reason)
         } finally { uncertain.close() }
