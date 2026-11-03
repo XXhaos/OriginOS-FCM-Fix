@@ -12,6 +12,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.LockSupport
 
 /** Short injected lifetimes exercise the same lazy, zero-core executors as production. */
 class ReadWorkerLifecycleTest {
@@ -19,6 +20,15 @@ class ReadWorkerLifecycleTest {
     private interface Reader : AutoCloseable {
         fun read(): Result
         fun quiescent(): Boolean
+    }
+    private fun Reader.awaitQuiescence() {
+        // The coroutine reader publishes its result before the worker's finally block settles
+        // activity. Observe that real settlement instead of assuming continuation == worker exit.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (!quiescent() && System.nanoTime() < deadline) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1))
+        }
+        assertTrue("completed read must eventually settle worker activity", quiescent())
     }
     private class Threads : ThreadFactory {
         val created = CopyOnWriteArrayList<Thread>()
@@ -111,7 +121,7 @@ class ReadWorkerLifecycleTest {
                     assertTrue(longThreads.created.single().isAlive)
                     assertEquals(Result.COMPLETED, retained.read())
                     assertEquals(1, longThreads.created.size)
-                    assertTrue(retained.quiescent())
+                    retained.awaitQuiescence()
                     longThreads.awaitExit()
                     assertEquals(Result.COMPLETED, retained.read())
                     assertEquals(2, longThreads.created.size)
