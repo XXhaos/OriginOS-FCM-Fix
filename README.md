@@ -1,43 +1,49 @@
 # OriginOS FCM Guardian
 
-OriginOS FCM Guardian 是一个 Android 工具，帮助维护所选应用的停止标记状态及 FCM 连接。它依赖用户自行安装、启动并授权的外部 Shizuku。实际效果取决于系统、权限和应用状态，不能保证第三方推送消息一定送达。
+面向 vivo / iQOO OriginOS 的 Android 推送辅助工具。通过 Shizuku 自动解除所选应用的停止标记，并监测、维护 Google FCM 推送连接，帮助改善后台消息延迟和推送中断的问题，无需 Root。
 
-## 使用前
+[下载 APK](https://github.com/XXhaos/OriginOS-FCM-Fix/releases) · [更新记录](CHANGELOG.md)
 
-- Android 11 或更高版本；主要面向 OriginOS，其他系统的可用性取决于运行时接口和权限。
-- 单独安装并启动 [Shizuku](https://shizuku.rikka.app/)，以 shell 模式运行，并在 Guardian 中授权。
-- 设备重启后，用户需要重新启动 Shizuku；Guardian 在连接和条件恢复后会尝试接续原有开启设置。Guardian 不会自动启动 Shizuku 或启用无线调试。
+## 主要功能
 
-从 [Releases](https://github.com/XXhaos/OriginOS-FCM-Fix/releases) 获取正式 APK，或参照[构建说明](docs/BUILDING.md)自行构建。覆盖安装要求与已安装版本的签名兼容；签名不同的 APK 无法直接覆盖。
+- **应用自动恢复**：检查所选应用的停止状态，按用户授权自动尝试解除停止标记。
+- **FCM 连接保护**：监测 Google Play 服务的推送连接，定期进行心跳维护，并在连接异常、条件满足时尝试恢复。
+- **后台运行**：开启保护后无需一直停留在界面；保留开关和应用选择，在运行条件恢复后尝试接续保护。
+- **状态与诊断**：查看保护时长、应用恢复统计和 FCM 连接信息，按需导出诊断日志。
+- **便捷操作**：通过控制中心“推送保护”磁贴查看状态、进入应用，并可在应用内检查和下载更新。
 
-## 开始使用
+## 使用条件
 
-1. 启动并授权 Shizuku，然后打开 Guardian，检查连接状态。
-2. 在应用页面选择需要维护的应用，按界面提示完成授权。
-3. 打开“FCM推送保护”总开关并确认，后台就绪后会继续完成开启；等待期间可离开页面，无需额外点击完成按钮。关闭总开关会取消待启动请求、暂停执行并保留应用选择。
+- Android 11 或更高版本，在手机主用户空间使用。
+- 安装并启动 [Shizuku](https://shizuku.rikka.app/)，使用通过无线调试或 ADB 启动的非 Root（shell）模式。
+- 使用 FCM 相关功能时，需要已安装并启用 Google Play 服务，且网络能够连接 FCM。
 
-若在系统设置中强行停止 Guardian，执行会暂停。重新打开后，独立后台会在当前停止状态已解除、身份与 Shizuku 权限核验通过时接续原来保存的开启设置；首页主动关闭总开关仍会保持关闭。
+项目主要面向 OriginOS；其他系统的可用性取决于实际提供的系统接口和权限。
 
-如果旧修复包已停在“开启结果待核对”，覆盖升级后请关闭总开关，待关闭完成，再重新开启并确认一次；无需清除数据，应用选择会保留。新包会区分尚未执行开启的短暂失败与执行结果不明，并保留精简的开启诊断。
+## 安装与使用
 
-Guardian 会检查可用的系统接口与权限，并根据当前条件执行恢复；它不是设备型号白名单。系统回收、权限撤销或外部服务不可用时，功能可能暂停。有关权限及数据的说明见[隐私说明](PRIVACY.md)。
+1. 安装 Shizuku，按其说明完成启动。
+2. 从 [Releases](https://github.com/XXhaos/OriginOS-FCM-Fix/releases) 下载正式 APK 并安装。
+3. 打开 Guardian，授予 Shizuku 权限，在应用页面选择需要保护的应用，按提示确认。
+4. 返回首页，打开“FCM推送保护”总开关并确认，等待保护状态显示已开启。
 
-主页保留保护开启时长，FCM 连接信息可从顶部的“FCM Diagnostics”查看。移除主页的连接计时和额外刷新不影响后台 FCM 检测、心跳维护与自动恢复；反馈问题时可导出已有状态的脱敏诊断摘要。
+可在 Shizuku 卡片的“设置”中进入系统自启动管理，并调整通知和最近任务列表显示等选项。
 
-主页底部的“关于”显示版本并提供“检查更新”，仅在点击时访问本项目 GitHub 最新正式发行。发现新版后可下载并交由系统确认安装；包名、版本、校验值和签名均需核验，现有设置保留。
+## 日常使用
 
-日志导出位于“Shizuku → 设置”最下方。点击“导出日志”直接保存一份 JSON，应用名称和包名替换为报告内的匿名引用；保留系统版本、运行与资源摘要用于排查，不上传日志。正式安装包以 Releases 中通过签名和校验的附件为准。
+- **暂停保护**：关闭首页总开关，已选应用会保留，之后可以重新开启。
+- **手机重启**：解锁后重新启动 Shizuku；Guardian 会在授权及运行条件恢复后尝试接续此前已开启的保护。
+- **强行停止后**：在系统设置中强行停止 Guardian 会暂停执行，重新打开应用后再检查保护状态。
+- **查看连接**：通过首页顶部的“FCM Diagnostics”访问 Google Play 服务提供的连接诊断页面，部分版本可能不提供此页面。
+- **导出日志**：进入“Shizuku → 设置”，滑到最下方点击“导出日志”，保存 JSON 文件。日志中的应用名称和包名会匿名化，不会自动上传。数据处理详情见[隐私说明](PRIVACY.md)。
+- **更新应用**：在首页底部“关于 → 检查更新”中下载新版，由系统确认安装。使用签名兼容的正式 APK 覆盖升级可保留现有设置。
 
-Google Play 服务使用共享 UID 时，固定组件的操作独立核验 Google Play 服务本身，不查询其他共享成员的签名；无法归属的套接字不作为断线依据。升级修复包会尝试接续已确认的开启请求，不需要清除数据。
+推送效果受目标应用、Google Play 服务、网络和系统后台策略影响，无法保证每条消息送达。
 
-## 开发与反馈
+## 从源码构建
 
-需要 JDK 17、Android SDK 37，使用仓库中的 Gradle wrapper。构建与验证命令见[构建说明](docs/BUILDING.md)，协作约定见[贡献指南](CONTRIBUTING.md)。
+需要 JDK 17 和 Android SDK 37，使用仓库自带的 Gradle Wrapper。具体步骤见[构建说明](docs/BUILDING.md)。
 
-代码在 Gitea 维护并同步到 GitHub；同步后的 `main` 会触发 [Android 自动构建](https://github.com/XXhaos/OriginOS-FCM-Fix/actions/workflows/android-ci.yml)。测试报告、调试 APK 和未签名 Release APK 可在对应运行的 Artifacts 下载，保留 14 天。CI 包使用临时调试签名或尚未签名，正式安装请使用 Releases。
+## 开源许可
 
-请通过 [Issues](https://github.com/XXhaos/OriginOS-FCM-Fix/issues) 报告普通问题；提交前删除账号、设备标识、应用列表和其他私人信息。敏感漏洞请遵循[安全说明](SECURITY.md)。
-
-本项目采用 [Apache License 2.0](LICENSE)；第三方组件信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。版本变化见[更新记录](CHANGELOG.md)。
-
-Gitea 作为正式发行来源；发布新版本的标签和说明后，GitHub 自动测试、构建、使用原证书签名并上传对应 Release。已有四份附件的旧发行保持原文件同步，详见[发行说明](docs/RELEASING.md#github-发行同步)。
+本项目采用 [Apache License 2.0](LICENSE)。第三方组件声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
