@@ -14,7 +14,7 @@ internal object DaemonWire {
     const val ATTEST_APPLY = 9; const val RECONCILE = 10; const val QUERY = 11
     const val BEGIN_SNAPSHOT = 12; const val SNAPSHOT_CHUNK = 13; const val END_SNAPSHOT = 14
     const val READ_GMS = 15; const val IMPORT_OFFSET = 16; const val RECONCILE_INITIAL_ARM = 17
-    const val READ_DIAGNOSTICS = 18
+    const val READ_DIAGNOSTICS = 18; const val SETTLE_QUIESCENT = 19
     const val ACTIVATE = 1; const val MASTER_ON = 2; const val MASTER_OFF = 3
     const val TARGET_ON = 4; const val TARGET_OFF = 5; const val FCM_ON = 6; const val FCM_OFF = 7
 

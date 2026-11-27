@@ -13,6 +13,7 @@ import io.github.originosfcmguardian.gmsheartbeat.*
 import io.github.originosfcmguardian.privileged.*
 import io.github.originosfcmguardian.recovery.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -88,6 +89,7 @@ internal class DaemonProtectionHost(
     private val runtime = AtomicReference<Runtime?>()
     private val initialization = Any()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val wakeScheduler = Channel<Unit>(Channel.CONFLATED)
     private val issuedPlan = AtomicReference<ByteArray?>()
     private data class ImportUpload(val sessionId: String, val digest: String)
     private data class CompletedImport(val prepared: DaemonControlRecord, val digest: String,
@@ -131,7 +133,10 @@ internal class DaemonProtectionHost(
         if (startScheduler) scope.launch {
             while (!released.get()) {
                 if (closing.get()) reapClosed() else pollOnce()
-                if (!released.get()) delay(POLL_MILLIS)
+                if (!released.get()) {
+                    if (closing.get()) delay(POLL_MILLIS)
+                    else withTimeoutOrNull(POLL_MILLIS) { wakeScheduler.receive() }
+                }
             }
         }
     }
@@ -437,6 +442,7 @@ internal class DaemonProtectionHost(
                     activeSession.set(null)
                 if (after.control == reply.receipt.committed) carryImportHandoff(before, after)
                 live.fcm.controlCommitted()
+                if (startScheduler && after.control.mode == DaemonControlMode.ACTIVE) wakeScheduler.trySend(Unit)
             }
             reply
         } finally {
@@ -455,7 +461,9 @@ internal class DaemonProtectionHost(
         val permit = before.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION)?.let(DaemonHeartbeatDerivationPermitCodec::decode)
         val refresh = before.control.mode == DaemonControlMode.ACTIVE && before.control == proof.pointer.record &&
             permit != null && !permit.used && permit.record == before.control
-        if (!refresh) return live.owner.reconcile(caller, proof)
+        if (!refresh) return live.owner.reconcile(caller, proof).also { ok ->
+            if (ok && startScheduler && live.owner.isDispatchReady()) wakeScheduler.trySend(Unit)
+        }
         if (freshCaller == null || !applyBusy.compareAndSet(false, true)) return false
         if (!pollBusy.compareAndSet(false, true)) { applyBusy.set(false); return false }
         controlReads.incrementAndGet()
@@ -480,6 +488,7 @@ internal class DaemonProtectionHost(
             }.getOrDefault(false)
             // Failed preparation must remain visible to the next restore; ACTIVE alone is not ACK.
             if (!prepared) closeAdmission(live, caller, before.control)
+            else if (startScheduler && live.owner.isDispatchReady()) wakeScheduler.trySend(Unit)
             return prepared
         } finally {
             controlReads.decrementAndGet()
@@ -518,6 +527,45 @@ internal class DaemonProtectionHost(
             val current = root.snapshot()
             if (current.control != expected || current.dataRevision != dataRevision) return false
             live.owner.reconcileInitialHeartbeatArm(root, caller, expected, dataRevision, source, observedAt) != null
+        } catch (_: Exception) { false }
+        finally {
+            controlReads.decrementAndGet()
+            pollBusy.set(false)
+            applyBusy.set(false)
+            if (closing.get()) reapClosed()
+        }
+    }
+    /** Settles drained leftover pending/halted runtime markers after verifying worker & endpoint closure. */
+    fun settleQuiescentRuntime(caller: DaemonCallerEvidence, expected: DaemonControlRecord, dataRevision: Long): Boolean {
+        requireCaller(caller)
+        if (!applyBusy.compareAndSet(false, true)) return false
+        if (!pollBusy.compareAndSet(false, true)) { applyBusy.set(false); return false }
+        controlReads.incrementAndGet()
+        return try {
+            val live = runtime.get() ?: return false
+            val before = root.snapshot()
+            if (before.control != expected || before.dataRevision != dataRevision ||
+                live.owner.snapshot() != expected || live.owner.status() == DaemonOwnerStatus.FAULT ||
+                !DaemonQuiescentHeartbeatSettlement.needsSettlement(before)) return false
+            if (!live.stopped.isControlQuiescent() || !live.fcm.isControlQuiescent() ||
+                !fcmShell.isQuiescent()) return false
+            val heartbeat = before.bytes(DaemonDomainRole.HEARTBEAT)?.let(HeartbeatSnapshotCodec::decode)
+            val closedHere = heartbeat?.remoteSessionId?.let {
+                fcmShell.revoke(guardian.identity.uid, GmsAutoSession(it, heartbeat.generation, requireNotNull(heartbeat.bindingDigest)))
+            } == true
+            val nativeEstablished = before.control.revision > 2L ||
+                before.bytes(DaemonDomainRole.HEARTBEAT_DAEMON_OWNER) != null ||
+                before.bytes(DaemonDomainRole.HEARTBEAT_DERIVATION)?.let(DaemonHeartbeatDerivationPermitCodec::decode)?.used == true
+            val closedCold = !closedHere && fcmShell.freshHeartbeatEndpoint() &&
+                (heartbeat == null || heartbeat.callerIdentity == null || nativeEstablished ||
+                    fcmShell.previousHeartbeatOwnerGone(heartbeat, closing::get)) &&
+                fcmShell.freshHeartbeatEndpoint()
+            if (heartbeat != null && !closedHere && !closedCold) return false
+            val observedAt = elapsed()
+            if (closing.get()) return false
+            val current = root.snapshot()
+            if (current.control != expected || current.dataRevision != dataRevision) return false
+            live.owner.settleQuiescentRuntime(root, caller, expected, dataRevision, observedAt)
         } catch (_: Exception) { false }
         finally {
             controlReads.decrementAndGet()

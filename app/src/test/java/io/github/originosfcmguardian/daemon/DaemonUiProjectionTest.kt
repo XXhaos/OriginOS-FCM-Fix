@@ -103,7 +103,8 @@ class DaemonUiProjectionTest {
         assertEquals(FcmMaintenanceState.WAITING_HOST, waiting.fcm.maintenance)
         assertFalse(waiting.fcm.recoveryReady)
         val blocked = project(root(saved + (DaemonDomainRole.HEARTBEAT_PENDING to byteArrayOf(1))))
-        assertEquals(FcmMaintenanceState.STOP_PENDING, blocked.fcm.maintenance)
+        assertEquals(FcmMaintenanceState.WAITING_CONNECTED, blocked.fcm.maintenance)
+        assertFalse(blocked.heartbeatUi.active)
         assertFalse(blocked.fcm.recoveryReady)
         val unknown = HeartbeatSnapshot(1, true, resumeBlock = HeartbeatResumeBlock.UNKNOWN_RESULT, schemaVersion = 2)
         val uncertain = project(root(saved + mapOf(DaemonDomainRole.HEARTBEAT to HeartbeatSnapshotCodec.encode(unknown),

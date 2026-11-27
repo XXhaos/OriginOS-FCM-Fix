@@ -40,20 +40,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 private fun pushProtectionCommandBusy(state: HomeUiState): Boolean =
-    state.pushProtectionBusy || state.automaticProtection.busy || state.fcmProtection.busy ||
-        state.gmsAutoHeartbeat.stopPending
+    state.pushProtectionBusy || state.automaticProtection.busy || state.fcmProtection.busy
 
 internal fun canStartPushProtection(state: HomeUiState): Boolean =
     !pushProtectionCommandBusy(state) && canEnableAutomaticProtection(state.copy(
         automaticProtection = state.automaticProtection.copy(masterEnabled = false))) &&
-        (state.fcmProtection.configured || !state.fcmProtection.storageBlocked) &&
-        state.fcmProtection.maintenance != FcmMaintenanceState.STOP_PENDING
+        (state.fcmProtection.configured || !state.fcmProtection.storageBlocked)
 
 /** The unified switch represents confirmed intent; an old unfinished master alone is not FCM consent. */
 internal fun pushProtectionRequested(state: HomeUiState): Boolean =
-    state.pushActivation.pending || state.pushActivation.blocked ||
-        state.automaticProtection.revocationSaveFailed ||
-        state.automaticProtection.masterEnabled && state.fcmProtection.configured
+    state.pushActivation.pending ||
+        state.automaticProtection.masterEnabled && (state.fcmProtection.configured || state.pushActivation.blocked)
 
 internal fun pushProtectionToggleEnabled(state: HomeUiState): Boolean =
     pushProtectionRequested(state) || state.automaticProtection.masterEnabled || canStartPushProtection(state)
@@ -66,11 +63,10 @@ internal fun dispatchPushProtectionToggle(state: HomeUiState, checked: Boolean,
 
 internal fun pushProtectionStatus(state: HomeUiState): String = when {
     state.automaticProtection.revocationSaveFailed -> "关闭失败，请重试"
-    state.fcmProtection.maintenance == FcmMaintenanceState.STOP_PENDING -> "停止待确认"
     state.pushActivation.storageFailed -> "开启设置暂不可用"
-    state.pushActivation.blocked && state.pushActivation.reason ==
+    state.pushActivation.blocked && state.automaticProtection.masterEnabled && state.pushActivation.reason ==
         io.github.originosfcmguardian.pushactivation.PushActivationReason.UNKNOWN_RESULT -> "请关闭后重新开启"
-    state.pushActivation.blocked -> "开启结果待核对"
+    state.pushActivation.blocked && state.automaticProtection.masterEnabled -> "开启结果待核对"
     state.pushActivation.pending && !state.automaticProtection.masterEnabled -> "等待保护启动"
     !state.automaticProtection.masterEnabled -> "保护未开启"
     state.pushProtectionBusy || state.automaticProtection.busy || state.fcmProtection.busy -> "正在处理…"
@@ -86,18 +82,18 @@ internal fun pushProtectionStatus(state: HomeUiState): String = when {
     state.fcmProtection.maintenance == FcmMaintenanceState.ACTIVE -> "保护已开启"
     state.fcmProtection.maintenance == FcmMaintenanceState.RECONFIRM -> "FCM 保护暂不可用"
     state.fcmProtection.maintenance == FcmMaintenanceState.WAITING_CONNECTED -> "已开启，等待 FCM 连接"
-    else -> "FCM 保护等待启动"
+    else -> "等待保护恢复"
 }
 
 /** Normal progress is represented by the switch and uptime; retain actionable failures only. */
 private fun pushProtectionNotice(state: HomeUiState): String? = when {
     !state.pushProtectionMessage.isNullOrBlank() -> state.pushProtectionMessage
-    state.automaticProtection.revocationSaveFailed ||
-        state.fcmProtection.maintenance == FcmMaintenanceState.STOP_PENDING ||
-        state.pushActivation.storageFailed || state.pushActivation.blocked -> pushProtectionStatus(state)
-    state.fcmProtection.storageBlocked || state.fcmProtection.confirmationFailure != null ||
+    state.automaticProtection.revocationSaveFailed || state.pushActivation.storageFailed ||
+        (state.pushActivation.blocked && state.automaticProtection.masterEnabled) -> pushProtectionStatus(state)
+    state.automaticProtection.masterEnabled && (state.fcmProtection.storageBlocked ||
+        state.fcmProtection.confirmationFailure != null ||
         state.fcmProtection.configured && (state.fcmProtection.requiresConfirmation ||
-            state.fcmProtection.maintenance == FcmMaintenanceState.RECONFIRM) ->
+            state.fcmProtection.maintenance == FcmMaintenanceState.RECONFIRM)) ->
         fcmProtectionGuidance(state.fcmProtection).takeIf { it.isNotBlank() } ?: "FCM 保护暂不可用"
     else -> null
 }
@@ -148,10 +144,6 @@ internal fun PushProtectionCard(state: HomeUiState, onEnable: () -> Unit, onDisa
                     !state.automaticProtection.enabled && !state.automaticProtection.busy && !state.pushProtectionBusy) {
                     Text("核对上次结果")
                 }
-            }
-            if (state.automaticProtection.revocationSaveFailed ||
-                state.fcmProtection.maintenance == FcmMaintenanceState.STOP_PENDING) {
-                TextButton(onClick = onDisable, enabled = !state.pushProtectionBusy) { Text("重试关闭") }
             }
         }
     }

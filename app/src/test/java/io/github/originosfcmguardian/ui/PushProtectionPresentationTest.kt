@@ -33,8 +33,7 @@ class PushProtectionPresentationTest {
             ready.copy(automaticProtection = AutomaticProtectionState(busy = true)),
             ready.copy(automaticProtection = AutomaticProtectionState(masterEnabled = true),
                 fcmProtection = FcmProtectionUiState(configured = true)),
-            ready.copy(fcmProtection = FcmProtectionUiState(busy = true)),
-            ready.copy(fcmProtection = FcmProtectionUiState(maintenance = FcmMaintenanceState.STOP_PENDING)))
+            ready.copy(fcmProtection = FcmProtectionUiState(busy = true)))
         blocked.forEach { state ->
             dispatchPushProtectionToggle(state, true, { fail("Blocked ON") }, { fail("Rejected ON is not OFF") })
         }
@@ -88,7 +87,10 @@ class PushProtectionPresentationTest {
         assertTrue(configured.fcmProtection.configured)
         assertTrue(configured.fcmProtection.requiresConfirmation)
         assertEquals(PushProtectionEnableAction.INITIAL_FCM_CONFIRMATION, pushProtectionEnableAction(ready))
-        assertFalse(canStartPushProtection(configured.copy(fcmProtection = configured.fcmProtection.copy(
-            maintenance = FcmMaintenanceState.STOP_PENDING))))
+        val pausedWithLeftover = configured.copy(fcmProtection = configured.fcmProtection.copy(
+            maintenance = FcmMaintenanceState.STOP_PENDING))
+        assertFalse(pushProtectionRequested(pausedWithLeftover))
+        assertTrue(canStartPushProtection(pausedWithLeftover))
+        assertEquals("保护未开启", pushProtectionStatus(pausedWithLeftover))
     }
 }

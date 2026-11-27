@@ -16,8 +16,7 @@ import androidx.compose.ui.semantics.semantics
 import io.github.originosfcmguardian.gmsheartbeat.GmsAutoHeartbeatUiState
 
 internal fun gmsAutoHeartbeatHeadline(state: GmsAutoHeartbeatUiState): String = when {
-    state.stopPending -> "停止待确认"
-    state.busy -> "正在核对心跳会话"
+    state.busy || state.stopPending -> "正在核对心跳会话"
     state.active -> "会话已开启 · 最短 15 分钟"
     state.configured && state.resumeAuthorized && !state.requiresConfirmation -> "心跳已暂停 · 等待服务恢复"
     state.configured -> "偏好已保存 · 心跳已暂停"
@@ -51,8 +50,6 @@ internal fun GmsAutoHeartbeatControls(state: GmsAutoHeartbeatUiState, hostReady:
         style = MaterialTheme.typography.bodySmall)
     if (state.requiresConfirmation && !state.stopPending && !state.busy && hostReady)
         TextButton(onClick = onEnable) { Text("重新确认心跳") }
-    if (state.stopPending)
-        TextButton(onClick = onDisable, enabled = !state.busy) { Text("重试确认停止") }
 }
 
 @Composable

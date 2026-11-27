@@ -15,7 +15,7 @@ class FcmProtectionPresentationTest {
             configured = true, maintenance = FcmMaintenanceState.WAITING_CONNECTED)))
         assertEquals("FCM 保护暂不可用", fcmProtectionHeadline(FcmProtectionUiState(
             configured = true, requiresConfirmation = true, maintenance = FcmMaintenanceState.ACTIVE)))
-        assertEquals("停止待确认", fcmProtectionHeadline(FcmProtectionUiState(
+        assertEquals("尚未开启", fcmProtectionHeadline(FcmProtectionUiState(
             configured = false, maintenance = FcmMaintenanceState.STOP_PENDING)))
     }
 

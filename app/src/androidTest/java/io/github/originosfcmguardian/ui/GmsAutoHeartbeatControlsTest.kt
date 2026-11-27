@@ -28,13 +28,10 @@ class GmsAutoHeartbeatControlsTest {
     }
 
     @Test fun stopPendingBlocksReEnable() {
-        var stops = 0
         compose.setContent { MaterialTheme { GmsAutoHeartbeatControls(
-            GmsAutoHeartbeatUiState(stopPending = true), true, {}, { stops++ }) } }
-        compose.onNodeWithText("停止待确认").assertExists()
+            GmsAutoHeartbeatUiState(stopPending = true), true, {}, {}) } }
+        compose.onNodeWithText("正在核对心跳会话").assertExists()
         compose.onNodeWithContentDescription("低频心跳开关").assertIsNotEnabled()
-        compose.onNodeWithText("重试确认停止").performClick()
-        compose.runOnIdle { assertEquals(1, stops) }
     }
 
     @Test fun dialogRequiresExplicitConfirmation() {

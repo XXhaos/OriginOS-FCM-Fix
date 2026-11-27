@@ -1,6 +1,5 @@
 package io.github.originosfcmguardian.ui
 
-import io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState
 import io.github.originosfcmguardian.privileged.ShizukuStatus
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -22,7 +21,7 @@ internal fun pushProtectionHostReady(state: HomeUiState): Boolean =
         !state.automaticProtection.waitingForService && !state.automaticProtection.waitingForReconciliation &&
         !state.automaticProtection.revocationSaveFailed && state.automaticProtection.configurationAvailable &&
         state.shizuku.status == ShizukuStatus.READY_SHELL && !state.fcmProtection.busy &&
-        !state.fcmProtection.storageBlocked && state.fcmProtection.maintenance != FcmMaintenanceState.STOP_PENDING
+        !state.fcmProtection.storageBlocked
 
 /** The initial pre-command OFF snapshot is not a failed enable acknowledgement. */
 internal suspend fun awaitPushProtectionHost(states: StateFlow<HomeUiState>, timeoutMillis: Long = 30_000): HomeUiState? =

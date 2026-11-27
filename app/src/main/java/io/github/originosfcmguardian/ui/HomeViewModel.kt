@@ -192,8 +192,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun requestFcmProtection() {
-        if (_uiState.value.fcmProtection.configured || _uiState.value.fcmProtection.busy ||
-            _uiState.value.gmsAutoHeartbeat.stopPending) return
+        if (_uiState.value.fcmProtection.configured || _uiState.value.fcmProtection.busy) return
         _uiState.update { it.copy(fcmProtectionConfirmation = true) }
     }
 
@@ -377,9 +376,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 if (remoteOwned()) {
                     if (DaemonAppRuntime.state.value == null) _uiState.update { it.copy(automaticProtection = snapshot.copy(
                         enabled = false, coreSessionStartedAtElapsedMillis = null,
-                        detail = if (snapshot.waitingForReconciliation) "关闭结果待确认" else "等待保护服务"),
+                        detail = if (snapshot.masterEnabled) "等待保护服务" else "自动保护未开启"),
                         gmsAutoHeartbeat = it.gmsAutoHeartbeat.copy(active = false, resumeAuthorized = false,
-                            manualBlocked = true, waitingForHost = true, busy = false, detail = "等待保护服务")) }
+                            manualBlocked = true, waitingForHost = true, stopPending = false, busy = false, detail = "等待保护服务")) }
                     return@collectLatest
                 }
                 val previous = _uiState.value.automaticProtection

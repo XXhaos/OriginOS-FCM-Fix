@@ -528,6 +528,26 @@ internal object DaemonAppRuntime {
         refreshLocked { root, status, ui -> if (completion != null) synchronized(commandAdmission) {
             completion.observed(root, status, ui)
         } }
+        if (projected.value?.automatic?.masterEnabled == true &&
+            projected.value?.automatic?.coreSessionStartedAtElapsedMillis == null) {
+            schedulePostEnableRefresh()
+        }
+    }
+
+    private fun schedulePostEnableRefresh() {
+        scope.launch {
+            for (waitMs in longArrayOf(600L, 1_500L)) {
+                delay(waitMs)
+                val ready = runCatching {
+                    control.withLock {
+                        if (mutable.value?.control?.mode != DaemonControlMode.ACTIVE) return@withLock true
+                        refreshLocked()
+                        projected.value?.automatic?.coreSessionStartedAtElapsedMillis != null
+                    }
+                }.getOrDefault(true)
+                if (ready) break
+            }
+        }
     }
 
     private fun retainMigrationStop(command: DaemonAppCommand) {
@@ -603,6 +623,7 @@ internal object DaemonAppRuntime {
         if (current == value.committed.record && !host.needsReconciliation &&
             host.status in setOf(DaemonOwnerStatus.ACTIVE, DaemonOwnerStatus.OFF)) {
             // A living reconciled host must not be quiesced just because a screen reconnects.
+            settleQuiescentIfNeededLocked()
             refreshLocked()
             return
         }
@@ -615,8 +636,12 @@ internal object DaemonAppRuntime {
                 check(aggregate.control == current && proposal.expected == current)
                 val reply = client!!.call(DaemonWire.RESUME_STAGED, Bundle().apply { putBundle("record", DaemonWire.record(proposal.next)) })
                 applyStaged(value.intent, value.importDigest, reply)
+                settleQuiescentIfNeededLocked()
                 refreshLocked()
                 return
+            }
+            if (DaemonQuiescentHeartbeatSettlement.needsSettlement(aggregate)) {
+                settleQuiescentIfNeededLocked()
             }
             // A fresh challenge is necessary after host restart; no saved ACTIVE proof is replayed.
             val reply = client!!.call(DaemonWire.CURRENT_POINTER)
@@ -647,6 +672,10 @@ internal object DaemonAppRuntime {
             applyStaged(value.intent, value.importDigest, reply)
         }
         refreshLocked()
+        if (projected.value?.automatic?.masterEnabled == true &&
+            projected.value?.automatic?.coreSessionStartedAtElapsedMillis == null) {
+            schedulePostEnableRefresh()
+        }
     }
 
     private suspend fun reconcileInitialArmLocked(value: DaemonRemotePointer): Boolean {
@@ -702,7 +731,28 @@ internal object DaemonAppRuntime {
         val after = client!!.snapshot()
         check(after.bytes(DaemonDomainRole.CONTROL_PROPOSAL) == null && daemonStopSatisfied(after, stop))
         check(pointerStore!!.clearStopIntent(stop))
+        settleQuiescentIfNeededLocked()
         refreshLocked()
+        if (projected.value?.automatic?.masterEnabled == true &&
+            projected.value?.automatic?.coreSessionStartedAtElapsedMillis == null) {
+            schedulePostEnableRefresh()
+        }
+    }
+
+    private suspend fun settleQuiescentIfNeededLocked() {
+        repeat(8) { attempt ->
+            val snapshot = runCatching { client!!.snapshot() }.getOrNull() ?: return
+            if (!DaemonQuiescentHeartbeatSettlement.needsSettlement(snapshot)) return
+            val settled = runCatching {
+                client!!.call(DaemonWire.SETTLE_QUIESCENT, Bundle().apply {
+                    putBundle("expected", DaemonWire.record(snapshot.control))
+                    putLong("dataRevision", snapshot.dataRevision)
+                })
+                true
+            }.getOrDefault(false)
+            if (settled) return
+            if (attempt < 7) delay(80)
+        }
     }
 
     private suspend fun recoverPendingLocked() {
@@ -775,20 +825,46 @@ internal object DaemonAppRuntime {
     }
 
     private fun unavailable() {
-        // Retain the last configuration in UI; never turn a failed RPC into saved OFF/empty choices.
-        val stopping = unsavedStop.current() != null || runCatching { pointerStore!!.readStopIntent() != null }.getOrDefault(true)
-        val automatic = AutomaticProtectionRuntime.state.value.copy(enabled = false,
-            busy = false, waitingForPrivilege = false, waitingForService = true, coreSessionStartedAtElapsedMillis = null,
-            waitingForReconciliation = stopping, revocationSaveFailed = stopping,
-            detail = if (stopping) "关闭结果待确认" else "保护服务暂不可用")
-        val fcm = FcmProtectionRuntime.state.value.copy(busy = false,
-            maintenance = io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState.WAITING_HOST,
-            recoveryReady = false, detail = "等待保护服务")
+        // Retain the last configuration in UI; an explicit saved OFF intent immediately shows OFF.
+        val unsaved = unsavedStop.current()
+        val storedRead: Pair<Boolean, DaemonAppStopIntent?> = runCatching {
+            val store = pointerStore
+            if (store == null) true to null else true to store.readStopIntent()
+        }.getOrElse { false to null }
+        val stop = storedRead.second ?: unsaved
+        val masterOffSaved = storedRead.first && storedRead.second?.command?.kind == DaemonWire.MASTER_OFF
+        val fcmOffSaved = storedRead.first && storedRead.second?.command?.kind == DaemonWire.FCM_OFF
+        val currentAutomatic = AutomaticProtectionRuntime.state.value
+        val masterEnabled = if (masterOffSaved) false else currentAutomatic.masterEnabled
+        val automatic = currentAutomatic.copy(
+            masterEnabled = masterEnabled,
+            enabled = false,
+            busy = false,
+            savedAuthorization = if (masterOffSaved) false else currentAutomatic.savedAuthorization,
+            waitingForPrivilege = false,
+            waitingForService = masterEnabled,
+            coreSessionStartedAtElapsedMillis = null,
+            waitingForReconciliation = false,
+            revocationSaveFailed = !storedRead.first || (unsaved != null && storedRead.second == null),
+            detail = if (!masterEnabled) "自动保护未开启" else if (stop != null) "等待保护服务" else "保护服务暂不可用",
+        )
+        val currentFcm = FcmProtectionRuntime.state.value
+        val fcmConfigured = if (fcmOffSaved) false else currentFcm.configured
+        val fcm = currentFcm.copy(
+            configured = fcmConfigured,
+            busy = false,
+            maintenance = if (fcmConfigured) io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState.WAITING_HOST
+                else io.github.originosfcmguardian.fcmprotection.FcmMaintenanceState.OFF,
+            recoveryReady = false,
+            detail = if (fcmConfigured) "等待保护服务" else "尚未开启",
+        )
         AutomaticProtectionRuntime.publishDaemonState(automatic)
         FcmProtectionRuntime.publishDaemonState(fcm)
         projected.value?.let { prior -> projected.value = prior.copy(automatic = automatic, fcm = fcm, hostReady = false,
-            heartbeatUi = prior.heartbeatUi.copy(active = false, waitingForHost = true, resumeAuthorized = false,
-                busy = false, manualBlocked = true, detail = "等待保护服务"),
-            recoveryUi = prior.recoveryUi.copy(detail = "等待保护服务")) }
+            heartbeatUi = prior.heartbeatUi.copy(configured = if (fcmOffSaved) false else prior.heartbeatUi.configured,
+                active = false, waitingForHost = fcmConfigured, resumeAuthorized = false,
+                stopPending = false, busy = false, manualBlocked = true, detail = fcm.detail),
+            recoveryUi = prior.recoveryUi.copy(configured = if (fcmOffSaved) false else prior.recoveryUi.configured,
+                detail = fcm.detail)) }
     }
 }

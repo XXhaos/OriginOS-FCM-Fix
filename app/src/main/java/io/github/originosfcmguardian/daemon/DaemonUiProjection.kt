@@ -117,12 +117,13 @@ internal object DaemonUiProjection {
         val saved = result.getOrNull()
         val blocked = interrupted || result.isFailure || fcm.storageBlocked ||
             saved?.resumeBlock != null || root.bytes(DaemonDomainRole.HEARTBEAT_HALT) != null
-        val pending = fcm.maintenance == FcmMaintenanceState.STOP_PENDING
+        val pending = root.bytes(DaemonDomainRole.HEARTBEAT_PENDING) != null || saved?.pendingAttempt != null ||
+            saved?.pendingArm != null || saved?.pause == HeartbeatPause.OFF_PENDING
         val configured = saved?.configured == true
         val active = !blocked && !pending && fcm.maintenance == FcmMaintenanceState.ACTIVE
         return GmsAutoHeartbeatUiState(configured = configured, active = active,
             paused = configured && !active, detail = fcm.detail,
-            requiresConfirmation = configured && (blocked || fcm.requiresConfirmation), stopPending = pending,
+            requiresConfirmation = configured && (blocked || fcm.requiresConfirmation), stopPending = false,
             lastStatus = saved?.lastStatus, durableConsent = saved?.durableConsent != null,
             consentVersion = saved?.durableConsent?.version,
             resumeAuthorized = configured && !blocked && !pending && saved?.durableConsent != null,
@@ -211,10 +212,9 @@ internal object DaemonUiProjection {
         val native = heartbeat != null && owner != null && owner.record == root.control && owner.epoch == consent.epoch &&
             owner.generation == heartbeat.generation && owner.binding == heartbeat.bindingDigest &&
             owner.heartbeatBytesDigest == daemonHeartbeatOwnerDigest(heartbeat)
-        val active = hostReady && fresh && native && heartbeat?.configured == true && heartbeat.pause == null &&
+        val active = hostReady && fresh && !pending && native && heartbeat?.configured == true && heartbeat.pause == null &&
             heartbeat.remoteSessionId != null && consent.accepts(requireNotNull(sample), false)
         val maintenance = when {
-            pending -> FcmMaintenanceState.STOP_PENDING
             !configured -> FcmMaintenanceState.OFF
             blocked -> FcmMaintenanceState.RECONFIRM
             !hostReady -> FcmMaintenanceState.WAITING_HOST
@@ -234,7 +234,6 @@ internal object DaemonUiProjection {
         return FcmProtectionUiState(configured = configured, requiresConfirmation = confirmation,
             maintenance = maintenance, recoveryReady = recoveryReady, latestObservation = observation,
             detail = when {
-                pending -> "停止待确认"
                 !configured -> "尚未开启"
                 confirmation -> "请重新确认以继续保护"
                 !hostReady -> "请开启自动保护，并启动 Shizuku"

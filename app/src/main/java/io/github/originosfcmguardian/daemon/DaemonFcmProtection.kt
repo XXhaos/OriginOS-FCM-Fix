@@ -640,7 +640,13 @@ internal class DaemonFcmProtection(
             synchronized(flights) { flights.isEmpty() }
         if (!stable()) return null
         val endpoint = saved.remoteSessionId?.let { GmsAutoSession(it, saved.generation, requireNotNull(saved.bindingDigest)) }
-        val closedHere = closedEndpoint == saved || endpoint?.let { shell.revoke(guardian.identity.uid, it) } == true
+        val daemonOwned = saved.pause == HeartbeatPause.WAITING_HOST && saved.remoteSessionId == null &&
+            snapshot.bytes(DaemonDomainRole.HEARTBEAT_DAEMON_OWNER)?.let(DaemonHeartbeatOwnerCodec::decode)?.let {
+                it.record == snapshot.control && it.epoch == saved.durableConsent?.epoch &&
+                    it.generation == saved.generation && it.binding == saved.bindingDigest &&
+                    it.heartbeatBytesDigest == daemonHeartbeatOwnerDigest(saved)
+            } == true
+        val closedHere = closedEndpoint == saved || daemonOwned || endpoint?.let { shell.revoke(guardian.identity.uid, it) } == true
         // The owner lifetime lease excludes an older daemon. A fresh native runner PLUS the
         // independently qualified historical App's death excludes both possible old owners.
         // Never let old-App absence override an existing/mismatched native capability.

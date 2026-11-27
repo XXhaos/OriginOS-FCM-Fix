@@ -215,6 +215,17 @@ internal class DaemonProtectionRoot(private val storage: DaemonProtectionRootSto
             next.first
         }
     }
+    /** Settles drained leftover pending/halted runtime markers without changing authority or consent. */
+    fun settleQuiescentRuntime(expected: DaemonControlRecord, expectedDataRevision: Long): Boolean = synchronized(monitor) {
+        check(!failed && staged.get() == null)
+        storage.withOwnerLease {
+            val before = guarded { readCommitted() }
+            if (before.control != expected || before.dataRevision != expectedDataRevision) return@withOwnerLease false
+            val next = DaemonQuiescentHeartbeatSettlement.project(before) ?: return@withOwnerLease false
+            guarded { commit(DaemonProtectionRootCodec.encode(next)) }
+            true
+        }
+    }
     fun bytes(role: DaemonDomainRole): ByteArray? = synchronized(monitor) {
         val current = staged.get()
         if (current != null) current.bytes(role) else snapshot().bytes(role)

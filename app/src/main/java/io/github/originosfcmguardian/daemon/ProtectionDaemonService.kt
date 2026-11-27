@@ -244,6 +244,13 @@ class ProtectionDaemonService : IProtectionDaemon.Stub {
                     DaemonWire.text(data, "sha256", 64)))
                 DaemonWire.success()
             }
+            DaemonWire.SETTLE_QUIESCENT -> {
+                DaemonWire.keys(data, "expected", "dataRevision")
+                if (current.settleQuiescentRuntime(caller,
+                        DaemonWire.record(DaemonWire.nested(data, "expected")),
+                        DaemonWire.long(data, "dataRevision"))) DaemonWire.success()
+                else DaemonWire.failure("NOT_READY")
+            }
             DaemonWire.QUERY -> {
                 DaemonWire.keys(data, "request"); DaemonWire.reply(current.query(caller, DaemonWire.request(DaemonWire.nested(data, "request"))))
             }

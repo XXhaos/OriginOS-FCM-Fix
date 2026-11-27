@@ -224,6 +224,19 @@ internal class DaemonOwnerControl(
         catch (_: Exception) { fault(); null }
     }
 
+    /** Settles drained leftover pending/halted runtime state when no kernel flight is active. */
+    fun settleQuiescentRuntime(root: DaemonProtectionRoot, caller: DaemonCallerEvidence,
+        expected: DaemonControlRecord, expectedDataRevision: Long, observedAtElapsed: Long): Boolean = synchronized(lock) {
+        if (!authenticated(caller) || status == DaemonOwnerStatus.FAULT ||
+            record != expected || expected.owner != owner ||
+            expected.mode !in setOf(DaemonControlMode.ACTIVE, DaemonControlMode.OFF) ||
+            flight != null || probing || prepared != null) return@synchronized false
+        val now = try { elapsed() } catch (_: Exception) { return@synchronized false }
+        if (observedAtElapsed < 0 || now < observedAtElapsed || now - observedAtElapsed > maximumEvidenceAgeMillis) return@synchronized false
+        try { root.settleQuiescentRuntime(expected, expectedDataRevision) }
+        catch (_: Exception) { fault(); false }
+    }
+
     /** Close before staging/pointer IO. The caller must hold no port/root/staging monitor. */
     fun quiesceForControl(caller: DaemonCallerEvidence, expected: DaemonControlRecord): Boolean = synchronized(lock) {
         if (!authenticated(caller) || record != expected || expected.owner != owner ||

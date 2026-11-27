@@ -22,7 +22,7 @@ class GmsAutoHeartbeatPresentationTest {
         assertEquals("低频心跳未开启", gmsAutoHeartbeatHeadline(GmsAutoHeartbeatUiState()))
     }
     @Test fun pendingStopCannotShowActiveOrSuccessfulProtection() {
-        assertEquals("停止待确认", gmsAutoHeartbeatHeadline(GmsAutoHeartbeatUiState(
+        assertEquals("正在核对心跳会话", gmsAutoHeartbeatHeadline(GmsAutoHeartbeatUiState(
             configured = true, active = true, stopPending = true, lastStatus = GmsHeartbeatStatus.REQUESTED)))
     }
     @Test fun activeSessionIsNotConnectionOrDeliveryVerdict() {

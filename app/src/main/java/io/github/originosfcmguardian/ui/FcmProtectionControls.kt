@@ -17,13 +17,12 @@ internal fun fcmProtectionObservationText(state: FcmProtectionUiState, now: Long
 }
 internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
     state.storageBlocked -> "记录异常 · 已暂停"
-    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "停止待确认"
     state.busy -> "处理中…"
     state.configured && (state.requiresConfirmation || state.maintenance == FcmMaintenanceState.RECONFIRM ||
         state.confirmationFailure != null) -> "FCM 保护暂不可用"
     !state.configured -> "尚未开启"
     state.maintenance == FcmMaintenanceState.ACTIVE -> "已开启"
-    state.maintenance == FcmMaintenanceState.WAITING_HOST -> "等待启动"
+    state.maintenance == FcmMaintenanceState.WAITING_HOST || state.maintenance == FcmMaintenanceState.STOP_PENDING -> "等待启动"
     else -> "等待连接"
 }
 @Composable internal fun FcmProtectionControls(state: FcmProtectionUiState, hostReady: Boolean,
@@ -35,23 +34,20 @@ internal fun fcmProtectionHeadline(state: FcmProtectionUiState) = when {
         }
         Switch(checked = state.configured,
             onCheckedChange = { if (it) onEnable() else onDisable() },
-            enabled = state.configured || hostReady && !state.busy && !state.storageBlocked && state.maintenance != FcmMaintenanceState.STOP_PENDING,
+            enabled = state.configured || hostReady && !state.busy && !state.storageBlocked,
             modifier = Modifier.semantics { contentDescription = "FCM 保护开关" })
     }
     val guidance = fcmProtectionGuidance(state)
     if (guidance.isNotEmpty()) Text(guidance, style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.maintenance == FcmMaintenanceState.STOP_PENDING)
-        TextButton(onClick = onDisable, enabled = !state.busy) { Text("重试确认停止") }
 }
 internal fun fcmProtectionGuidance(state: FcmProtectionUiState): String = when {
     state.storageBlocked -> "记录暂不可用，保护已暂停。"
-    state.maintenance == FcmMaintenanceState.STOP_PENDING -> "请重试确认停止。"
     state.configured && (state.requiresConfirmation || state.confirmationFailure != null) -> "FCM 保护暂不可用。"
     state.confirmationFailure != null -> when (state.confirmationFailure) {
         FcmProtectionConfirmationFailure.HOST_UNAVAILABLE -> "请开启自动保护，并启动 Shizuku。"
-        FcmProtectionConfirmationFailure.BUSY -> "请稍后重试。"
-        FcmProtectionConfirmationFailure.STOP_PENDING -> "请先重试确认停止。"
+        FcmProtectionConfirmationFailure.BUSY,
+        FcmProtectionConfirmationFailure.STOP_PENDING -> "请稍后重试。"
         FcmProtectionConfirmationFailure.READ_UNAVAILABLE -> "无法读取连接状态，请稍后重试。"
         FcmProtectionConfirmationFailure.NOT_QUALIFIED -> "无法确认 Google Play 服务状态，请稍后重试。"
         FcmProtectionConfirmationFailure.SHELL_UNAVAILABLE -> "请启动 Shizuku 并授权。"

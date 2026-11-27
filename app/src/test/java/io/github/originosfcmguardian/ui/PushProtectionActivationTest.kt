@@ -49,8 +49,7 @@ class PushProtectionActivationTest {
             good.copy(automaticProtection = good.automaticProtection.copy(waitingForService = true)),
             good.copy(automaticProtection = good.automaticProtection.copy(configurationAvailable = false)),
             good.copy(fcmProtection = FcmProtectionUiState(busy = true)),
-            good.copy(fcmProtection = FcmProtectionUiState(storageBlocked = true)),
-            good.copy(fcmProtection = FcmProtectionUiState(maintenance = FcmMaintenanceState.STOP_PENDING)))
+            good.copy(fcmProtection = FcmProtectionUiState(storageBlocked = true)))
             .forEach { assertFalse(pushProtectionHostReady(it)) }
         assertTrue(pushProtectionHostReady(good))
     }
