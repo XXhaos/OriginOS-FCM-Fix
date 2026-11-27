@@ -1,8 +1,9 @@
 name: Mirror Gitea releases
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ['Android build and checks']
+    types: [completed]
   schedule:
     - cron: '23,53 * * * *'
   workflow_dispatch:
@@ -27,7 +28,12 @@ concurrency:
 jobs:
   plan:
     # Only trusted main may select source releases or publish existing assets.
-    if: github.repository == 'XXhaos/OriginOS-FCM-Fix' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'XXhaos/OriginOS-FCM-Fix' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event != 'pull_request'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

@@ -92,9 +92,14 @@ class FakeClient:
     def source(self, path):
         if path.startswith('/releases?'):
             return copy.deepcopy(self.sources if path.endswith('page=1') else [])
+        if path == '/git/refs/tags':
+            return [{'ref': 'refs/tags/' + tag, 'object': {'type': 'commit', 'sha': sha}}
+                    for tag, sha in sorted(self.source_refs.items())]
         prefix = '/git/refs/tags/'
         if path.startswith(prefix):
             tag = path.removeprefix(prefix)
+            if tag not in self.source_refs:
+                raise syncer.SyncError('GET remote service: HTTP 404')
             return {'ref': 'refs/tags/' + tag,
                     'object': {'type': 'commit', 'sha': self.source_refs[tag]}}
         raise AssertionError('Unexpected fake source request')
@@ -435,6 +440,65 @@ class ReleaseAutomationTests(unittest.TestCase):
                 self.assertEqual(automation.cli([]), 1)
                 self.assertNotIn('private', output.getvalue())
                 self.assertIn('invalid response', output.getvalue())
+
+    def test_source_version_tag_without_gitea_release_extracts_changelog_and_publishes(self):
+        _, files = fixture('v1.2.0', code=120)
+        client = FakeClient([])
+        client.source_refs['v1.2.0'] = COMMIT
+        client.target_refs['v1.2.0'] = COMMIT
+        gradle = b'defaultConfig {\n    versionCode = 120\n    versionName = "1.2.0"\n}\n'
+        changelog = '# 更新记录\n\n## 1.2.0\n\n- 移除停止待确认。\n- 自动结算心跳状态。\n\n## 1.1.0\n\n- 旧说明。\n'.encode('utf-8')
+
+        def git_side_effect(args, **kwargs):
+            if 'show' in args and args[-1].endswith(':app/build.gradle.kts'):
+                return subprocess.CompletedProcess(args, 0, stdout=gradle)
+            if 'show' in args and args[-1].endswith(':CHANGELOG.md'):
+                return subprocess.CompletedProcess(args, 0, stdout=changelog)
+            return self.git_result(args, **kwargs)
+
+        self.git.side_effect = git_side_effect
+        plan = self.plan(client)
+        self.assertEqual(plan, {'has_pending': True, 'tag': 'v1.2.0', 'commit': COMMIT,
+                                'minimum_version_code': 0, 'validate_only': False})
+        self.publish(client, plan, files)
+        self.assertEqual(len(client.targets), 1)
+        self.assertFalse(client.targets[0]['draft'])
+        self.assertEqual(client.targets[0]['name'], 'OriginOS FCM Guardian 1.2.0')
+        self.assertEqual(client.targets[0]['body'], '- 移除停止待确认。\n- 自动结算心跳状态。')
+
+    def test_draft_gitea_release_blocks_tag_fallback_and_version_mismatch_is_rejected(self):
+        draft, _ = fixture('v1.2.0', code=120)
+        draft['draft'] = True
+        client = FakeClient([draft])
+        self.assertEqual(self.plan(client), {'has_pending': False})
+
+        tag_only = FakeClient([])
+        tag_only.source_refs['v1.2.0'] = COMMIT
+        tag_only.target_refs['v1.2.0'] = COMMIT
+        wrong_gradle = b'defaultConfig {\n    versionCode = 110\n    versionName = "1.1.0"\n}\n'
+        self.git.side_effect = lambda args, **kw: (
+            subprocess.CompletedProcess(args, 0, stdout=wrong_gradle)
+            if 'show' in args and args[-1].endswith(':app/build.gradle.kts') else self.git_result(args, **kw))
+        with self.assertRaisesRegex(syncer.SyncError, 'versionName'):
+            self.plan(tag_only)
+
+    def test_tag_only_changelog_disclosing_source_host_is_rejected(self):
+        client = FakeClient([])
+        client.source_refs['v1.2.0'] = COMMIT
+        client.target_refs['v1.2.0'] = COMMIT
+        gradle = b'defaultConfig {\n    versionCode = 120\n    versionName = "1.2.0"\n}\n'
+        leaked = f'# 更新记录\n\n## 1.2.0\n\nSee {ORIGIN}/secret\n'.encode('utf-8')
+
+        def git_side_effect(args, **kwargs):
+            if 'show' in args and args[-1].endswith(':app/build.gradle.kts'):
+                return subprocess.CompletedProcess(args, 0, stdout=gradle)
+            if 'show' in args and args[-1].endswith(':CHANGELOG.md'):
+                return subprocess.CompletedProcess(args, 0, stdout=leaked)
+            return self.git_result(args, **kwargs)
+
+        self.git.side_effect = git_side_effect
+        with self.assertRaisesRegex(syncer.SyncError, 'source host'):
+            self.plan(client)
 
 
 if __name__ == '__main__':

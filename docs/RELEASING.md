@@ -81,10 +81,14 @@ d662d39e97573ed1759994033584109eb26d06b57c7cae81a7cf3d4d840dfa9d
 
 ### 发布新版本
 
-1. 在源码中更新 `versionName` 与 `versionCode`：例如标签 `v1.0.1` 对应 `versionName = "1.0.1"`，版本码必须高于所有已发布版本（现有正式版为 99）。审查、提交到 Gitea 的 `main`。
-2. 在 Gitea 选择该提交创建标签并发布 Release，填写标题、更新说明及预发布标记；新版本不上传附件。草稿不会触发发布。
-3. 等待 Git 镜像和 GitHub 工作流。工作流在 main 推送时及每小时第 23、53 分钟检查，每次处理一个待构建版本；定时任务可能延迟。也可在 GitHub **Actions → Mirror Gitea releases → Run workflow** 选择 main、填写标签立即处理。
-4. GitHub 针对标签的精确提交运行主机测试、lint、依赖声明和权限边界检查，构建 R8 Release；随后在独立临时运行器使用原证书签名，生成 APK、精确提交的源码 ZIP、manifest 和 SHA256SUMS。全部上传并核验后才公开对应 GitHub Release。Gitea 只需保留版本说明与标签，生成附件位于 GitHub。
+支持**直接推送版本标签**或**在 Gitea 网页发布 Release** 两种零算力消耗触发方式（所有编译、测试与原证书签名均在 GitHub 云端运行器完成，源站仅提供轻量 Git 镜像与元数据读取）：
+
+1. 在源码中更新 `versionName`、`versionCode` 与 `CHANGELOG.md` 对应版本小节：例如标签 `v1.2.0` 对应 `versionName = "1.2.0"`，版本码必须高于所有已发布版本。审查后提交到 Gitea 的 `main`。
+2. 任选一种方式标记发版：
+   - **方式 A（推荐，直接推标签）**：在推送 `main` 时顺带创建并推送版本标签（如 `git tag -a v1.2.0 -m "OriginOS FCM Guardian 1.2.0" && git push origin main v1.2.0`），无需打开网页创建 Release；GitHub 会自动核验该标签提交的 `versionName` 并提取 `CHANGELOG.md` 对应段落作为发布说明。
+   - **方式 B（源站网页发布 Release）**：在 Gitea 选择该提交发布非草稿、零附件的 Release；GitHub 会优先按源站 Release 的标题、说明与预发布标记同步。若在源站保存为草稿（Draft），则不会触发公开出包。
+3. 等待 Git 镜像与 GitHub 自动衔接：代码或 `v*` 标签同步到 GitHub 后，`Android build and checks` 先执行构建检查；检查通过后通过 `workflow_run` **立即自动触发** `Mirror Gitea releases`（另有每小时第 23、53 分钟定时巡检与手动 `Run workflow` 兜底）。
+4. GitHub 针对标签的精确提交运行主机测试、lint、依赖声明和权限边界检查，构建 R8 Release；随后在独立临时运行器（`guardian-release` 环境）使用原证书签名，生成 APK、精确提交的源码 ZIP、manifest 和 SHA256SUMS。全部上传并核验后自动公开对应 GitHub Release。
 
 两端标签必须已经存在、指向同一提交，而且该提交必须在可信 main 的历史中。标签、APK 版本、版本码或证书不匹配时停止，不自动修改版本号、移动标签或更换密钥。主机检查不代表已经做过真机或模拟器测试；manifest 如实记录检查范围。
 

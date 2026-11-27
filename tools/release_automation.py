@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -43,8 +44,7 @@ def find_target(releases, tag):
     return matches[0] if matches else None
 
 
-def trusted_commit(client, release, repository, expected=None):
-    tag = release['tag_name']
+def trusted_tag_commit(client, tag, repository, expected=None):
     commit = syncer.tag_commit(client, tag, True)
     syncer.require(expected is None or commit == expected, 'Source tag moved after planning')
     syncer.require(syncer.tag_commit(client, tag, False) == commit,
@@ -53,6 +53,80 @@ def trusted_commit(client, release, repository, expected=None):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     syncer.require(result.returncode == 0, 'Release commit must be an ancestor of trusted main')
     return commit
+
+
+def trusted_commit(client, release, repository, expected=None):
+    return trusted_tag_commit(client, release['tag_name'], repository, expected=expected)
+
+
+def git_text(repository, spec, *, required=True, limit=512 * 1024):
+    result = subprocess.run(['git', '-C', str(repository), 'show', spec],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    if result.returncode != 0:
+        syncer.require(not required, 'Required source file could not be read from release commit')
+        return ''
+    syncer.require(len(result.stdout) <= limit, 'Source file exceeds inspection size limit')
+    try:
+        return result.stdout.decode('utf-8')
+    except UnicodeDecodeError:
+        raise syncer.SyncError('Source file is not valid UTF-8') from None
+
+
+def extract_changelog_section(changelog_text, version):
+    header = re.compile(r'^##\s+v?' + re.escape(version) + r'(?:\s*(?:[—–-]\s*.*|\(.*\)))?\s*$')
+    lines = changelog_text.splitlines()
+    start = next((i + 1 for i, line in enumerate(lines) if header.match(line.strip())), None)
+    if start is None:
+        return ''
+    collected = []
+    for line in lines[start:]:
+        if re.match(r'^##\s+', line.strip()):
+            break
+        collected.append(line)
+    return '\n'.join(collected).strip()
+
+
+def tag_release_metadata(repository, tag, commit):
+    syncer.names_for(tag)
+    version = tag[1:]
+    gradle = git_text(repository, f'{commit}:app/build.gradle.kts', required=True)
+    names = re.findall(r'versionName\s*=\s*"([^"]+)"', gradle)
+    codes = re.findall(r'versionCode\s*=\s*([1-9][0-9]*)', gradle)
+    syncer.require(len(names) == 1 and names[0] == version and len(codes) == 1,
+                   'Tagged commit versionName does not match release tag')
+    changelog = git_text(repository, f'{commit}:CHANGELOG.md', required=False)
+    body = extract_changelog_section(changelog, version)
+    if not body:
+        tag_msg = subprocess.run(
+            ['git', '-C', str(repository), 'for-each-ref', f'refs/tags/{tag}', '--format=%(contents:body)'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+        if tag_msg.returncode == 0 and len(tag_msg.stdout) <= 64 * 1024:
+            body = tag_msg.stdout.decode('utf-8', errors='replace').strip()
+    if not body:
+        body = f'OriginOS FCM Guardian {version}'
+    return {'tag_name': tag, 'name': f'OriginOS FCM Guardian {version}', 'body': body,
+            'draft': False, 'prerelease': '-' in tag, 'created_at': '', 'assets': []}
+
+
+def source_version_tags(client):
+    try:
+        refs = client.source('/git/refs/tags')
+    except syncer.SyncError as error:
+        if 'HTTP 404' in str(error):
+            return []
+        raise
+    if refs is None:
+        return []
+    syncer.require(isinstance(refs, list), 'Invalid source tag list')
+    tags = []
+    for item in refs:
+        syncer.require(isinstance(item, dict), 'Invalid source tag entry')
+        ref = item.get('ref', '')
+        if ref.startswith('refs/tags/'):
+            name = ref.removeprefix('refs/tags/')
+            if syncer.VERSION.fullmatch(name):
+                tags.append(name)
+    return tags
 
 
 def inspect_source_tree(client, release, commit, repository):
@@ -119,11 +193,22 @@ def plan_release(client, repository, tag=None, validate_only=False):
     syncer.require(not validate_only or tag, 'Validation-only planning requires a tag')
     if tag:
         syncer.names_for(tag)
-    sources = [r for r in syncer.list_pages(client, True) if not r.get('draft')]
-    selected = [r for r in sources if not tag or r.get('tag_name') == tag]
-    syncer.require(selected or not tag, 'Requested published source release not found')
+    all_source_releases = list(syncer.list_pages(client, True))
+    draft_tags = {r.get('tag_name') for r in all_source_releases if r.get('draft')}
+    sources = [r for r in all_source_releases if not r.get('draft')]
     syncer.require(len({r.get('tag_name') for r in sources}) == len(sources),
                    'Duplicate published source release tags')
+    known_release_tags = {r.get('tag_name') for r in sources} | draft_tags
+    available_tags = set(source_version_tags(client))
+    tag_candidates = ([tag] if tag in available_tags else []) if tag else sorted(available_tags)
+    synthesized = []
+    for candidate_tag in tag_candidates:
+        if candidate_tag not in known_release_tags:
+            commit = trusted_tag_commit(client, candidate_tag, repository)
+            synthesized.append(tag_release_metadata(repository, candidate_tag, commit))
+    combined = sources + synthesized
+    selected = [r for r in combined if not tag or r.get('tag_name') == tag]
+    syncer.require(selected or not tag, 'Requested published source release not found')
     targets = list(syncer.list_pages(client, False))
     if validate_only:
         syncer.require(len(selected) == 1, 'Requested release is ambiguous')
@@ -137,7 +222,7 @@ def plan_release(client, repository, tag=None, validate_only=False):
 
     syncer.require(client.token, 'Release planning requires GITHUB_TOKEN')
     floor = published_floor(client, targets)
-    for release in sources:
+    for release in combined:
         kind = release_kind(release)
         if release not in selected and kind == 'legacy':
             # A tag-specific run must still respect older source releases that
@@ -204,14 +289,18 @@ def read_bundle(directory, tag):
 
 def publish_release(client, plan, directory, repository):
     validate_plan(plan)
-    sources = [r for r in syncer.list_pages(client, True)
-               if not r.get('draft') and r.get('tag_name') == plan['tag']]
-    syncer.require(len(sources) == 1, 'Planned source release is no longer uniquely published')
-    release = sources[0]
-    kind = release_kind(release)
-    syncer.require(plan['validate_only'] or kind == 'build',
-                   'Source attachments changed after planning; preserve them and plan again')
-    commit = trusted_commit(client, release, repository, expected=plan['commit'])
+    matching = [r for r in syncer.list_pages(client, True) if r.get('tag_name') == plan['tag']]
+    syncer.require(len(matching) <= 1, 'Planned source release is no longer uniquely published')
+    if matching:
+        release = matching[0]
+        syncer.require(not release.get('draft'), 'Planned source release is a draft')
+        kind = release_kind(release)
+        syncer.require(plan['validate_only'] or kind == 'build',
+                       'Source attachments changed after planning; preserve them and plan again')
+        commit = trusted_commit(client, release, repository, expected=plan['commit'])
+    else:
+        commit = trusted_tag_commit(client, plan['tag'], repository, expected=plan['commit'])
+        release = tag_release_metadata(repository, plan['tag'], commit)
     files = read_bundle(directory, plan['tag'])
     prepared = syncer.validate_source(release, files, commit)
     verify_source_archive_identity(repository, plan['tag'], commit, files[syncer.names_for(plan['tag'])[1]])
